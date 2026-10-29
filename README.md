@@ -90,7 +90,7 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 - [x] Fixed-width integers and Montgomery multiplication
 - [ ] Trial division
 - [ ] Primality testing (Miller–Rabin, BPSW)
-- [ ] Pollard rho
+- [x] Pollard rho (Brent)
 - [ ] Pollard p−1
 - [ ] Williams p+1
 - [ ] ECM (stage 1 and stage 2)

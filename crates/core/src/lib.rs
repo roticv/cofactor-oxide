@@ -2,14 +2,16 @@
 //!
 //! The plan is a pipeline that removes small factors cheaply (trial division,
 //! p±1, ECM) before handing what is left to the quadratic sieve or GNFS.
-//! So far there is the fixed-width arithmetic in [`arith`] and trial division
-//! on `u64`, which gives the CLI and Wasm crates something to call.
+//! So far there is the fixed-width arithmetic in [`arith`], Pollard's rho in
+//! [`rho`], and trial division on `u64`, which gives the CLI and Wasm crates
+//! something to call.
 
 #![no_std]
 
 extern crate alloc;
 
 pub mod arith;
+pub mod rho;
 
 use alloc::vec::Vec;
 
