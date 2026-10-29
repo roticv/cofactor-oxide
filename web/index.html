@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cofactor-oxide</title>
+</head>
+<body>
+  <h1>cofactor-oxide</h1>
+  <form id="form">
+    <input id="n" inputmode="numeric" value="1000000016000000063" size="24">
+    <button>Factor</button>
+  </form>
+  <pre id="out"></pre>
+  <script type="module">
+    import init, { factor } from "./pkg/cofox_wasm.js";
+
+    await init();
+
+    const out = document.getElementById("out");
+    document.getElementById("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      try {
+        const n = BigInt(document.getElementById("n").value.trim());
+        out.textContent = `${n}: ${Array.from(factor(n)).join(" ")}`;
+      } catch (err) {
+        out.textContent = `error: ${err}`;
+      }
+    });
+  </script>
+</body>
+</html>
