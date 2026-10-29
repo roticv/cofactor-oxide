@@ -8,3 +8,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+num-bigint = "0.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(cofox_limb32)"] }

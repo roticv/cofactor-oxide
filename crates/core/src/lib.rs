@@ -2,14 +2,18 @@
 //!
 //! The plan is a pipeline that removes small factors cheaply (trial division,
 //! p±1, ECM) before handing what is left to the quadratic sieve or GNFS.
-//! For now only trial division on `u64` exists, so the CLI and Wasm crates
-//! have something to call.
+//! So far there is the fixed-width arithmetic in [`arith`] and trial division
+//! on `u64`, which gives the CLI and Wasm crates something to call.
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod arith;
+
 use alloc::vec::Vec;
+
+pub use arith::{Monty, Uint};
 
 /// Returns the prime factors of `n` in ascending order, with multiplicity.
 ///

@@ -4,7 +4,7 @@ Integer factorization in Rust, compiled both to a native binary and to
 WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
 
-> **Status:** early development. The workspace is set up, but the only
+> **Status:** early development. Fixed-width arithmetic is in place, but the only
 > algorithm so far is trial division on 64-bit numbers. Most of this README
 > describes the plan.
 
@@ -87,7 +87,7 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 
 ## Roadmap
 
-- [ ] Multi-precision arithmetic and Montgomery multiplication
+- [x] Fixed-width integers and Montgomery multiplication
 - [ ] Trial division
 - [ ] Primality testing (Miller–Rabin, BPSW)
 - [ ] Pollard rho
