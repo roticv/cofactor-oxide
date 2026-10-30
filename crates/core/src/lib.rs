@@ -20,6 +20,7 @@ pub mod pp1;
 pub mod prime;
 pub mod primes;
 pub mod rho;
+mod stage2;
 
 pub use arith::{Monty, Uint};
 pub use factor::{Factor, factor, factor_str};

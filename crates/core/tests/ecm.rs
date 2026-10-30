@@ -1,4 +1,4 @@
-//! Tests for ECM stage 1.
+//! Tests for ECM stages 1 and 2.
 //!
 //! The thresholds were computed in Python with affine arithmetic on
 //! `B·y² = x³ + Ax² + x` (independent of the x-only formulas being tested):
@@ -48,17 +48,60 @@ fn stage_1_thresholds() {
     for (p, sigma, threshold, order) in THRESHOLDS {
         let n = times_m89(p);
         assert_eq!(
-            ecm_curve(&n, sigma, threshold),
+            ecm_curve(&n, sigma, threshold, threshold),
             Some(U::from_u64(p)),
             "p = {p}, sigma = {sigma}, order {order}, B1 = {threshold}"
         );
         assert_eq!(
-            ecm_curve(&n, sigma, threshold - 1),
+            ecm_curve(&n, sigma, threshold - 1, threshold - 1),
             None,
             "p = {p}, sigma = {sigma}, order {order}, B1 = {}",
             threshold - 1
         );
     }
+}
+
+/// (p, sigma, B1 needed, prime r that stage 2 must cover, point order)
+const STAGE_2: [(u64, u64, u64, u64, &str); 4] = [
+    // r < D/2 = 1155, so it is caught at giant step k = 0.
+    (100019, 10, 3, 1039, "2·3·1039"),
+    (131071, 156, 9, 1811, "2·3²·1811"),
+    (131071, 87, 4, 2729, "2²·3·2729"),
+    // r rounds to giant step k = 5, so with B1 = 3 stage 2 walks the giant
+    // steps from k = 0. The step to k = 2 has to be a doubling: adding with
+    // the identity as the difference breaks the x-only curve formulas.
+    (131071, 148, 3, 10957, "3·10957"),
+];
+
+#[test]
+fn stage_2_thresholds() {
+    for (p, sigma, b1, r, order) in STAGE_2 {
+        let n = times_m89(p);
+        let found = Some(U::from_u64(p));
+        let at = |b1, b2| ecm_curve(&n, sigma, b1, b2);
+        // Stage 1 alone can't do it, stage 2 up to r can.
+        assert_eq!(at(b1, b1), None, "p = {p}, order {order}, stage 1 only");
+        assert_eq!(at(b1, r), found, "p = {p}, order {order}, B2 = {r}");
+        assert_eq!(
+            at(b1, r - 1),
+            None,
+            "p = {p}, order {order}, B2 = {}",
+            r - 1
+        );
+        // Stage 2 covers only one prime above B1, so a too-small B1 can't
+        // be made up for with a larger B2.
+        assert_eq!(
+            at(b1 - 1, 100_000),
+            None,
+            "p = {p}, order {order}, B1 = {}",
+            b1 - 1
+        );
+    }
+    // A larger B1 changes which giant step stage 2 starts from (k = 1 and
+    // k = 2 here), not what it finds.
+    let n = times_m89(131071);
+    assert_eq!(ecm_curve(&n, 148, 2000, 20_000), Some(U::from_u64(131071)));
+    assert_eq!(ecm_curve(&n, 148, 5000, 20_000), Some(U::from_u64(131071)));
 }
 
 #[test]
@@ -67,8 +110,8 @@ fn replay_separates_factors() {
     // B1 = 100 both happen inside the first chunk, so its GCD is n and the
     // replay finds 131071 first.
     let n = product(131071, 100019);
-    assert_eq!(ecm_curve(&n, 8, 50), Some(U::from_u64(131071)));
-    assert_eq!(ecm_curve(&n, 8, 100), Some(U::from_u64(131071)));
+    assert_eq!(ecm_curve(&n, 8, 50, 50), Some(U::from_u64(131071)));
+    assert_eq!(ecm_curve(&n, 8, 100, 100), Some(U::from_u64(131071)));
 }
 
 #[test]
@@ -76,17 +119,20 @@ fn failed_curve_setup_is_a_factor() {
     // sigma = p makes Suyama's denominator divisible by p, so building the
     // curve fails with gcd = p, which is a factor.
     let n = times_m89(100003);
-    assert_eq!(ecm_curve(&n, 100003, 1000), Some(U::from_u64(100003)));
+    assert_eq!(ecm_curve(&n, 100003, 1000, 1000), Some(U::from_u64(100003)));
 }
 
 #[test]
 fn edge_cases() {
-    assert_eq!(ecm_curve(&U::from_u64(4), 6, 100), Some(U::from_u64(2)));
-    assert_eq!(ecm_curve(&U::from_u64(2), 6, 100), None);
-    assert_eq!(ecm_curve(&U::ONE, 6, 100), None);
-    assert_eq!(ecm_curve(&U::ZERO, 6, 100), None);
+    assert_eq!(
+        ecm_curve(&U::from_u64(4), 6, 100, 100),
+        Some(U::from_u64(2))
+    );
+    assert_eq!(ecm_curve(&U::from_u64(2), 6, 100, 100), None);
+    assert_eq!(ecm_curve(&U::ONE, 6, 100, 100), None);
+    assert_eq!(ecm_curve(&U::ZERO, 6, 100, 100), None);
     // A prime: stage 1 reaches infinity mod p only together with mod n.
-    assert_eq!(ecm_curve(&m89(), 6, 1000), None);
+    assert_eq!(ecm_curve(&m89(), 6, 1000, 1000), None);
 }
 
 #[test]
@@ -96,6 +142,10 @@ fn many_curves_find_what_one_misses() {
     // a few hundred has a 2000-smooth order.
     let p = 941_368_429_471_859;
     let n = times_m89(p);
-    assert_eq!(ecm_curve(&n, 6, 2000), None);
-    assert_eq!(ecm(&n, 2000, 500, 6), Some(U::from_u64(p)));
+    assert_eq!(ecm_curve(&n, 6, 2000, 2000), None);
+    assert_eq!(ecm(&n, 2000, 2000, 500, 6), Some(U::from_u64(p)));
+    // Stage 2 makes each curve far likelier to succeed, so the first
+    // success comes much sooner than the 316th curve that stage 1 alone
+    // needs.
+    assert_eq!(ecm(&n, 2000, 200_000, 100, 6), Some(U::from_u64(p)));
 }
