@@ -19,6 +19,7 @@ pub mod pm1;
 pub mod pp1;
 pub mod prime;
 pub mod primes;
+pub mod qs;
 pub mod rho;
 mod stage2;
 
