@@ -4,9 +4,9 @@ Integer factorization in Rust, compiled both to a native binary and to
 WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
 
-> **Status:** early development. Fixed-width arithmetic is in place, but the only
-> algorithm so far is trial division on 64-bit numbers. Most of this README
-> describes the plan.
+> **Status:** early development. The CLI factors numbers of up to 1024 bits
+> using trial division, Pollard rho and the BPSW primality test, which handles
+> factors of up to about 12 digits. The rest of the pipeline below is planned.
 
 ## Goals
 
@@ -24,14 +24,16 @@ it can find, and whatever composite is left goes to the next stage.
 
 | Stage | Algorithm | Good at |
 | ----- | --------- | ------- |
-| 1 | **Trial division** | Tiny primes (up to roughly 10⁶) |
-| 2 | **Pollard p−1** / **Williams p+1** | Primes *p* where *p−1* or *p+1* is smooth |
-| 3 | **ECM** (Lenstra elliptic curve method) | Primes up to about 30–40 digits, whatever the size of *n* |
-| 4 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
-| 5 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
+| 1 | **Trial division** | Tiny primes (currently below 4096) |
+| 2 | **Pollard rho** (Brent's variant) | Primes up to about 12 digits |
+| 3 | **Pollard p−1** / **Williams p+1** | Primes *p* where *p−1* or *p+1* is smooth |
+| 4 | **ECM** (Lenstra elliptic curve method) | Primes up to about 30–40 digits, whatever the size of *n* |
+| 5 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
+| 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
 
-A primality test (such as BPSW) runs between stages so that nothing is spent on
-cofactors that are already prime.
+The Baillie–PSW primality test runs between stages so that nothing is spent on
+cofactors that are already prime. No composite is known to pass it, and none
+exists below 2⁶⁴.
 
 The digit ranges are rough. The real crossover points will be measured once
 the implementations exist, and they will differ between native and Wasm.
@@ -72,9 +74,14 @@ Native:
 
 ```sh
 cargo build --release
-./target/release/cofox 1000000016000000063
+./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561
 # 1000000016000000063: 1000000007 1000000009
+# 1427247692705959880439315947500961989719490561: (1427247692705959880439315947500961989719490561)
 ```
+
+A factor in parentheses is composite, but the current algorithms can't split
+it. The second number is (2⁶¹−1)(2⁸⁹−1), whose factors are too large for
+rho.
 
 WebAssembly (needs the `wasm32-unknown-unknown` target and
 [wasm-pack](https://rustwasm.github.io/wasm-pack/)):
@@ -88,15 +95,15 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 ## Roadmap
 
 - [x] Fixed-width integers and Montgomery multiplication
-- [ ] Trial division
-- [ ] Primality testing (Miller–Rabin, BPSW)
+- [x] Trial division
+- [x] Primality testing (Miller–Rabin, BPSW)
 - [x] Pollard rho (Brent)
 - [ ] Pollard p−1
 - [ ] Williams p+1
 - [ ] ECM (stage 1 and stage 2)
 - [ ] Self-initializing quadratic sieve (SIQS)
 - [ ] GNFS
-- [ ] Native CLI
+- [x] Native CLI
 - [ ] Wasm bindings and browser demo
 - [ ] Web Worker parallelism in the browser
 

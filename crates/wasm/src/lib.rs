@@ -2,11 +2,13 @@
 
 use wasm_bindgen::prelude::*;
 
-/// Factors `n`, returning its prime factors in ascending order.
+/// Factors `n`, given as a decimal string, returning its factors in
+/// ascending order as decimal strings.
 ///
-/// `n` crosses the JS boundary as a `BigInt`, since a JS `number` cannot
-/// represent every `u64`.
+/// Strings are used both ways because JS numbers can't hold large integers.
+/// A composite that couldn't be split is wrapped in parentheses.
 #[wasm_bindgen]
-pub fn factor(n: u64) -> Vec<u64> {
-    cofox_core::factor(n)
+pub fn factor(n: &str) -> Result<Vec<String>, JsError> {
+    let factors = cofox_core::factor_str(n.trim())?;
+    Ok(factors.iter().map(ToString::to_string).collect())
 }

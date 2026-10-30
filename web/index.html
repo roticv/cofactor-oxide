@@ -21,8 +21,8 @@
     document.getElementById("form").addEventListener("submit", (e) => {
       e.preventDefault();
       try {
-        const n = BigInt(document.getElementById("n").value.trim());
-        out.textContent = `${n}: ${Array.from(factor(n)).join(" ")}`;
+        const n = document.getElementById("n").value.trim();
+        out.textContent = `${n}: ${factor(n).join(" ")}`;
       } catch (err) {
         out.textContent = `error: ${err}`;
       }

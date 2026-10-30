@@ -103,6 +103,13 @@ fn check_uint<const L: usize>(seed: u64) {
         assert_eq!(to_big(&q), &ab / d);
         assert_eq!(BigUint::from(rem), &ab % d);
 
+        if !b.is_zero() {
+            let (q, rem) = a.div_rem(&b);
+            assert_eq!(to_big(&q), &ab / &bb, "{a:?} / {b:?}");
+            assert_eq!(to_big(&rem), &ab % &bb, "{a:?} % {b:?}");
+        }
+        assert_eq!(to_big(&a.isqrt()), ab.sqrt(), "isqrt({a:?})");
+
         assert_eq!(a.to_string(), ab.to_string());
         assert_eq!(a.to_string().parse::<Uint<L>>(), Ok(a));
     }
@@ -156,6 +163,14 @@ fn check_monty<const L: usize>(seed: u64) {
             assert_eq!(
                 to_big(&monty.from_monty(&monty.sub(&am, &bm))),
                 (&nb + &ab - &bb) % &nb
+            );
+
+            let two = BigUint::from(2u8);
+            assert_eq!((to_big(&monty.half(&am)) * &two) % &nb, to_big(&am), "half");
+            assert_eq!(
+                (to_big(&monty.neg(&am)) + to_big(&am)) % &nb,
+                BigUint::ZERO,
+                "neg"
             );
 
             let e = rng.uint::<2>();

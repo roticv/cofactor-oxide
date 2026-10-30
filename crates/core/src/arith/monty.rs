@@ -158,6 +158,26 @@ impl<const LIMBS: usize> Monty<LIMBS> {
         }
     }
 
+    /// Modular negation. Works the same in or out of Montgomery form.
+    pub fn neg(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
+        self.sub(&Uint::ZERO, a)
+    }
+
+    /// Computes `a / 2 mod n`. Works the same in or out of Montgomery form.
+    pub fn half(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
+        if !a.is_odd() {
+            return *a >> 1;
+        }
+        // n is odd, so a + n is even. The sum can carry out of the top limb,
+        // so put the carry back in as the new top bit after shifting.
+        let (sum, carry) = a.overflowing_add(&self.modulus);
+        let mut limbs = *(sum >> 1).as_limbs();
+        if carry {
+            limbs[LIMBS - 1] |= 1 << (LIMB_BITS - 1);
+        }
+        Uint::from_limbs(limbs)
+    }
+
     /// Computes `base^exp`. `base` and the result are in Montgomery form;
     /// `exp` is an ordinary integer of any width.
     pub fn pow<const E: usize>(&self, base: &Uint<LIMBS>, exp: &Uint<E>) -> Uint<LIMBS> {

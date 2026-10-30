@@ -8,18 +8,22 @@ fn main() -> ExitCode {
     }
 
     let mut status = ExitCode::SUCCESS;
+    let mut unsplit = false;
     for arg in &args {
-        match arg.parse::<u64>() {
-            Ok(n) => {
-                let factors: Vec<String> =
-                    cofox_core::factor(n).iter().map(u64::to_string).collect();
-                println!("{n}: {}", factors.join(" "));
+        match cofox_core::factor_str(arg) {
+            Ok(factors) => {
+                unsplit |= factors.iter().any(|f| !f.is_prime);
+                let factors: Vec<String> = factors.iter().map(ToString::to_string).collect();
+                println!("{arg}: {}", factors.join(" "));
             }
             Err(e) => {
                 eprintln!("cofox: invalid number {arg:?}: {e}");
                 status = ExitCode::FAILURE;
             }
         }
+    }
+    if unsplit {
+        eprintln!("cofox: factors in parentheses are composite but could not be split");
     }
     status
 }

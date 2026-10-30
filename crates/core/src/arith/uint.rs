@@ -200,6 +200,54 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         (Self { limbs }, rem)
     }
 
+    /// Divides by `divisor`, returning `(quotient, remainder)`.
+    ///
+    /// This is binary long division, one bit per step. It's simple rather
+    /// than fast, so keep it out of inner loops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `divisor` is zero.
+    pub fn div_rem(&self, divisor: &Self) -> (Self, Self) {
+        assert!(!divisor.is_zero(), "division by zero");
+        let mut q = Self::ZERO;
+        let mut r = Self::ZERO;
+        for i in (0..self.bits()).rev() {
+            // r < divisor, so 2r + 1 fits in one more bit than the type has.
+            // The bit shifted out is kept in `carry`.
+            let carry = r.bit(Self::BITS - 1);
+            r = r << 1;
+            r.limbs[0] |= self.bit(i) as Limb;
+            if carry || r >= *divisor {
+                r = r.wrapping_sub(divisor);
+                q.limbs[(i / LIMB_BITS) as usize] |= 1 << (i % LIMB_BITS);
+            }
+        }
+        (q, r)
+    }
+
+    /// Integer square root: the largest `s` with `s² ≤ self`.
+    pub fn isqrt(&self) -> Self {
+        if self.is_zero() {
+            return Self::ZERO;
+        }
+        // Digit-by-digit method in base 4, which needs only shifts, adds
+        // and compares.
+        let mut x = *self;
+        let mut root = Self::ZERO;
+        let mut bit = Self::ONE << ((self.bits() - 1) & !1);
+        while !bit.is_zero() {
+            let trial = root.wrapping_add(&bit);
+            root = root >> 1;
+            if x >= trial {
+                x = x.wrapping_sub(&trial);
+                root = root.wrapping_add(&bit);
+            }
+            bit = bit >> 2;
+        }
+        root
+    }
+
     /// Greatest common divisor, using the binary GCD algorithm.
     ///
     /// `gcd(0, x)` is `x`.

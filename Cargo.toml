@@ -15,3 +15,8 @@ cofox-core = { path = "crates/core" }
 [profile.release]
 lto = true
 codegen-units = 1
+
+# The arithmetic is unusably slow unoptimized, so optimize it even in dev and
+# test builds. Debug assertions and overflow checks stay on.
+[profile.dev.package.cofox-core]
+opt-level = 3
