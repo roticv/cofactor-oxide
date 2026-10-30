@@ -1,7 +1,9 @@
 //! Tests for the factoring pipeline.
 
 use cofox_core::prime::is_prime;
-use cofox_core::{Config, Factor, Uint, factor, factor_str, factor_str_with};
+use std::ops::ControlFlow;
+
+use cofox_core::{Config, Factor, Progress, Uint, factor, factor_str, factor_str_with};
 
 fn factor_u64(n: u64) -> Vec<u64> {
     factor(&Uint::<2>::from_u64(n))
@@ -11,6 +13,15 @@ fn factor_u64(n: u64) -> Vec<u64> {
             f.value.to_u64().unwrap()
         })
         .collect()
+}
+
+/// Factors with the given ECM level and no progress callback.
+fn with_ecm(n: &str, ecm_digits: u32) -> Vec<Factor<String>> {
+    let config = Config {
+        ecm_digits,
+        ..Config::default()
+    };
+    factor_str_with(n, &config, |_| ControlFlow::Continue(())).unwrap()
 }
 
 fn primes(values: &[&str]) -> Vec<Factor<String>> {
@@ -105,11 +116,7 @@ fn needs_ecm() {
     ] {
         let n = times_m89(p);
         assert_eq!(factor_str(&n).unwrap(), primes(&[p, M89]), "p = {p}");
-        let without_ecm = Config { ecm_digits: 0 };
-        assert!(
-            !factor_str_with(&n, &without_ecm).unwrap()[0].is_prime,
-            "p = {p} found without ECM"
-        );
+        assert!(!with_ecm(&n, 0)[0].is_prime, "p = {p} found without ECM");
     }
 }
 
@@ -120,11 +127,8 @@ fn ecm_levels_are_probabilistic() {
     // curves miss this 20-digit prime, and the next level finds it.
     let p = "98936812917358800691";
     let n = times_m89(p);
-    assert!(!factor_str_with(&n, &Config { ecm_digits: 20 }).unwrap()[0].is_prime);
-    assert_eq!(
-        factor_str_with(&n, &Config { ecm_digits: 25 }).unwrap(),
-        primes(&[p, M89])
-    );
+    assert!(!with_ecm(&n, 20)[0].is_prime);
+    assert_eq!(with_ecm(&n, 25), primes(&[p, M89]));
 }
 
 #[test]
@@ -133,7 +137,7 @@ fn ecm_beyond_its_level() {
     // and with these curves it finds 734123452237455403272119.
     let n = "875629172352184491588547325680801513040676851112599077";
     assert_eq!(
-        factor_str_with(n, &Config { ecm_digits: 20 }).unwrap(),
+        with_ecm(n, 20),
         primes(&[
             "734123452237455403272119",
             "1192754665013696431541079322883"
@@ -142,12 +146,103 @@ fn ecm_beyond_its_level() {
 }
 
 #[test]
+fn reports_progress() {
+    // The 15-digit level's 30 curves miss 941368429471859, and the 20-digit
+    // level's fourth curve (sigma = 39) finds it.
+    let n = times_m89("941368429471859");
+    let bits = n.parse::<Uint<8>>().unwrap().bits();
+    let mut events = Vec::new();
+    let factors = factor_str_with(&n, &Config::default(), |event| {
+        events.push(event);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert_eq!(factors, primes(&["941368429471859", M89]));
+    let method = |method| Progress::Method { method, bits };
+    assert_eq!(events[..3], [method("rho"), method("p-1"), method("p+1")]);
+    let ecm = |digits, done, total| Progress::Ecm {
+        bits,
+        digits,
+        done,
+        total,
+    };
+    // Every curve is reported, except the one that finds p. The two prime
+    // pieces then need no work at all.
+    let expected: Vec<_> = (0..=30)
+        .map(|done| ecm(15, done, 30))
+        .chain((0..=3).map(|done| ecm(20, done, 100)))
+        .collect();
+    assert_eq!(events[3..], expected);
+}
+
+#[test]
+fn stops_when_asked() {
+    // The quick rho run finds 1000003, then the 20-digit prime needs ECM,
+    // which is stopped before its first curve. The prime piece is still
+    // reported as prime.
+    let rest = times_m89("11888570237800257629");
+    let n = rest
+        .parse::<Uint<8>>()
+        .unwrap()
+        .widening_mul(&Uint::from_u64(1000003))
+        .0
+        .to_string();
+    let factors = factor_str_with(&n, &Config::default(), |event| match event {
+        Progress::Ecm { .. } => ControlFlow::Break(()),
+        Progress::Method { .. } => ControlFlow::Continue(()),
+    })
+    .unwrap();
+    let unsplit = Factor {
+        value: rest,
+        is_prime: false,
+    };
+    assert_eq!(factors, [primes(&["1000003"])[0].clone(), unsplit]);
+}
+
+#[test]
+fn workers_share_the_curves() {
+    let n = times_m89("941368429471859");
+    let mut found_by = [false; 4];
+    let mut totals = [0; 2];
+    for worker in 0..4 {
+        let config = Config {
+            worker,
+            workers: 4,
+            ..Config::default()
+        };
+        let factors = factor_str_with(&n, &config, |event| {
+            if let Progress::Ecm {
+                digits,
+                done: 0,
+                total,
+                ..
+            } = event
+            {
+                totals[(digits / 5 - 3) as usize] += total;
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        if factors.iter().all(|f| f.is_prime) {
+            assert_eq!(factors, primes(&["941368429471859", M89]));
+            found_by[worker as usize] = true;
+        }
+    }
+    // The four shares add up to the 30 curves of the 15-digit level and the
+    // 100 of the 20-digit level, which every worker reaches. Worker 3 has
+    // the curve that finds p in a single run (sigma = 39); the others may
+    // find it with curves of their own.
+    assert_eq!(totals, [30, 100]);
+    assert!(found_by[3]);
+}
+
+#[test]
 fn unsplit_composite() {
     // Two 40-digit safe primes (q = 2r + 1, r prime): too big for rho, q − 1
     // has a huge prime factor so p−1 can't find them, and ECM at 20 digits
     // has no realistic chance.
     let n = "22402621473499677702312787220798894771372529738736380992481737381422651598174113";
-    let factors = factor_str_with(n, &Config { ecm_digits: 20 }).unwrap();
+    let factors = with_ecm(n, 20);
     assert_eq!(
         factors,
         [Factor {

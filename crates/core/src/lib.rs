@@ -23,4 +23,4 @@ pub mod rho;
 mod stage2;
 
 pub use arith::{Monty, Uint};
-pub use factor::{Config, Factor, factor, factor_str, factor_str_with, factor_with};
+pub use factor::{Config, Factor, Progress, factor, factor_str, factor_str_with, factor_with};

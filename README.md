@@ -9,9 +9,10 @@ short, which is also the name of the command-line tool.
 
 > **Status:** early development. The CLI factors numbers of up to 1024 bits
 > using trial division, Pollard rho, Pollard p−1, Williams p+1, ECM and the
-> BPSW primality test. That finds factors up to about 20 digits by default
-> (more with `--ecm`), and larger ones when p−1 or p+1 is smooth. The
-> quadratic sieve and GNFS are planned.
+> BPSW primality test. That finds factors up to about 25 digits by default
+> (more with `--ecm`), and larger ones when p−1 or p+1 is smooth. ECM runs
+> on every core, natively and in the browser. The quadratic sieve and GNFS
+> are planned.
 
 ## Goals
 
@@ -32,7 +33,7 @@ it can find, and whatever composite is left goes to the next stage.
 | 1 | **Trial division** | Tiny primes (currently below 4096) |
 | 2 | **Pollard rho** (Brent's variant) | Primes up to about 8 digits, in a quick first run |
 | 3 | **Pollard p−1** and **Williams p+1** (B1 = 5·10⁴, B2 = 5·10⁶) | Primes *p* of any size where *p−1* or *p+1* is smooth |
-| 4 | **ECM** (Lenstra elliptic curve method, levels of 15 to 40 digits; 20 by default) | Primes up to about 30–40 digits, whatever the size of *n* |
+| 4 | **ECM** (Lenstra elliptic curve method, levels of 15 to 40 digits; 25 by default) | Primes up to about 30–40 digits, whatever the size of *n* |
 | 5 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
 | 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
 
@@ -48,6 +49,11 @@ prime of that size: 30 curves with B1 = 2000 for 15 digits, 100 with
 B1 = 11000 for 20, and so on, with B2 = 100·B1. So a level finds a prime of
 its own size most of the time, and smaller primes almost always. Each level
 takes about four times as long as the one before.
+
+The curves are independent, so the CLI splits them across one thread per
+core and the browser across up to eight Web Workers. On a 10-core machine,
+giving up on a 100-digit composite with no factor below 25 digits takes about
+7 seconds natively.
 
 The digit ranges for QS and GNFS are rough. The real crossover points will be
 measured once the implementations exist, and they will differ between native
@@ -101,8 +107,9 @@ p−1 finds 2⁶¹−1 because 2⁶¹−2 has only small prime factors. The thir
 20-digit prime factor whose p−1 and p+1 aren't smooth, so it takes ECM. The
 fourth is a product of two 40-digit primes, too large for ECM: a factor in
 parentheses is composite, but the current algorithms can't split it.
-`--ecm 25` (or 30, …) searches for larger factors, at about four times the
-cost per level.
+`--ecm 30` (or 35, 40) searches for larger factors, at about four times the
+cost per level, and `--threads N` sets the number of threads. While ECM runs,
+a status line on stderr shows the level and the curves done so far.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
@@ -138,7 +145,8 @@ Every push to `main` also builds the demo and deploys it to GitHub Pages at
 - [ ] GNFS
 - [x] Native CLI
 - [x] Wasm bindings and browser demo
-- [ ] Web Worker parallelism in the browser
+- [x] Parallel ECM: threads in the CLI, Web Workers in the browser
+- [x] Progress reporting and cancellation
 
 ## License
 

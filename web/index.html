@@ -187,6 +187,7 @@
       border-color: var(--border);
     }
     .ghost:hover { color: var(--text); border-color: var(--muted); }
+    .deeper { margin-top: 12px; }
 
     section.about { margin: 44px 0 0; }
     h2 { font-size: 18px; margin: 0 0 12px; letter-spacing: -0.01em; }
@@ -287,7 +288,7 @@
           <li><b>Williams p+1</b><span class="badge done">done</span>
             <span class="desc">The same idea for primes p where p+1 has only small factors, using Lucas sequences.</span></li>
           <li><b>Elliptic curve method</b><span class="badge done">done</span>
-            <span class="desc">Montgomery curves with a two-stage search, in levels for 15- and 20-digit factors. Each curve is a fresh chance, so larger factors turn up sometimes too.</span></li>
+            <span class="desc">Montgomery curves with a two-stage search, in levels for factors of up to 25 digits, shared across Web Workers. Each curve is a fresh chance, so larger factors turn up sometimes too.</span></li>
           <li><b>Quadratic sieve, then number field sieve</b><span class="badge">planned</span>
             <span class="desc">General-purpose methods for hard composites.</span></li>
         </ul>
@@ -315,17 +316,75 @@
     const go = document.getElementById("go");
     const results = document.getElementById("results");
 
-    let worker = null;
+    // ECM runs up to the level for primes of this many digits, and can be
+    // pushed up to the highest level after a composite is left unsplit.
+    const ECM_DIGITS = 25;
+    const ECM_MAX_DIGITS = 40;
+    // One worker per core, up to 8. Each repeats the cheap stages and takes
+    // its share of the ECM curves.
+    const WORKERS = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
+
+    const workers = [];
     let nextId = 0;
     let pending = null;
 
-    function startWorker() {
-      worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+    function startWorker(index) {
+      const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
       worker.onmessage = (event) => {
-        if (pending && event.data.id === pending.id) finish(event.data);
+        if (pending && event.data.id === pending.id) handle(index, event.data);
       };
+      workers[index] = worker;
     }
-    startWorker();
+    for (let i = 0; i < WORKERS; i++) startWorker(i);
+
+    // Stops the workers that are still busy. Idle ones are kept.
+    function stopBusy() {
+      for (let i = 0; i < WORKERS; i++) {
+        if (pending.results[i] === undefined) {
+          workers[i].terminate();
+          startWorker(i);
+        }
+      }
+    }
+
+    function handle(index, data) {
+      if (data.progress) {
+        pending.progress[index] = data.progress;
+        pending.label.textContent = describe(pending.progress);
+        return;
+      }
+      pending.results[index] = data;
+      if (data.error) return finish(data);
+      // The first run to end with every factor prime has the answer.
+      if (data.factors.every((f) => f.prime)) {
+        stopBusy();
+        return finish(data);
+      }
+      // Otherwise wait for all of them, and take the one that split most.
+      const results = Object.values(pending.results);
+      if (results.length === WORKERS) {
+        const best = results.reduce((a, b) => (b.factors.length > a.factors.length ? b : a));
+        finish(best);
+      }
+    }
+
+    // Summarizes the workers' progress: during ECM, the curves done at the
+    // highest level any worker has reached; otherwise the current method.
+    function describe(progress) {
+      const events = progress.filter(Boolean);
+      const ecm = events.filter((e) => e.method === "ecm");
+      if (ecm.length > 0) {
+        const top = ecm.reduce((a, b) =>
+          b.digits > a.digits || (b.digits === a.digits && b.bits > a.bits) ? b : a);
+        const level = ecm.filter((e) => e.digits === top.digits && e.bits === top.bits);
+        const done = level.reduce((sum, e) => sum + e.done, 0);
+        const total = level.reduce((sum, e) => sum + e.total, 0);
+        return `ECM, ${top.digits}-digit level: ${done} of ${total} curves on a ${top.bits}-bit composite…`;
+      }
+      const names = { rho: "Pollard rho", "p-1": "Pollard p−1", "p+1": "Williams p+1" };
+      const first = events[0];
+      return first ? `${names[first.method]} on a ${first.bits}-bit composite…` : "Factoring…";
+    }
 
     // Parses and evaluates an integer expression with BigInt: + - * ^,
     // parentheses, and implicit multiplication like (a)(b).
@@ -412,7 +471,7 @@
       results.prepend(card);
     }
 
-    function submit(source) {
+    function submit(source, ecmDigits = ECM_DIGITS) {
       if (pending) return;
       let n;
       try {
@@ -440,19 +499,20 @@
       const timer = setInterval(() => {
         time.textContent = formatTime(performance.now() - start);
       }, 100);
-      pending = { id, n, card, working, time, timer };
+      pending = { id, source, ecmDigits, n, card, working, label, time, timer, start, progress: [], results: {} };
       go.disabled = true;
 
       cancel.onclick = () => {
-        worker.terminate();
-        startWorker();
+        stopBusy();
         finish({ id, cancelled: true });
       };
-      worker.postMessage({ id, n: n.toString() });
+      workers.forEach((worker, index) => {
+        worker.postMessage({ id, n: n.toString(), ecmDigits, worker: index, workers: WORKERS });
+      });
     }
 
     function finish(data) {
-      const { n, card, working, time, timer } = pending;
+      const { source, ecmDigits, n, card, working, time, timer, start } = pending;
       clearInterval(timer);
       pending = null;
       go.disabled = false;
@@ -468,7 +528,7 @@
         card.append(el("p", "note warn", data.error));
         return;
       }
-      time.textContent = formatTime(data.ms);
+      time.textContent = formatTime(performance.now() - start);
 
       const { factors } = data;
       const list = el("div", "factors");
@@ -497,8 +557,17 @@
       if (factors.length === 1 && factors[0].prime) {
         card.append(el("p", "note ok", "Prime (Baillie–PSW)."));
       } else if (composites > 0) {
-        card.append(el("p", "note warn",
-          "The dashed factor is composite, but its prime factors are out of reach so far: ECM here looks for factors up to about 20 digits. The quadratic sieve will handle these once it's implemented."));
+        const note = el("p", "note warn",
+          `The dashed factor is composite, but ECM found no factor of up to about ${ecmDigits} digits. The quadratic sieve will handle these once it's implemented.`);
+        card.append(note);
+        if (ecmDigits < ECM_MAX_DIGITS) {
+          const deeper = el("button", "ghost", `Search for ${ecmDigits + 5}-digit factors (about 4× longer)`);
+          deeper.type = "button";
+          deeper.onclick = () => submit(source, ecmDigits + 5);
+          const row = el("div", "deeper");
+          row.append(deeper);
+          card.append(row);
+        }
       } else if (factors.length > 0 && product === n) {
         card.append(el("p", "note ok", "Fully factored. The product of the factors matches."));
       }
