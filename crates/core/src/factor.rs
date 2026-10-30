@@ -1,5 +1,5 @@
-//! The factoring pipeline: trial division, then Pollard's rho and p−1 on
-//! whatever composite remains, with BPSW deciding when a piece is prime.
+//! The factoring pipeline: trial division, then Pollard's rho, p−1 and p+1
+//! on whatever composite remains, with BPSW deciding when a piece is prime.
 
 use core::fmt;
 
@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use crate::arith::{Limb, ParseUintError, Uint};
 use crate::pm1::pollard_pm1;
+use crate::pp1::williams_pp1;
 use crate::prime::is_prime;
 use crate::rho::pollard_rho;
 
@@ -22,6 +23,13 @@ const QUICK_RHO_STEPS: u64 = 1 << 16;
 /// Stage 1 and stage 2 bounds for p−1.
 const PM1_B1: u64 = 50_000;
 const PM1_B2: u64 = 5_000_000;
+
+/// Bounds and seeds for p+1. The seeds' A² − 4 values (5 and 12 = 4·3) have
+/// different square-free parts, so each prime gets two independent chances
+/// of landing in its group of order p + 1.
+const PP1_B1: u64 = 50_000;
+const PP1_B2: u64 = 5_000_000;
+const PP1_SEEDS: [u64; 2] = [3, 4];
 
 /// Polynomials `x² + c` tried by rho before giving up on a composite.
 const RHO_ATTEMPTS: u64 = 3;
@@ -102,11 +110,16 @@ pub fn factor<const LIMBS: usize>(n: &Uint<LIMBS>) -> Vec<Factor<Uint<LIMBS>>> {
             factors.push(prime(m));
             continue;
         }
-        // Cheapest first: a short rho run for small factors, then p−1 for
-        // factors of any size whose p − 1 is smooth, then the full rho
-        // budget.
+        // Cheapest first: a short rho run for small factors, then p−1 and
+        // p+1 for factors of any size whose p − 1 or p + 1 is smooth, then
+        // the full rho budget.
         let found = pollard_rho(&m, 1, QUICK_RHO_STEPS)
             .or_else(|| pollard_pm1(&m, PM1_B1, PM1_B2))
+            .or_else(|| {
+                PP1_SEEDS
+                    .iter()
+                    .find_map(|&seed| williams_pp1(&m, seed, PP1_B1, PP1_B2))
+            })
             .or_else(|| (1..=RHO_ATTEMPTS).find_map(|c| pollard_rho(&m, c, RHO_STEPS)));
         match found {
             Some(g) => {

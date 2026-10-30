@@ -8,9 +8,9 @@ WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
 
 > **Status:** early development. The CLI factors numbers of up to 1024 bits
-> using trial division, Pollard rho, Pollard p−1 and the BPSW primality test.
-> That finds any factor up to about 12 digits, and larger ones when p−1 is
-> smooth. The rest of the pipeline below is planned.
+> using trial division, Pollard rho, Pollard p−1, Williams p+1 and the BPSW
+> primality test. That finds any factor up to about 12 digits, and larger
+> ones when p−1 or p+1 is smooth. The rest of the pipeline below is planned.
 
 ## Goals
 
@@ -30,7 +30,7 @@ it can find, and whatever composite is left goes to the next stage.
 | ----- | --------- | ------- |
 | 1 | **Trial division** | Tiny primes (currently below 4096) |
 | 2 | **Pollard rho** (Brent's variant) | Primes up to about 12 digits |
-| 3 | **Pollard p−1** (B1 = 5·10⁴, B2 = 5·10⁶) / **Williams p+1** | Primes *p* of any size where *p−1* or *p+1* is smooth |
+| 3 | **Pollard p−1** and **Williams p+1** (B1 = 5·10⁴, B2 = 5·10⁶) | Primes *p* of any size where *p−1* or *p+1* is smooth |
 | 4 | **ECM** (Lenstra elliptic curve method) | Primes up to about 30–40 digits, whatever the size of *n* |
 | 5 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
 | 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
@@ -118,7 +118,7 @@ Every push to `main` also builds the demo and deploys it to GitHub Pages at
 - [x] Primality testing (Miller–Rabin, BPSW)
 - [x] Pollard rho (Brent)
 - [x] Pollard p−1 (two stages)
-- [ ] Williams p+1
+- [x] Williams p+1 (two stages, baby-step giant-step stage 2)
 - [ ] ECM (stage 1 and stage 2)
 - [ ] Self-initializing quadratic sieve (SIQS)
 - [ ] GNFS

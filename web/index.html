@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>cofox · factor integers in your browser</title>
-  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho, Pollard p−1 and BPSW, running entirely in your browser.">
+  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho, Pollard p−1, Williams p+1 and BPSW, running entirely in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23b4532a'/%3E%3Cpath d='M10 10l12 12M22 10L10 22' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -259,6 +259,7 @@
           <button type="button" class="chip-btn" data-n="4294967291*(2^127-1)">4294967291·(2^127-1)</button>
           <button type="button" class="chip-btn" data-n="10^100+267">10^100+267</button>
           <button type="button" class="chip-btn" data-n="(2^61-1)(2^89-1)">(2^61-1)(2^89-1)</button>
+          <button type="button" class="chip-btn" data-n="12398971716763562207922052360542852654532080813656624450549831">smooth p+1</button>
           <button type="button" class="chip-btn" data-n="875629172352184491588547325680801513040676851112599077">two safe primes</button>
         </div>
       </form>
@@ -282,8 +283,8 @@
             <span class="desc">Decides when to stop. No composite is known to pass it.</span></li>
           <li><b>Pollard p−1</b><span class="badge done">done</span>
             <span class="desc">Finds primes p of any size when p−1 has only small factors: all up to 50,000, plus one up to 5 million.</span></li>
-          <li><b>Williams p+1</b><span class="badge">planned</span>
-            <span class="desc">The same idea for primes p where p+1 has only small factors.</span></li>
+          <li><b>Williams p+1</b><span class="badge done">done</span>
+            <span class="desc">The same idea for primes p where p+1 has only small factors, using Lucas sequences.</span></li>
           <li><b>Elliptic curve method</b><span class="badge">planned</span>
             <span class="desc">Factors up to 30–40 digits, whatever the size of the number.</span></li>
           <li><b>Quadratic sieve, then number field sieve</b><span class="badge">planned</span>
@@ -496,7 +497,7 @@
         card.append(el("p", "note ok", "Prime (Baillie–PSW)."));
       } else if (composites > 0) {
         card.append(el("p", "note warn",
-          "The dashed factor is composite, but its prime factors are out of reach of Pollard rho and p−1. ECM will handle these once it's implemented."));
+          "The dashed factor is composite, but its prime factors are out of reach of Pollard rho, p−1 and p+1. ECM will handle these once it's implemented."));
       } else if (factors.length > 0 && product === n) {
         card.append(el("p", "note ok", "Fully factored. The product of the factors matches."));
       }
@@ -505,8 +506,16 @@
       }
     }
 
+    // Grow the input to fit long numbers instead of clipping them.
+    function fitInput() {
+      input.style.height = "auto";
+      input.style.height = `${input.scrollHeight + 2}px`;
+    }
+    input.addEventListener("input", fitInput);
+
     // Keep the current input in the URL so a factorization can be shared.
     function run(source) {
+      fitInput();
       const url = new URL(location.href);
       url.searchParams.set("n", source.trim());
       history.replaceState(null, "", url);

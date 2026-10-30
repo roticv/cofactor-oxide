@@ -12,20 +12,8 @@
 use alloc::vec::Vec;
 
 use crate::arith::{Monty, Uint};
+use crate::batch::{CHUNK, Check, check};
 use crate::primes::Primes;
-
-/// Number of primes processed between GCD checks.
-const CHUNK: usize = 1024;
-
-/// What a batched GCD check found.
-enum Check<const LIMBS: usize> {
-    /// No factor yet; carry on.
-    Continue,
-    Found(Uint<LIMBS>),
-    /// Every factor of `n` turned up at the same step, so this base and
-    /// these bounds can't separate them.
-    Fail,
-}
 
 /// Searches for a factor of `n` whose `p − 1` is B1-smooth, apart from at
 /// most one prime factor up to B2.
@@ -130,32 +118,4 @@ pub fn pollard_pm1<const LIMBS: usize>(n: &Uint<LIMBS>, b1: u64, b2: u64) -> Opt
         }
     }
     None
-}
-
-/// Checks `gcd(acc, n)`, where `acc` is a product of values that each might
-/// share a factor with `n`. If the GCD is `n` itself, `replay` regenerates
-/// those values one at a time so they can be checked individually.
-fn check<const LIMBS: usize, I: Iterator<Item = Uint<LIMBS>>>(
-    monty: &Monty<LIMBS>,
-    acc: &Uint<LIMBS>,
-    replay: impl FnOnce() -> I,
-) -> Check<LIMBS> {
-    let n = monty.modulus();
-    let g = acc.gcd(n);
-    if g == Uint::ONE {
-        return Check::Continue;
-    }
-    if g != *n {
-        return Check::Found(g);
-    }
-    for value in replay() {
-        let g = value.gcd(n);
-        if g == *n {
-            break;
-        }
-        if g != Uint::ONE {
-            return Check::Found(g);
-        }
-    }
-    Check::Fail
 }
