@@ -17,10 +17,7 @@ fn factor_u64(n: u64) -> Vec<u64> {
 
 /// Factors with the given ECM level and no progress callback.
 fn with_ecm(n: &str, ecm_digits: u32) -> Vec<Factor<String>> {
-    let config = Config {
-        ecm_digits,
-        ..Config::default()
-    };
+    let config = Config::default().ecm_digits(ecm_digits);
     factor_str_with(n, &config, |_| ControlFlow::Continue(())).unwrap()
 }
 
@@ -189,7 +186,7 @@ fn stops_when_asked() {
         .to_string();
     let factors = factor_str_with(&n, &Config::default(), |event| match event {
         Progress::Ecm { .. } => ControlFlow::Break(()),
-        Progress::Method { .. } => ControlFlow::Continue(()),
+        _ => ControlFlow::Continue(()),
     })
     .unwrap();
     let unsplit = Factor {
@@ -205,11 +202,7 @@ fn workers_share_the_curves() {
     let mut found_by = [false; 4];
     let mut totals = [0; 2];
     for worker in 0..4 {
-        let config = Config {
-            worker,
-            workers: 4,
-            ..Config::default()
-        };
+        let config = Config::default().worker(worker, 4);
         let factors = factor_str_with(&n, &config, |event| {
             if let Progress::Ecm {
                 digits,

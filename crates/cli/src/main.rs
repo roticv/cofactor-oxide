@@ -99,11 +99,9 @@ fn factor_parallel(
             .map(|worker| {
                 let (done, status) = (&done, &status);
                 scope.spawn(move || {
-                    let config = Config {
-                        ecm_digits,
-                        worker: worker as u32,
-                        workers: threads as u32,
-                    };
+                    let config = Config::default()
+                        .ecm_digits(ecm_digits)
+                        .worker(worker as u32, threads as u32);
                     let result = factor_str_with(n, &config, |event| {
                         if done.load(Ordering::Relaxed) {
                             return ControlFlow::Break(());
@@ -184,7 +182,7 @@ fn describe(events: &[Option<Progress>]) -> String {
             done,
             total,
         } => Some((digits, bits, done, total)),
-        Progress::Method { .. } => None,
+        _ => None,
     });
     if let Some((digits, bits, _, _)) = ecm.clone().max() {
         let (done, total) = ecm

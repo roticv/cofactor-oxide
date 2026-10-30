@@ -31,11 +31,9 @@ pub fn factor(
     workers: u32,
     progress: &JsValue,
 ) -> Result<Vec<String>, JsError> {
-    let config = Config {
-        ecm_digits,
-        worker,
-        workers,
-    };
+    let config = Config::default()
+        .ecm_digits(ecm_digits)
+        .worker(worker, workers);
     let factors = cofox_core::factor_str_with(n.trim(), &config, |event| {
         match event {
             Progress::Method { method, bits } => call(progress, method, bits, 0, 0.0, 0.0),
@@ -45,6 +43,7 @@ pub fn factor(
                 done,
                 total,
             } => call(progress, "ecm", bits, digits, done as f64, total as f64),
+            _ => {}
         }
         ControlFlow::Continue(())
     })?;

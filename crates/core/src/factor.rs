@@ -85,7 +85,18 @@ impl<T: fmt::Display> fmt::Display for Factor<T> {
 }
 
 /// How hard [`factor_with`] tries, and how it shares the work.
+///
+/// More settings will be added as the pipeline grows, so outside this crate
+/// a `Config` is built from [`Config::default`] with the setter methods:
+///
+/// ```
+/// use cofox_core::Config;
+///
+/// let config = Config::default().ecm_digits(25).worker(0, 4);
+/// assert_eq!((config.ecm_digits, config.worker, config.workers), (25, 0, 4));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
     /// Run ECM up to the level for primes of this many digits (15, 20, …,
     /// 40). Each level takes about four times as long as the one before. 0
@@ -114,9 +125,31 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Sets [`Config::ecm_digits`].
+    #[must_use]
+    pub fn ecm_digits(mut self, digits: u32) -> Self {
+        self.ecm_digits = digits;
+        self
+    }
+
+    /// Makes this run worker `worker` of `workers`, sharing the ECM curves
+    /// as described at [`Config::workers`].
+    #[must_use]
+    pub fn worker(mut self, worker: u32, workers: u32) -> Self {
+        self.worker = worker;
+        self.workers = workers;
+        self
+    }
+}
+
 /// What the pipeline is working on, reported to [`factor_with`]'s
 /// callback.
+///
+/// New kinds of event will be added as the pipeline grows, so a `match`
+/// outside this crate needs a `_` arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Progress {
     /// Starting `method` ("rho", "p-1" or "p+1") on a composite of `bits`
     /// bits.
