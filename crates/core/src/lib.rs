@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod arith;
 mod batch;
+pub mod curve;
 mod factor;
 pub mod pm1;
 pub mod pp1;
