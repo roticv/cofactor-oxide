@@ -8,9 +8,10 @@ WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
 
 > **Status:** early development. The CLI factors numbers of up to 1024 bits
-> using trial division, Pollard rho, Pollard p−1, Williams p+1 and the BPSW
-> primality test. That finds any factor up to about 12 digits, and larger
-> ones when p−1 or p+1 is smooth. The rest of the pipeline below is planned.
+> using trial division, Pollard rho, Pollard p−1, Williams p+1, ECM and the
+> BPSW primality test. That finds factors up to about 20 digits by default
+> (more with `--ecm`), and larger ones when p−1 or p+1 is smooth. The
+> quadratic sieve and GNFS are planned.
 
 ## Goals
 
@@ -29,9 +30,9 @@ it can find, and whatever composite is left goes to the next stage.
 | Stage | Algorithm | Good at |
 | ----- | --------- | ------- |
 | 1 | **Trial division** | Tiny primes (currently below 4096) |
-| 2 | **Pollard rho** (Brent's variant) | Primes up to about 12 digits |
+| 2 | **Pollard rho** (Brent's variant) | Primes up to about 8 digits, in a quick first run |
 | 3 | **Pollard p−1** and **Williams p+1** (B1 = 5·10⁴, B2 = 5·10⁶) | Primes *p* of any size where *p−1* or *p+1* is smooth |
-| 4 | **ECM** (Lenstra elliptic curve method) | Primes up to about 30–40 digits, whatever the size of *n* |
+| 4 | **ECM** (Lenstra elliptic curve method, levels of 15 to 40 digits; 20 by default) | Primes up to about 30–40 digits, whatever the size of *n* |
 | 5 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
 | 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
 
@@ -39,8 +40,18 @@ The Baillie–PSW primality test runs between stages so that nothing is spent on
 cofactors that are already prime. No composite is known to pass it, and none
 exists below 2⁶⁴.
 
-The digit ranges are rough. The real crossover points will be measured once
-the implementations exist, and they will differ between native and Wasm.
+A longer rho run follows ECM for composites up to 80 bits, where it is
+certain to succeed.
+
+Each ECM level runs about as many curves as it takes on average to find a
+prime of that size: 30 curves with B1 = 2000 for 15 digits, 100 with
+B1 = 11000 for 20, and so on, with B2 = 100·B1. So a level finds a prime of
+its own size most of the time, and smaller primes almost always. Each level
+takes about four times as long as the one before.
+
+The digit ranges for QS and GNFS are rough. The real crossover points will be
+measured once the implementations exist, and they will differ between native
+and Wasm.
 
 ## Native vs. browser
 
@@ -78,17 +89,20 @@ Native:
 
 ```sh
 cargo build --release
-./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561 875629172352184491588547325680801513040676851112599077
+./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561 7358668553614726823037645838094560989037094819 22402621473499677702312787220798894771372529738736380992481737381422651598174113
 # 1000000016000000063: 1000000007 1000000009
 # 1427247692705959880439315947500961989719490561: 2305843009213693951 618970019642690137449562111
-# 875629172352184491588547325680801513040676851112599077: (875629172352184491588547325680801513040676851112599077)
+# 7358668553614726823037645838094560989037094819: 11888570237800257629 618970019642690137449562111
+# 22402621473499677702312787220798894771372529738736380992481737381422651598174113: (22402621473499677702312787220798894771372529738736380992481737381422651598174113)
 ```
 
 The second number is (2⁶¹−1)(2⁸⁹−1). Both factors are too large for rho, but
-p−1 finds 2⁶¹−1 because 2⁶¹−2 has only small prime factors. A factor in
-parentheses is composite, but the current algorithms can't split it. The third
-number is a product of two safe primes (p = 2r + 1 with r prime), which defeat
-p−1.
+p−1 finds 2⁶¹−1 because 2⁶¹−2 has only small prime factors. The third has a
+20-digit prime factor whose p−1 and p+1 aren't smooth, so it takes ECM. The
+fourth is a product of two 40-digit primes, too large for ECM: a factor in
+parentheses is composite, but the current algorithms can't split it.
+`--ecm 25` (or 30, …) searches for larger factors, at about four times the
+cost per level.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
@@ -119,7 +133,7 @@ Every push to `main` also builds the demo and deploys it to GitHub Pages at
 - [x] Pollard rho (Brent)
 - [x] Pollard p−1 (two stages)
 - [x] Williams p+1 (two stages, baby-step giant-step stage 2)
-- [ ] ECM (stage 1 and stage 2)
+- [x] ECM (Montgomery curves, Suyama parametrization, two stages)
 - [ ] Self-initializing quadratic sieve (SIQS)
 - [ ] GNFS
 - [x] Native CLI
