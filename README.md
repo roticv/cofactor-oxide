@@ -83,14 +83,26 @@ A factor in parentheses is composite, but the current algorithms can't split
 it. The second number is (2⁶¹−1)(2⁸⁹−1), whose factors are too large for
 rho.
 
-WebAssembly (needs the `wasm32-unknown-unknown` target and
-[wasm-pack](https://rustwasm.github.io/wasm-pack/)):
+WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
+rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
+`wasm-bindgen-cli` whose version matches `wasm-bindgen` in `Cargo.lock`:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-wasm-pack build crates/wasm --target web --out-dir ../../web/pkg
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
+cargo build --release --target wasm32-unknown-unknown -p cofox-wasm
+wasm-bindgen --target web --out-dir web/pkg \
+  target/wasm32-unknown-unknown/release/cofox_wasm.wasm
 python3 -m http.server -d web 8000   # then open http://localhost:8000
 ```
+
+The page has to be served over HTTP, because browsers won't load Wasm or JS
+modules from `file://`.
+
+Every push to `main` also builds the demo and deploys it to GitHub Pages at
+<https://roticv.github.io/cofactor-oxide/>, using
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml).
 
 ## Roadmap
 
@@ -104,7 +116,7 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 - [ ] Self-initializing quadratic sieve (SIQS)
 - [ ] GNFS
 - [x] Native CLI
-- [ ] Wasm bindings and browser demo
+- [x] Wasm bindings and browser demo
 - [ ] Web Worker parallelism in the browser
 
 ## License
