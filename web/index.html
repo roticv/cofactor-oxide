@@ -3,30 +3,535 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>cofactor-oxide</title>
+  <title>cofox · factor integers in your browser</title>
+  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho and BPSW, running entirely in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23b4532a'/%3E%3Cpath d='M10 10l12 12M22 10L10 22' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #faf7f2;
+      --surface: #ffffff;
+      --surface-2: #f3eee6;
+      --border: #e6dfd3;
+      --text: #1f1a17;
+      --muted: #6f655c;
+      --accent: #b4532a;
+      --accent-strong: #973f1b;
+      --accent-soft: #f6e4d9;
+      --on-accent: #ffffff;
+      --warn: #8a5a00;
+      --warn-soft: #fbefd2;
+      --ok: #2f7a4a;
+      --error: #b3261e;
+      --error-soft: #fbe3e1;
+      --shadow: 0 1px 2px rgb(60 40 20 / 6%), 0 8px 24px rgb(60 40 20 / 6%);
+      --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161311;
+        --surface: #1f1b18;
+        --surface-2: #29231f;
+        --border: #3a322c;
+        --text: #f1ebe4;
+        --muted: #a89c91;
+        --accent: #e07a4a;
+        --accent-strong: #f0915f;
+        --accent-soft: #3a2519;
+        --on-accent: #1a0f09;
+        --warn: #f0c060;
+        --warn-soft: #3a2e14;
+        --ok: #6cc28c;
+        --error: #ff8a80;
+        --error-soft: #3d1e1b;
+        --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 25%);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 var(--sans);
+    }
+    a { color: var(--accent); text-underline-offset: 2px; }
+    a:hover { color: var(--accent-strong); }
+
+    .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px; }
+
+    header { padding: 48px 0 28px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .mark {
+      width: 40px; height: 40px; border-radius: 10px;
+      background: var(--accent);
+      display: grid; place-items: center;
+      flex: none;
+    }
+    .mark svg { width: 22px; height: 22px; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
+    h1 small { font-weight: 500; color: var(--muted); font-size: 16px; letter-spacing: 0; margin-left: 6px; }
+    .tagline { margin: 14px 0 0; color: var(--muted); max-width: 56ch; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    form.card { padding: 20px; }
+    label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+    .row { display: flex; gap: 10px; }
+    textarea {
+      flex: 1; min-width: 0;
+      resize: vertical;
+      min-height: 52px;
+      padding: 13px 14px;
+      font: 17px/1.4 var(--mono);
+      color: var(--text);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      word-break: break-all;
+    }
+    textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+    button {
+      font: 600 15px var(--sans);
+      border-radius: 10px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .primary {
+      padding: 0 22px;
+      min-height: 52px;
+      background: var(--accent);
+      color: var(--on-accent);
+      align-self: flex-start;
+    }
+    .primary:hover { background: var(--accent-strong); }
+    .primary:disabled { opacity: 0.55; cursor: default; }
+    .hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+    .hint code { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+
+    .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; align-items: center; }
+    .examples span { font-size: 13px; color: var(--muted); margin-right: 2px; }
+    .chip-btn {
+      padding: 5px 11px;
+      font: 13px var(--mono);
+      background: var(--surface-2);
+      color: var(--text);
+      border-color: var(--border);
+      border-radius: 999px;
+    }
+    .chip-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    #results { margin-top: 20px; display: grid; gap: 14px; }
+
+    .result { padding: 18px 20px; animation: rise 0.18s ease-out; }
+    @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+    .result-head {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+      font-size: 13px; color: var(--muted);
+    }
+    .result-head .expr { font-family: var(--mono); overflow-wrap: anywhere; }
+    .result-head .time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .number {
+      margin: 6px 0 14px;
+      font: 600 18px/1.45 var(--mono);
+      overflow-wrap: anywhere;
+    }
+    .number .meta { font: 13px var(--sans); color: var(--muted); font-weight: 400; margin-left: 6px; white-space: nowrap; }
+
+    .factors { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .times { color: var(--muted); font-size: 15px; }
+    .factor {
+      display: inline-block;
+      padding: 5px 11px;
+      font: 15px/1.4 var(--mono);
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--text);
+      border: 1px solid transparent;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+    .factor sup { font-size: 11px; line-height: 0; margin-left: 2px; color: var(--accent); font-weight: 700; }
+    .factor.composite {
+      background: var(--warn-soft);
+      border: 1px dashed var(--warn);
+    }
+    .note { margin: 14px 0 0; font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: flex-start; }
+    .note.ok::before { content: "✓"; color: var(--ok); font-weight: 700; }
+    .note.warn::before { content: "!"; color: var(--warn); font-weight: 700; }
+
+    .result.error { border-color: var(--error); background: var(--error-soft); }
+    .result.error .number { color: var(--error); font: 500 15px var(--sans); margin: 4px 0 0; }
+
+    .working { display: flex; align-items: center; gap: 12px; }
+    .spinner {
+      width: 18px; height: 18px; flex: none;
+      border: 2.5px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .working .grow { flex: 1; }
+    .ghost {
+      padding: 6px 12px;
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .ghost:hover { color: var(--text); border-color: var(--muted); }
+
+    section.about { margin: 44px 0 0; }
+    h2 { font-size: 18px; margin: 0 0 12px; letter-spacing: -0.01em; }
+    .about p { color: var(--muted); margin: 0 0 14px; }
+    .pipeline { list-style: none; padding: 0; margin: 0; overflow: hidden; }
+    .pipeline li {
+      display: grid; grid-template-columns: 1fr auto; gap: 2px 12px;
+      padding: 12px 18px;
+      border-top: 1px solid var(--border);
+    }
+    .pipeline li:first-child { border-top: 0; }
+    .pipeline b { font-weight: 600; }
+    .pipeline .desc { grid-column: 1; font-size: 14px; color: var(--muted); }
+    .badge {
+      grid-row: 1 / span 2; grid-column: 2; align-self: center;
+      font-size: 12px; font-weight: 600;
+      padding: 3px 9px; border-radius: 999px;
+      background: var(--surface-2); color: var(--muted);
+    }
+    .badge.done { background: var(--accent-soft); color: var(--accent); }
+
+    footer {
+      margin: 48px 0 0; padding: 20px 0 40px;
+      border-top: 1px solid var(--border);
+      font-size: 13px; color: var(--muted);
+      display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between;
+    }
+
+    @media (max-width: 560px) {
+      header { padding-top: 32px; }
+      .row { flex-direction: column; }
+      .primary { align-self: stretch; }
+      .result-head { flex-direction: column; gap: 2px; }
+    }
+  </style>
 </head>
 <body>
-  <h1>cofactor-oxide</h1>
-  <form id="form">
-    <input id="n" inputmode="numeric" value="1000000016000000063" size="24">
-    <button>Factor</button>
-  </form>
-  <pre id="out"></pre>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="mark" aria-hidden="true">
+          <svg viewBox="0 0 22 22"><path d="M5 5l12 12M17 5L5 17" stroke="white" stroke-width="3" stroke-linecap="round"/></svg>
+        </div>
+        <h1>cofox <small>cofactor-oxide</small></h1>
+      </div>
+      <p class="tagline">
+        Integer factorization written in Rust and compiled to WebAssembly.
+        Everything runs locally in your browser; nothing is sent anywhere.
+      </p>
+    </header>
+
+    <main>
+      <form class="card" id="form" autocomplete="off">
+        <label for="n">Number to factor</label>
+        <div class="row">
+          <textarea id="n" rows="1" spellcheck="false" autocapitalize="off"
+            aria-describedby="hint">1000000016000000063</textarea>
+          <button class="primary" id="go" type="submit">Factor</button>
+        </div>
+        <p class="hint" id="hint">
+          A decimal number or an expression such as <code>2^127-1</code> or
+          <code>(2^61-1)(2^89-1)</code>, up to 512 bits.
+          Press <kbd>Enter</kbd> to factor.
+        </p>
+        <div class="examples">
+          <span>Try</span>
+          <button type="button" class="chip-btn" data-n="2^64-1">2^64-1</button>
+          <button type="button" class="chip-btn" data-n="2^67-1">2^67-1</button>
+          <button type="button" class="chip-btn" data-n="999999999989*1000000000039">two 12-digit primes</button>
+          <button type="button" class="chip-btn" data-n="4294967291*(2^127-1)">4294967291·(2^127-1)</button>
+          <button type="button" class="chip-btn" data-n="10^100+267">10^100+267</button>
+          <button type="button" class="chip-btn" data-n="(2^61-1)(2^89-1)">(2^61-1)(2^89-1)</button>
+        </div>
+      </form>
+
+      <div id="results" aria-live="polite"></div>
+
+      <section class="about">
+        <h2>How it works</h2>
+        <p>
+          Small factors are stripped cheaply first, and each remaining piece is
+          either proven prime or handed to the next, more powerful method.
+          Not every stage exists yet; when a composite can't be split, it's
+          shown with a dashed outline.
+        </p>
+        <ul class="pipeline card">
+          <li><b>Trial division</b><span class="badge done">done</span>
+            <span class="desc">Removes every factor below 4096.</span></li>
+          <li><b>Pollard rho</b><span class="badge done">done</span>
+            <span class="desc">Brent's variant with Montgomery arithmetic. Finds factors up to about 12 digits.</span></li>
+          <li><b>Baillie–PSW primality test</b><span class="badge done">done</span>
+            <span class="desc">Decides when to stop. No composite is known to pass it.</span></li>
+          <li><b>Pollard p−1 and Williams p+1</b><span class="badge">planned</span>
+            <span class="desc">Primes p where p−1 or p+1 has only small factors.</span></li>
+          <li><b>Elliptic curve method</b><span class="badge">planned</span>
+            <span class="desc">Factors up to 30–40 digits, whatever the size of the number.</span></li>
+          <li><b>Quadratic sieve, then number field sieve</b><span class="badge">planned</span>
+            <span class="desc">General-purpose methods for hard composites.</span></li>
+        </ul>
+        <p style="margin-top: 14px">
+          WebAssembly lacks a 64×64→128-bit multiply, so the browser build runs
+          about 3× slower than the native <code>cofox</code> command-line tool.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <span>Source on <a href="https://github.com/roticv/cofactor-oxide">GitHub</a></span>
+      <span>MIT or Apache-2.0</span>
+    </footer>
+  </div>
+
   <script type="module">
-    import init, { factor } from "./pkg/cofox_wasm.js";
+    // The Wasm build uses 16 limbs of 32 bits.
+    const MAX_BITS = 512;
+    // Keeps `2^huge` from locking up the tab before the size check.
+    const MAX_EXPONENT = 4096n;
 
-    await init();
+    const form = document.getElementById("form");
+    const input = document.getElementById("n");
+    const go = document.getElementById("go");
+    const results = document.getElementById("results");
 
-    const out = document.getElementById("out");
-    document.getElementById("form").addEventListener("submit", (e) => {
-      e.preventDefault();
+    let worker = null;
+    let nextId = 0;
+    let pending = null;
+
+    function startWorker() {
+      worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+      worker.onmessage = (event) => {
+        if (pending && event.data.id === pending.id) finish(event.data);
+      };
+    }
+    startWorker();
+
+    // Parses and evaluates an integer expression with BigInt: + - * ^,
+    // parentheses, and implicit multiplication like (a)(b).
+    function evaluate(source) {
+      const s = source.replace(/[\s,_]/g, "").replace(/[×·]/g, "*").replace(/\*\*/g, "^");
+      if (!s) throw new Error("Enter a number to factor.");
+      let i = 0;
+      const unexpected = () =>
+        new Error(i < s.length ? `Unexpected “${s[i]}” at position ${i + 1}.` : "Unexpected end of input.");
+
+      function sum() {
+        let v = product();
+        while (s[i] === "+" || s[i] === "-") {
+          const op = s[i++];
+          const rhs = product();
+          v = op === "+" ? v + rhs : v - rhs;
+        }
+        return v;
+      }
+      function product() {
+        let v = power();
+        while (s[i] === "*" || s[i] === "(") {
+          if (s[i] === "*") i++;
+          v *= power();
+        }
+        return v;
+      }
+      function power() {
+        const base = atom();
+        if (s[i] !== "^") return base;
+        i++;
+        const exp = power();
+        if (exp > MAX_EXPONENT) throw new Error(`Exponent ${exp} is too large.`);
+        return base ** exp;
+      }
+      function atom() {
+        if (s[i] === "(") {
+          i++;
+          const v = sum();
+          if (s[i] !== ")") throw unexpected();
+          i++;
+          return v;
+        }
+        const digits = /^\d+/.exec(s.slice(i));
+        if (!digits) throw unexpected();
+        i += digits[0].length;
+        return BigInt(digits[0]);
+      }
+
+      const value = sum();
+      if (i < s.length) throw unexpected();
+      return value;
+    }
+
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+
+    function formatTime(ms) {
+      if (ms < 1) return "under 1 ms";
+      if (ms < 1000) return `${ms.toFixed(ms < 10 ? 1 : 0)} ms`;
+      return `${(ms / 1000).toFixed(2)} s`;
+    }
+
+    function header(source, n, rightText) {
+      const head = el("div", "result-head");
+      const showExpr = source.replace(/\s/g, "") !== n.toString();
+      head.append(el("span", "expr", showExpr ? source.trim() : ""));
+      const time = el("span", "time", rightText);
+      head.append(time);
+      const number = el("div", "number", n.toString());
+      const digits = n.toString().length;
+      const bits = n.toString(2).length;
+      number.append(el("span", "meta", `${digits} digit${digits === 1 ? "" : "s"} · ${bits} bits`));
+      return { head, number, time };
+    }
+
+    function showError(message) {
+      const card = el("div", "card result error");
+      card.append(el("div", "number", message));
+      results.prepend(card);
+    }
+
+    function submit(source) {
+      if (pending) return;
+      let n;
       try {
-        const n = document.getElementById("n").value.trim();
-        out.textContent = `${n}: ${factor(n).join(" ")}`;
+        n = evaluate(source);
       } catch (err) {
-        out.textContent = `error: ${err}`;
+        return showError(err.message);
+      }
+      if (n < 0n) return showError("Only non-negative numbers can be factored.");
+      if (n.toString(2).length > MAX_BITS) {
+        return showError(`That number has ${n.toString(2).length} bits; the browser build handles up to ${MAX_BITS}.`);
+      }
+
+      const card = el("div", "card result");
+      const { head, number, time } = header(source, n, "");
+      const working = el("div", "working");
+      const label = el("span", "grow", "Factoring…");
+      const cancel = el("button", "ghost", "Cancel");
+      cancel.type = "button";
+      working.append(el("span", "spinner"), label, cancel);
+      card.append(head, number, working);
+      results.prepend(card);
+
+      const id = nextId++;
+      const start = performance.now();
+      const timer = setInterval(() => {
+        time.textContent = formatTime(performance.now() - start);
+      }, 100);
+      pending = { id, n, card, working, time, timer };
+      go.disabled = true;
+
+      cancel.onclick = () => {
+        worker.terminate();
+        startWorker();
+        finish({ id, cancelled: true });
+      };
+      worker.postMessage({ id, n: n.toString() });
+    }
+
+    function finish(data) {
+      const { n, card, working, time, timer } = pending;
+      clearInterval(timer);
+      pending = null;
+      go.disabled = false;
+      working.remove();
+
+      if (data.cancelled) {
+        time.textContent = "cancelled";
+        card.append(el("p", "note warn", "Cancelled."));
+        return;
+      }
+      if (data.error) {
+        card.classList.add("error");
+        card.append(el("p", "note warn", data.error));
+        return;
+      }
+      time.textContent = formatTime(data.ms);
+
+      const { factors } = data;
+      const list = el("div", "factors");
+      if (factors.length === 0) {
+        list.append(el("span", "times", `${n} has no prime factors.`));
+      } else {
+        // Group repeated primes into powers.
+        const groups = [];
+        for (const f of factors) {
+          const last = groups.at(-1);
+          if (last && last.value === f.value && last.prime === f.prime) last.count++;
+          else groups.push({ ...f, count: 1 });
+        }
+        groups.forEach((g, index) => {
+          if (index > 0) list.append(el("span", "times", "×"));
+          const chip = el("span", g.prime ? "factor" : "factor composite", g.value);
+          if (!g.prime) chip.title = "Composite, but the current algorithms couldn't split it";
+          if (g.count > 1) chip.append(el("sup", null, String(g.count)));
+          list.append(chip);
+        });
+      }
+      card.append(list);
+
+      const product = factors.reduce((acc, f) => acc * BigInt(f.value), 1n);
+      const composites = factors.filter((f) => !f.prime).length;
+      if (factors.length === 1 && factors[0].prime) {
+        card.append(el("p", "note ok", "Prime (Baillie–PSW)."));
+      } else if (composites > 0) {
+        card.append(el("p", "note warn",
+          "The dashed factor is composite, but its prime factors are too large for Pollard rho. ECM will handle these once it's implemented."));
+      } else if (factors.length > 0 && product === n) {
+        card.append(el("p", "note ok", "Fully factored. The product of the factors matches."));
+      }
+      if (factors.length > 0 && product !== n) {
+        card.append(el("p", "note warn", "The factors don't multiply back to the input. This is a bug; please report it."));
+      }
+    }
+
+    // Keep the current input in the URL so a factorization can be shared.
+    function run(source) {
+      const url = new URL(location.href);
+      url.searchParams.set("n", source.trim());
+      history.replaceState(null, "", url);
+      submit(source);
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      run(input.value);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
       }
     });
+    for (const button of document.querySelectorAll("[data-n]")) {
+      button.addEventListener("click", () => {
+        input.value = button.dataset.n;
+        run(input.value);
+      });
+    }
+
+    const shared = new URLSearchParams(location.search).get("n");
+    if (shared) {
+      input.value = shared;
+      run(shared);
+    }
   </script>
 </body>
 </html>
