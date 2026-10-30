@@ -8,8 +8,9 @@ WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
 
 > **Status:** early development. The CLI factors numbers of up to 1024 bits
-> using trial division, Pollard rho and the BPSW primality test, which handles
-> factors of up to about 12 digits. The rest of the pipeline below is planned.
+> using trial division, Pollard rho, Pollard p−1 and the BPSW primality test.
+> That finds any factor up to about 12 digits, and larger ones when p−1 is
+> smooth. The rest of the pipeline below is planned.
 
 ## Goals
 
@@ -29,7 +30,7 @@ it can find, and whatever composite is left goes to the next stage.
 | ----- | --------- | ------- |
 | 1 | **Trial division** | Tiny primes (currently below 4096) |
 | 2 | **Pollard rho** (Brent's variant) | Primes up to about 12 digits |
-| 3 | **Pollard p−1** / **Williams p+1** | Primes *p* where *p−1* or *p+1* is smooth |
+| 3 | **Pollard p−1** (B1 = 5·10⁴, B2 = 5·10⁶) / **Williams p+1** | Primes *p* of any size where *p−1* or *p+1* is smooth |
 | 4 | **ECM** (Lenstra elliptic curve method) | Primes up to about 30–40 digits, whatever the size of *n* |
 | 5 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
 | 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
@@ -77,14 +78,17 @@ Native:
 
 ```sh
 cargo build --release
-./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561
+./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561 875629172352184491588547325680801513040676851112599077
 # 1000000016000000063: 1000000007 1000000009
-# 1427247692705959880439315947500961989719490561: (1427247692705959880439315947500961989719490561)
+# 1427247692705959880439315947500961989719490561: 2305843009213693951 618970019642690137449562111
+# 875629172352184491588547325680801513040676851112599077: (875629172352184491588547325680801513040676851112599077)
 ```
 
-A factor in parentheses is composite, but the current algorithms can't split
-it. The second number is (2⁶¹−1)(2⁸⁹−1), whose factors are too large for
-rho.
+The second number is (2⁶¹−1)(2⁸⁹−1). Both factors are too large for rho, but
+p−1 finds 2⁶¹−1 because 2⁶¹−2 has only small prime factors. A factor in
+parentheses is composite, but the current algorithms can't split it. The third
+number is a product of two safe primes (p = 2r + 1 with r prime), which defeat
+p−1.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
@@ -113,7 +117,7 @@ Every push to `main` also builds the demo and deploys it to GitHub Pages at
 - [x] Trial division
 - [x] Primality testing (Miller–Rabin, BPSW)
 - [x] Pollard rho (Brent)
-- [ ] Pollard p−1
+- [x] Pollard p−1 (two stages)
 - [ ] Williams p+1
 - [ ] ECM (stage 1 and stage 2)
 - [ ] Self-initializing quadratic sieve (SIQS)

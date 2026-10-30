@@ -1,5 +1,5 @@
-//! The factoring pipeline: trial division, then Pollard's rho on whatever
-//! composite remains, with BPSW deciding when a piece is prime.
+//! The factoring pipeline: trial division, then Pollard's rho and p−1 on
+//! whatever composite remains, with BPSW deciding when a piece is prime.
 
 use core::fmt;
 
@@ -8,11 +8,20 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::arith::{Limb, ParseUintError, Uint};
+use crate::pm1::pollard_pm1;
 use crate::prime::is_prime;
 use crate::rho::pollard_rho;
 
 /// Trial division covers every divisor below this.
 const TRIAL_LIMIT: u64 = 1 << 12;
+
+/// Step budget for the first, quick rho attempt, which catches factors up to
+/// about 8 digits before anything more expensive runs.
+const QUICK_RHO_STEPS: u64 = 1 << 16;
+
+/// Stage 1 and stage 2 bounds for p−1.
+const PM1_B1: u64 = 50_000;
+const PM1_B2: u64 = 5_000_000;
 
 /// Polynomials `x² + c` tried by rho before giving up on a composite.
 const RHO_ATTEMPTS: u64 = 3;
@@ -93,7 +102,13 @@ pub fn factor<const LIMBS: usize>(n: &Uint<LIMBS>) -> Vec<Factor<Uint<LIMBS>>> {
             factors.push(prime(m));
             continue;
         }
-        match (1..=RHO_ATTEMPTS).find_map(|c| pollard_rho(&m, c, RHO_STEPS)) {
+        // Cheapest first: a short rho run for small factors, then p−1 for
+        // factors of any size whose p − 1 is smooth, then the full rho
+        // budget.
+        let found = pollard_rho(&m, 1, QUICK_RHO_STEPS)
+            .or_else(|| pollard_pm1(&m, PM1_B1, PM1_B2))
+            .or_else(|| (1..=RHO_ATTEMPTS).find_map(|c| pollard_rho(&m, c, RHO_STEPS)));
+        match found {
             Some(g) => {
                 pending.push(g);
                 pending.push(m.div_rem(&g).0);

@@ -84,8 +84,9 @@ fn from_strings() {
 
 #[test]
 fn unsplit_composite() {
-    // (2^61 - 1)(2^89 - 1): both factors are far too big for rho's budget.
-    let n = "1427247692705959880439315947500961989719490561";
+    // Two safe primes (q = 2r + 1, r prime) of 24 and 31 digits: too big for
+    // rho, and q − 1 has a huge prime factor, so p−1 can't find them either.
+    let n = "875629172352184491588547325680801513040676851112599077";
     let factors = factor_str(n).unwrap();
     assert_eq!(
         factors,
