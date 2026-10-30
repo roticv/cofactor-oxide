@@ -1,5 +1,8 @@
 # cofactor-oxide
 
+[![CI](https://github.com/roticv/cofactor-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/roticv/cofactor-oxide/actions/workflows/ci.yml)
+[![Demo](https://img.shields.io/badge/demo-try_in_browser-b4532a)](https://roticv.github.io/cofactor-oxide/)
+
 Integer factorization in Rust, compiled both to a native binary and to
 WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
