@@ -7,7 +7,9 @@
 
 use cofox_core::Uint;
 use cofox_core::primes::Primes;
-use cofox_core::qs::{FactorBase, Params, Prime, multiplier, pow_mod, sqrt_mod};
+use cofox_core::qs::{
+    BLOCK_SIZE, FactorBase, Params, Prime, Sieve, dependencies, multiplier, pow_mod, qs, sqrt_mod,
+};
 
 /// RSA-100 is 330 bits, and kN a few bits more: 12 limbs is at least 384
 /// bits with either limb size.
@@ -200,4 +202,117 @@ fn params_interpolate() {
     assert_eq!(p(290), (57_333, 80, 5));
     assert_eq!(p(20), (100, 40, 1));
     assert_eq!(p(400), (210_000, 150, 13));
+}
+
+/// Semiprimes with two random primes of equal size, from Python.
+const SEMIPRIMES: [(&str, &str, &str); 5] = [
+    ("16676409402120693011", "2030509027", "8212920593"),
+    ("493209351866533939609967", "535900657741", "920337276587"),
+    (
+        "728817225498169816759827770471",
+        "848253368666219",
+        "859197561035509",
+    ),
+    (
+        "4813603616902910938815036056040719",
+        "51891425250798533",
+        "92762987211048643",
+    ),
+    (
+        "396241995040211763643692640739477966561",
+        "14864641071324530231",
+        "26656680988053227431",
+    ),
+];
+
+#[test]
+fn sieve_semiprimes() {
+    for (n, p, q) in SEMIPRIMES {
+        let n = u(n);
+        let f = qs(&n, &Params::for_bits(n.bits())).expect("no factor");
+        assert!(f == u(p) || f == u(q), "{n} gave {f}");
+    }
+}
+
+#[test]
+fn relations_hold() {
+    // Every relation from a block on each side of 0 is an exact
+    // factorization of t² − kN over the factor base.
+    let n = u(SEMIPRIMES[1].0);
+    let fb = FactorBase::new(&n, multiplier(&n), 100).unwrap();
+    let mut sieve = Sieve::new(&fb);
+    for x0 in [0, -(BLOCK_SIZE as i64)] {
+        let relations = sieve.block(x0);
+        assert!(
+            relations.len() > 10,
+            "{} relations at {x0}",
+            relations.len()
+        );
+        for r in relations {
+            let (sq, hi) = r.t.widening_square();
+            assert!(hi.is_zero());
+            let product = r.factors.iter().fold(U::ONE, |acc, &i| {
+                acc.widening_mul(&U::from_u64(fb.primes[i as usize].p.into()))
+                    .0
+            });
+            let q = if r.negative {
+                fb.kn.checked_sub(&sq)
+            } else {
+                sq.checked_sub(&fb.kn)
+            };
+            assert_eq!(q, Some(product), "t = {}", r.t);
+            assert!(r.factors.is_sorted());
+        }
+    }
+}
+
+#[test]
+fn dependencies_sum_to_zero() {
+    // Random sparse rows, with repeated columns, which cancel.
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |bound: usize| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % bound as u64) as usize
+    };
+    for (rows, cols) in [(10usize, 4), (70, 60), (150, 130), (200, 200)] {
+        let matrix: Vec<Vec<usize>> = (0..rows)
+            .map(|_| (0..next(12)).map(|_| next(cols)).collect())
+            .collect();
+        let deps = dependencies(&matrix, cols);
+        assert!(deps.len() >= rows.saturating_sub(cols), "{rows}×{cols}");
+        for dep in &deps {
+            assert!(!dep.is_empty() && dep.is_sorted());
+            let mut sum = vec![false; cols];
+            for &r in dep {
+                for &c in &matrix[r] {
+                    sum[c] ^= true;
+                }
+            }
+            assert!(sum.iter().all(|&b| !b), "{rows}×{cols}: {dep:?}");
+        }
+    }
+    // An all-zero row is a dependency by itself, and a repeated row pairs
+    // up with its copy.
+    let deps = dependencies(&[vec![1, 2], vec![], vec![3, 3], vec![2, 1]], 4);
+    assert_eq!(deps, [vec![1], vec![2], vec![0, 3]]);
+}
+
+#[test]
+fn qs_edge_cases() {
+    let params = Params::for_bits(64);
+    // A prime has no proper factor to find.
+    assert_eq!(qs(&u("1000000000000000003"), &params), None);
+    // A small factor turns up while building the factor base.
+    assert_eq!(
+        qs(&u("401").widening_mul(&u(SEMIPRIMES[0].0)).0, &params),
+        Some(u("401"))
+    );
+    assert_eq!(qs(&u("1000000014"), &params), Some(u("2")));
+    // A square, with multiplier 1, so kN is a square too.
+    let p = u("1000000007");
+    let n = p.widening_square().0;
+    assert_eq!(multiplier(&n), 1);
+    assert_eq!(qs(&n, &params), Some(p));
 }

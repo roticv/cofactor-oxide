@@ -20,7 +20,7 @@ const SCORE_PRIMES: u64 = 2000;
 // Limb is u32 or u64, so the cast is needed on one target and redundant on
 // the other.
 #[allow(clippy::unnecessary_cast)]
-fn rem<const LIMBS: usize>(n: &Uint<LIMBS>, d: u64) -> u64 {
+pub(super) fn rem<const LIMBS: usize>(n: &Uint<LIMBS>, d: u64) -> u64 {
     n.div_rem_limb(d as Limb).1 as u64
 }
 
