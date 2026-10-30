@@ -10,7 +10,12 @@ authors.workspace = true
 [dependencies]
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 num-bigint = "0.4"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(cofox_limb32)"] }
+
+[[bench]]
+name = "arith"
+harness = false

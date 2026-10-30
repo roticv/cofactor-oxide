@@ -79,6 +79,8 @@ fn check_uint<const L: usize>(seed: u64) {
         assert_eq!(to_big(&diff), (&r + &ab - &bb) % &r, "{a:?} - {b:?}");
         assert_eq!(borrow, ab < bb);
 
+        assert_eq!(a.widening_square(), a.widening_mul(&a), "{a:?}²");
+
         let (lo, hi) = a.widening_mul(&b);
         assert_eq!(
             to_big(&lo) + (to_big(&hi) << Uint::<L>::BITS),
@@ -165,6 +167,20 @@ fn check_monty<const L: usize>(seed: u64) {
                 (&nb + &ab - &bb) % &nb
             );
 
+            let (lo, hi) = am.widening_mul(&bm);
+            assert_eq!(monty.reduce(&lo, &hi), monty.mul(&am, &bm), "reduce");
+            let (lo, hi) = am.widening_square();
+            assert_eq!(monty.reduce(&lo, &hi), monty.square(&am), "reduce square");
+
+            let g = num_gcd(&ab, &nb);
+            match monty.inv(&am) {
+                Ok(inv) => {
+                    assert_eq!(g, BigUint::from(1u8), "inverted {a:?} mod {n:?}");
+                    assert_eq!(monty.mul(&inv, &am), monty.one(), "inverse of {a:?}");
+                }
+                Err(e) => assert_eq!(to_big(&e), if ab == BigUint::ZERO { nb.clone() } else { g }),
+            }
+
             let two = BigUint::from(2u8);
             assert_eq!((to_big(&monty.half(&am)) * &two) % &nb, to_big(&am), "half");
             assert_eq!(
@@ -200,6 +216,22 @@ fn monty_matches_bigint() {
     check_monty::<3>(13);
     check_monty::<5>(15);
     check_monty::<8>(18);
+}
+
+#[test]
+fn inverse_reports_common_factors() {
+    // n = 1000003 · 1000033; any multiple of either prime has no inverse,
+    // and inv returns the shared factor.
+    let p = 1_000_003u64;
+    let q = 1_000_033u64;
+    let monty = Monty::new(Uint::<2>::from_u64(p * q)).unwrap();
+    for (a, gcd) in [(p, p), (3 * q, q), (p * 12345, p), (0, p * q)] {
+        let am = monty.to_monty(&Uint::from_u64(a));
+        assert_eq!(monty.inv(&am), Err(Uint::from_u64(gcd)), "a = {a}");
+    }
+    let am = monty.to_monty(&Uint::from_u64(2));
+    let inv = monty.inv(&am).unwrap();
+    assert_eq!(monty.from_monty(&inv), Uint::from_u64((p * q).div_ceil(2)));
 }
 
 #[test]

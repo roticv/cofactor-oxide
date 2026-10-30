@@ -135,7 +135,100 @@ impl<const LIMBS: usize> Monty<LIMBS> {
     }
 
     pub fn square(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
-        self.mul(a, a)
+        // A dedicated square computes each cross product once, but in
+        // benchmarks (benches/arith.rs) that only pays off for one limb,
+        // where it's about 25% faster. At larger widths it's no better than
+        // multiplying, and sometimes worse.
+        if LIMBS == 1 {
+            let (lo, hi) = a.widening_square();
+            self.reduce(&lo, &hi)
+        } else {
+            self.mul(a, a)
+        }
+    }
+
+    /// Montgomery reduction: computes `t·R⁻¹ mod n` for a double-width
+    /// `t = lo + hi·R`, which must be below `n·R`.
+    ///
+    /// This is the SOS (separated operand scanning) method. Each round adds
+    /// the multiple of `n` that clears the lowest remaining limb of `t`.
+    pub fn reduce(&self, lo: &Uint<LIMBS>, hi: &Uint<LIMBS>) -> Uint<LIMBS> {
+        let n = self.modulus.as_limbs();
+        let mut lo = *lo.as_limbs();
+        let mut hi = *hi.as_limbs();
+        // Carries out of the top of `hi`. Since t < n·R, the result is
+        // below 2n, so this ends up 0 or 1.
+        let mut top: Limb = 0;
+        for i in 0..LIMBS {
+            let m = lo[i].wrapping_mul(self.neg_inv);
+            let mut carry = 0;
+            for j in 0..LIMBS {
+                let k = i + j;
+                let slot = if k < LIMBS {
+                    &mut lo[k]
+                } else {
+                    &mut hi[k - LIMBS]
+                };
+                (*slot, carry) = mac(*slot, m, n[j], carry);
+            }
+            // Ripple the carry up from offset i + LIMBS.
+            for limb in &mut hi[i..] {
+                if carry == 0 {
+                    break;
+                }
+                (*limb, carry) = adc(*limb, carry, 0);
+            }
+            top += carry;
+        }
+        let t = Uint::from_limbs(hi);
+        if top != 0 || t >= self.modulus {
+            t.wrapping_sub(&self.modulus)
+        } else {
+            t
+        }
+    }
+
+    /// Modular inverse in Montgomery form: returns `a⁻¹` if it exists, or
+    /// `Err(gcd(a, n))` if it doesn't.
+    ///
+    /// The error case is useful in itself: in ECM, a failed inversion is a
+    /// factor of `n`. This uses the binary extended Euclidean algorithm,
+    /// which is far slower than a multiplication, so call it rarely.
+    pub fn inv(&self, a: &Uint<LIMBS>) -> Result<Uint<LIMBS>, Uint<LIMBS>> {
+        let n = self.modulus;
+        // Invert the ordinary value, then convert back. Since R is coprime
+        // to n, gcd(a·R mod n, n) = gcd(a, n).
+        let mut u = self.from_monty(a);
+        if u.is_zero() {
+            return Err(n);
+        }
+        // Invariants: x1·a ≡ u and x2·a ≡ v (mod n), for ordinary a.
+        let mut v = n;
+        let mut x1 = Uint::ONE;
+        let mut x2 = Uint::ZERO;
+        while u != Uint::ONE && v != Uint::ONE {
+            while !u.is_odd() {
+                u = u >> 1;
+                x1 = self.half(&x1);
+            }
+            while !v.is_odd() {
+                v = v >> 1;
+                x2 = self.half(&x2);
+            }
+            if u >= v {
+                u = u.wrapping_sub(&v);
+                x1 = self.sub(&x1, &x2);
+                if u.is_zero() {
+                    // u and v were equal, and neither was 1.
+                    return Err(v);
+                }
+            } else {
+                v = v.wrapping_sub(&u);
+                x2 = self.sub(&x2, &x1);
+            }
+        }
+        let inverse = if u == Uint::ONE { x1 } else { x2 };
+        Ok(self.to_monty(&inverse))
     }
 
     /// Modular addition. Works the same in or out of Montgomery form.

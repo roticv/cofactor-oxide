@@ -172,6 +172,53 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         (Self { limbs: lo }, Self { limbs: hi })
     }
 
+    /// Full square, returned as `(low, high)` halves.
+    ///
+    /// Same result as `widening_mul(self, self)`, but each cross product
+    /// `a_i·a_j` with `i ≠ j` is computed once and doubled, rather than twice.
+    pub fn widening_square(&self) -> (Self, Self) {
+        let a = &self.limbs;
+        let mut lo = [0; LIMBS];
+        let mut hi = [0; LIMBS];
+        // Sum of a_i·a_j over i < j, at limb offset i + j.
+        for i in 0..LIMBS {
+            let mut carry = 0;
+            for j in i + 1..LIMBS {
+                let k = i + j;
+                let slot = if k < LIMBS {
+                    &mut lo[k]
+                } else {
+                    &mut hi[k - LIMBS]
+                };
+                (*slot, carry) = mac(*slot, a[i], a[j], carry);
+            }
+            // Offset i + LIMBS hasn't been written by any earlier row.
+            hi[i] = carry;
+        }
+
+        // Double it. The sum is below 2^(2·BITS − 1), so nothing is lost.
+        let top_of_lo = lo[LIMBS - 1] >> (LIMB_BITS - 1);
+        let mut hi = *(Self { limbs: hi } << 1).as_limbs();
+        let mut lo = *(Self { limbs: lo } << 1).as_limbs();
+        hi[0] |= top_of_lo;
+
+        // Add the squares a_i² at offset 2i.
+        let mut carry = 0;
+        for i in 0..LIMBS {
+            let (sq_lo, sq_hi) = mac(0, a[i], a[i], 0);
+            for (k, limb) in [(2 * i, sq_lo), (2 * i + 1, sq_hi)] {
+                let slot = if k < LIMBS {
+                    &mut lo[k]
+                } else {
+                    &mut hi[k - LIMBS]
+                };
+                (*slot, carry) = adc(*slot, limb, carry);
+            }
+        }
+        debug_assert_eq!(carry, 0);
+        (Self { limbs: lo }, Self { limbs: hi })
+    }
+
     /// Computes `self * rhs`, returning the result and the limb carried out
     /// of the top.
     pub fn overflowing_mul_limb(&self, rhs: Limb) -> (Self, Limb) {
