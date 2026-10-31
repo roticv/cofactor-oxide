@@ -15,18 +15,23 @@
 //! ones.
 
 mod base;
+mod job;
 mod lanczos;
 mod linalg;
 mod modp;
 mod params;
 mod sieve;
 
+use core::ops::ControlFlow;
+
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::arith::{Monty, Uint};
 
 pub use base::{FactorBase, Prime, multiplier};
+pub use job::{QsCollector, QsJob, QsSieve, Start};
 pub use linalg::dependencies;
 pub use modp::{pow_mod, sqrt_mod};
 pub use params::{BLOCK_SIZE, Params};
@@ -37,8 +42,99 @@ pub use sieve::{Relation, Sieve};
 /// with probability at least ½.
 const EXTRA_RELATIONS: usize = 32;
 
+/// The quadratic sieve set up for one number: its factor base and
+/// parameters.
+///
+/// Sieving and collecting are separate so that they can run on different
+/// threads: each thread sieves with its own [`Sieve`], from
+/// [`Siqs::sieve`] with a different seed, and one [`Relations`] gathers
+/// what they find until [`Relations::is_complete`], when [`Siqs::finish`]
+/// turns it into a factor. [`qs`] does all of it on one thread.
+#[derive(Clone, Debug)]
+pub struct Siqs<const LIMBS: usize> {
+    n: Uint<LIMBS>,
+    params: Params,
+    fb: Arc<FactorBase<LIMBS>>,
+}
+
+impl<const LIMBS: usize> Siqs<LIMBS> {
+    /// Sets up the sieve for `n` with `params`.
+    ///
+    /// Some numbers need no sieving: `Err(Some(f))` gives a proper factor
+    /// found along the way (2 for even `n`, a factor-base prime dividing
+    /// `n`, or a factor from `kN` being a square), and `Err(None)` means
+    /// `n` turned out to be one of the factor-base primes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is too small for the factor base.
+    pub fn new(n: &Uint<LIMBS>, params: &Params) -> Result<Self, Option<Uint<LIMBS>>> {
+        let two = Uint::from_u64(2);
+        if !n.is_odd() {
+            return Err((*n > two).then_some(two));
+        }
+        let proper = |g: Uint<LIMBS>| (g != Uint::ONE && g != *n).then_some(g);
+        let fb = FactorBase::new(n, multiplier(n), params.fb_size).map_err(proper)?;
+        let s = fb.kn.isqrt();
+        if s.widening_square() == (fb.kn, Uint::ZERO) {
+            return Err(proper(s.gcd(n)));
+        }
+        Ok(Self {
+            n: *n,
+            params: *params,
+            fb: Arc::new(fb),
+        })
+    }
+
+    pub fn factor_base(&self) -> &FactorBase<LIMBS> {
+        &self.fb
+    }
+
+    /// A sieve for this number. Sieves with different seeds find different
+    /// relations.
+    pub fn sieve(&self, seed: u64) -> Sieve<LIMBS> {
+        Sieve::new(Arc::clone(&self.fb), &self.params, seed)
+    }
+
+    /// An empty collection of relations for this number.
+    pub fn relations(&self) -> Relations<LIMBS> {
+        Relations {
+            monty: Monty::new(self.n).expect("n is odd"),
+            target: self.fb.primes.len() + 1 + EXTRA_RELATIONS,
+            rows: Vec::new(),
+            seen: BTreeSet::new(),
+            partials: BTreeMap::new(),
+        }
+    }
+
+    /// Finds a factor from the collected relations.
+    ///
+    /// Returns a proper factor of `n`, or `None` if every dependency gave a
+    /// trivial one, which is what happens when `n` is prime or a prime
+    /// power.
+    pub fn finish(&self, relations: &Relations<LIMBS>) -> Option<Uint<LIMBS>> {
+        let rows = &relations.rows;
+        // Column 0 is the sign, column i + 1 the i-th factor-base prime.
+        let matrix: Vec<Vec<usize>> = rows
+            .iter()
+            .map(|r| {
+                let sign = r.negative.then_some(0);
+                sign.into_iter()
+                    .chain(r.factors.iter().map(|&i| i as usize + 1))
+                    .collect()
+            })
+            .collect();
+        let n = self.n;
+        dependencies(&matrix, self.fb.primes.len() + 1)
+            .iter()
+            .map(|dep| square_root(&relations.monty, &self.fb, rows, dep))
+            .find(|&g| g != Uint::ONE && g != n)
+    }
+}
+
 /// A row of the matrix: `t² ≡ ±L²·∏ p (mod N)`, from a full relation
 /// (`L = 1`) or two partial relations sharing the large prime `L`.
+#[derive(Clone, Debug)]
 struct Row<const LIMBS: usize> {
     /// `t mod N`, in Montgomery form.
     t: Uint<LIMBS>,
@@ -47,86 +143,109 @@ struct Row<const LIMBS: usize> {
     large: u64,
 }
 
-/// Factors `n` with the quadratic sieve, using `params`.
+/// Relations collected for one number, as rows of the matrix.
+#[derive(Clone, Debug)]
+pub struct Relations<const LIMBS: usize> {
+    monty: Monty<LIMBS>,
+    target: usize,
+    rows: Vec<Row<LIMBS>>,
+    /// The same relation can come from more than one polynomial.
+    seen: BTreeSet<Uint<LIMBS>>,
+    partials: BTreeMap<u64, Relation<LIMBS>>,
+}
+
+impl<const LIMBS: usize> Relations<LIMBS> {
+    /// Adds a relation. A full one is a row by itself; a partial one makes
+    /// a row with the first earlier partial that has the same large prime.
+    pub fn add(&mut self, r: Relation<LIMBS>) {
+        let monty = &self.monty;
+        if r.large == 1 {
+            if self.seen.insert(r.t) {
+                self.rows.push(Row {
+                    t: monty.to_monty(&r.t),
+                    negative: r.negative,
+                    factors: r.factors,
+                    large: 1,
+                });
+            }
+            return;
+        }
+        match self.partials.get(&r.large) {
+            None => {
+                self.partials.insert(r.large, r);
+            }
+            Some(first) if first.t != r.t => {
+                let mut factors = first.factors.clone();
+                factors.extend(&r.factors);
+                self.rows.push(Row {
+                    t: monty.mul(&monty.to_monty(&first.t), &monty.to_monty(&r.t)),
+                    negative: first.negative != r.negative,
+                    factors,
+                    large: r.large,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Rows so far.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Rows needed: one more than the columns, plus some to spare.
+    pub fn target(&self) -> usize {
+        self.target
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.rows.len() >= self.target
+    }
+}
+
+/// Factors `n` with the quadratic sieve on one thread, using `params`.
 ///
-/// Returns a proper factor of `n`, or `None` if every dependency gave a
-/// trivial one, which is what happens when `n` is prime or a prime power.
-/// Even `n` greater than 2 returns 2.
+/// Returns a proper factor of `n`, or `None` if there is none to find,
+/// which is the case when `n` is prime or a prime power. Even `n` greater
+/// than 2 returns 2.
 ///
 /// # Panics
 ///
-/// Panics if `kN` overflows the integer width for the chosen multiplier `k`
-/// (at most 70), or if `n` is too small for the factor base.
+/// Panics if `n` is too small for the factor base.
 pub fn qs<const LIMBS: usize>(n: &Uint<LIMBS>, params: &Params) -> Option<Uint<LIMBS>> {
-    let two = Uint::from_u64(2);
-    if !n.is_odd() {
-        return (*n > two).then_some(two);
-    }
-    let proper = |g: Uint<LIMBS>| (g != Uint::ONE && g != *n).then_some(g);
-    let fb = match FactorBase::new(n, multiplier(n), params.fb_size) {
-        Ok(fb) => fb,
-        Err(p) => return proper(p),
-    };
-    let s = fb.kn.isqrt();
-    if s.widening_square() == (fb.kn, Uint::ZERO) {
-        return proper(s.gcd(n));
-    }
-    let monty = Monty::new(*n)?;
+    qs_with(n, params, |_, _| ControlFlow::Continue(())).unwrap_or(None)
+}
 
-    let mut sieve = Sieve::new(&fb, params, 0);
-    let target = fb.primes.len() + 1 + EXTRA_RELATIONS;
-    let mut rows = Vec::new();
-    // The same relation can come from more than one polynomial.
-    let mut seen = BTreeSet::new();
-    let mut partials: BTreeMap<u64, Relation<LIMBS>> = BTreeMap::new();
-    while rows.len() < target {
+/// The callback asked [`qs_with`] to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stopped;
+
+/// Factors `n` like [`qs`], calling `progress(rows, target)` after each
+/// polynomial, and stopping if it returns `Break`.
+pub fn qs_with<const LIMBS: usize>(
+    n: &Uint<LIMBS>,
+    params: &Params,
+    mut progress: impl FnMut(usize, usize) -> ControlFlow<()>,
+) -> Result<Option<Uint<LIMBS>>, Stopped> {
+    let siqs = match Siqs::new(n, params) {
+        Ok(siqs) => siqs,
+        Err(found) => return Ok(found),
+    };
+    let mut sieve = siqs.sieve(0);
+    let mut relations = siqs.relations();
+    while !relations.is_complete() {
         for r in sieve.sieve_poly() {
-            if r.large == 1 {
-                if seen.insert(r.t) {
-                    rows.push(Row {
-                        t: monty.to_monty(&r.t),
-                        negative: r.negative,
-                        factors: r.factors,
-                        large: 1,
-                    });
-                }
-                continue;
-            }
-            // Each partial after the first with its large prime pairs up
-            // with the first.
-            match partials.get(&r.large) {
-                None => {
-                    partials.insert(r.large, r);
-                }
-                Some(first) if first.t != r.t => {
-                    let mut factors = first.factors.clone();
-                    factors.extend(&r.factors);
-                    rows.push(Row {
-                        t: monty.mul(&monty.to_monty(&first.t), &monty.to_monty(&r.t)),
-                        negative: first.negative != r.negative,
-                        factors,
-                        large: r.large,
-                    });
-                }
-                Some(_) => {}
-            }
+            relations.add(r);
+        }
+        if progress(relations.len(), relations.target()).is_break() {
+            return Err(Stopped);
         }
     }
-    rows.truncate(target);
-
-    // Column 0 is the sign, column i + 1 the i-th factor-base prime.
-    let matrix: Vec<Vec<usize>> = rows
-        .iter()
-        .map(|r| {
-            let sign = r.negative.then_some(0);
-            sign.into_iter()
-                .chain(r.factors.iter().map(|&i| i as usize + 1))
-                .collect()
-        })
-        .collect();
-    dependencies(&matrix, fb.primes.len() + 1)
-        .iter()
-        .find_map(|dep| proper(square_root(&monty, &fb, &rows, dep)))
+    Ok(siqs.finish(&relations))
 }
 
 /// For rows whose product is a square, `X = ∏ t` and `Y = √∏ |Q|` satisfy

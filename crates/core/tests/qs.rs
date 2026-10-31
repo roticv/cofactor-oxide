@@ -8,7 +8,7 @@
 use cofox_core::Uint;
 use cofox_core::primes::Primes;
 use cofox_core::qs::{
-    FactorBase, Params, Prime, Sieve, dependencies, multiplier, pow_mod, qs, sqrt_mod,
+    FactorBase, Params, Prime, QsJob, Sieve, Start, dependencies, multiplier, pow_mod, qs, sqrt_mod,
 };
 
 /// RSA-100 is 330 bits, and kN a few bits more: 12 limbs is at least 384
@@ -251,7 +251,7 @@ fn relations_hold() {
     let n = u(SEMIPRIMES[4].0);
     let params = Params::for_bits(n.bits());
     let fb = FactorBase::new(&n, multiplier(&n), params.fb_size).unwrap();
-    let mut sieve = Sieve::new(&fb, &params, 1);
+    let mut sieve = Sieve::new(std::sync::Arc::new(fb.clone()), &params, 1);
     let (mut full, mut partial, mut a_values) = (0, 0, Vec::new());
     for _ in 0..40 {
         let (a, b_negative, b) = sieve.poly();
@@ -385,4 +385,52 @@ fn eighty_digits() {
         u("4352181362699322384166653796609905670919"),
     );
     assert!(f == p || f == q, "{n} gave {f}");
+}
+
+#[test]
+fn threads_share_the_sieving() {
+    // Three sieves on their own threads, sending their relations as words
+    // to one collector.
+    let (n, p, q) = SEMIPRIMES[5];
+    let Start::Sieve(job) = QsJob::start(n).unwrap() else {
+        panic!("no sieving needed");
+    };
+    assert_eq!(job.bits(), u(n).bits());
+    let mut collector = job.collector();
+    let (send, receive) = std::sync::mpsc::channel();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let mut from = [0; 3];
+    std::thread::scope(|scope| {
+        for seed in 0..3 {
+            let (send, job, done) = (send.clone(), &job, &done);
+            scope.spawn(move || {
+                let mut sieve = job.sieve(seed);
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    if send.send((seed, sieve.sieve_poly())).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        while !collector.is_complete() {
+            let (seed, words) = receive.recv().unwrap();
+            if !words.is_empty() {
+                from[seed as usize] += 1;
+            }
+            collector.add(&words);
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(receive);
+    });
+    assert!(from.iter().all(|&batches| batches > 0), "{from:?}");
+    let f = collector.finish().expect("no factor");
+    assert!(f == p || f == q, "{n} gave {f}");
+}
+
+#[test]
+fn jobs_that_need_no_sieving() {
+    assert!(matches!(QsJob::start("1000000014").unwrap(), Start::Factor(f) if f == "2"));
+    let n = u("401").widening_mul(&u(SEMIPRIMES[0].0)).0.to_string();
+    assert!(matches!(QsJob::start(&n).unwrap(), Start::Factor(f) if f == "401"));
+    assert!(QsJob::start("12x").is_err());
 }

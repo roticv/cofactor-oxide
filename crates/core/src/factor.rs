@@ -1,6 +1,6 @@
-//! The factoring pipeline: trial division, then Pollard's rho, p−1, p+1 and
-//! ECM on whatever composite remains, with BPSW deciding when a piece is
-//! prime.
+//! The factoring pipeline: trial division, then Pollard's rho, p−1, p+1,
+//! ECM and the quadratic sieve on whatever composite remains, with BPSW
+//! deciding when a piece is prime.
 
 use core::fmt;
 use core::ops::ControlFlow;
@@ -14,6 +14,7 @@ use crate::ecm::ecm_curve;
 use crate::pm1::pollard_pm1;
 use crate::pp1::williams_pp1;
 use crate::prime::is_prime;
+use crate::qs::{Params, qs_with};
 use crate::rho::pollard_rho;
 
 /// Trial division covers every divisor below this.
@@ -62,6 +63,10 @@ const RHO_ATTEMPTS: u64 = 3;
 const RHO_STEPS: u64 = 1 << 22;
 const RHO_MAX_BITS: u32 = 80;
 
+/// The quadratic sieve's parameters go up to here (110 digits). Larger
+/// composites take days at best.
+pub const QS_MAX_BITS: u32 = 363;
+
 /// Widths, in limbs, that [`factor_str`] can pick from.
 const WIDTHS: [usize; 5] = [1, 2, 4, 8, 16];
 
@@ -109,18 +114,37 @@ pub struct Config {
     /// whichever finishes first with every factor prime has the answer.
     pub worker: u32,
     pub workers: u32,
+    /// What to do with composites that ECM leaves.
+    pub qs: QsMode,
+}
+
+/// What [`factor_with`] does with a composite of more than 80 bits that
+/// ECM doesn't split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QsMode {
+    /// Run the quadratic sieve on it, up to [`QS_MAX_BITS`]. ECM then stops
+    /// at the level for primes of about 30% of its digits (at least 15),
+    /// past which the sieve is the quicker way.
+    Run,
+    /// Return it unsplit, with ECM limited as for `Run`, for the caller to
+    /// sieve, for example on several threads with [`crate::qs::QsJob`].
+    Defer,
+    /// Return it unsplit after ECM up to [`Config::ecm_digits`].
+    Off,
 }
 
 impl Default for Config {
-    /// ECM up to 20 digits, in a single run. On a composite with no factor
-    /// that small, ECM gives up after about 3 seconds at 100 digits and 12
-    /// seconds at 300 digits, natively. 25 digits takes about four times as
-    /// long.
+    /// ECM up to 20 digits, then the quadratic sieve, in a single run.
+    /// On a composite with no factor that small, ECM gives up after about 3
+    /// seconds at 100 digits and 12 seconds at 300 digits, natively. 25
+    /// digits takes about four times as long.
     fn default() -> Self {
         Self {
             ecm_digits: 20,
             worker: 0,
             workers: 1,
+            qs: QsMode::Run,
         }
     }
 }
@@ -130,6 +154,13 @@ impl Config {
     #[must_use]
     pub fn ecm_digits(mut self, digits: u32) -> Self {
         self.ecm_digits = digits;
+        self
+    }
+
+    /// Sets [`Config::qs`].
+    #[must_use]
+    pub fn qs(mut self, mode: QsMode) -> Self {
+        self.qs = mode;
         self
     }
 
@@ -162,6 +193,13 @@ pub enum Progress {
         done: u64,
         total: u64,
     },
+    /// The quadratic sieve on a composite of `bits` bits: `relations` of
+    /// the `target` it needs, counting pairs of partial relations as one.
+    Qs {
+        bits: u32,
+        relations: u64,
+        target: u64,
+    },
 }
 
 /// Factors `n` with the default [`Config`], returning its factors in
@@ -175,10 +213,11 @@ pub fn factor<const LIMBS: usize>(n: &Uint<LIMBS>) -> Vec<Factor<Uint<LIMBS>>> {
 }
 
 /// Factors `n` like [`factor`], with the given [`Config`], calling
-/// `progress` before each method and after each ECM curve.
+/// `progress` before each method, after each ECM curve and after each
+/// sieving polynomial.
 ///
-/// If `progress` returns `Break`, the pipeline stops within one method or
-/// curve. Pieces not yet split are still tested for primality, and the
+/// If `progress` returns `Break`, the pipeline stops within one method,
+/// curve or polynomial. Pieces not yet split are still tested for primality, and the
 /// composite ones come back with `is_prime: false`.
 pub fn factor_with<const LIMBS: usize>(
     n: &Uint<LIMBS>,
@@ -291,12 +330,19 @@ fn split<const LIMBS: usize>(
     // skipped, since the smallest prime factor is at most that.
     let workers = u64::from(config.workers.max(1));
     let worker = u64::from(config.worker) % workers;
+    let sieve = config.qs != QsMode::Off && bits > RHO_MAX_BITS && bits <= QS_MAX_BITS;
+    let ecm_digits = if sieve {
+        // 30% of the digits: log₁₀ 2 ≈ 0.301, so about 9% of the bits.
+        config.ecm_digits.min((bits * 9 / 100).max(15))
+    } else {
+        config.ecm_digits
+    };
     let mut sigma = FIRST_SIGMA;
     let mut covered = 0;
     for (digits, b1, curves) in ECM_LEVELS {
         // A d-digit prime has more than 3.32·(d − 1) bits, and the smallest
         // prime factor has at most bits(m)/2.
-        if digits > config.ecm_digits || covered * 332 / 100 >= bits.div_ceil(2) {
+        if digits > ecm_digits || covered * 332 / 100 >= bits.div_ceil(2) {
             break;
         }
         let total = curves.saturating_sub(worker).div_ceil(workers);
@@ -325,6 +371,17 @@ fn split<const LIMBS: usize>(
                 return Ok(Some(g));
             }
         }
+    }
+    if sieve && config.qs == QsMode::Run {
+        let params = Params::for_bits(bits);
+        return qs_with(m, &params, |relations, target| {
+            progress(Progress::Qs {
+                bits,
+                relations: relations as u64,
+                target: target as u64,
+            })
+        })
+        .map_err(|_| ());
     }
     Ok(None)
 }

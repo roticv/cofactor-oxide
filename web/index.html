@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>cofox · factor integers in your browser</title>
-  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho, Pollard p−1, Williams p+1, ECM and BPSW, running entirely in your browser.">
+  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho, Pollard p−1, Williams p+1, ECM, the quadratic sieve and BPSW, running entirely in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23b4532a'/%3E%3Cpath d='M10 10l12 12M22 10L10 22' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -263,6 +263,7 @@
           <button type="button" class="chip-btn" data-n="12398971716763562207922052360542852654532080813656624450549831">smooth p+1</button>
           <button type="button" class="chip-btn" data-n="5533137785856946782805032497402845976017">two 20-digit primes</button>
           <button type="button" class="chip-btn" data-n="875629172352184491588547325680801513040676851112599077">24-digit factor</button>
+          <button type="button" class="chip-btn" data-n="95741717322359106137862766319375166032677068850856466452653">two 30-digit primes</button>
         </div>
       </form>
 
@@ -289,8 +290,10 @@
             <span class="desc">The same idea for primes p where p+1 has only small factors, using Lucas sequences.</span></li>
           <li><b>Elliptic curve method</b><span class="badge done">done</span>
             <span class="desc">Montgomery curves with a two-stage search, in levels for factors of up to 25 digits, shared across Web Workers. Each curve is a fresh chance, so larger factors turn up sometimes too.</span></li>
-          <li><b>Quadratic sieve, then number field sieve</b><span class="badge">planned</span>
-            <span class="desc">General-purpose methods for hard composites.</span></li>
+          <li><b>Self-initializing quadratic sieve</b><span class="badge done">done</span>
+            <span class="desc">Splits what ECM leaves, up to 110 digits, with the sieving shared across Web Workers and block Lanczos for the linear algebra. ECM stops sooner when the sieve follows: at about 30% of the composite's digits.</span></li>
+          <li><b>Number field sieve</b><span class="badge">planned</span>
+            <span class="desc">The fastest known method for composites beyond about 100 digits.</span></li>
         </ul>
         <p style="margin-top: 14px">
           WebAssembly lacks a 64×64→128-bit multiply, so the browser build runs
@@ -324,48 +327,160 @@
     // its share of the ECM curves.
     const WORKERS = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
 
+    // Composites that ECM leaves go to the quadratic sieve, up to this
+    // size. Below 81 bits, rho always splits them first.
+    const QS_MIN_BITS = 81;
+    const QS_MAX_BITS = 363;
+
     const workers = [];
     let nextId = 0;
+    // The factorization in progress, and its current stage: the pipeline
+    // up to ECM, or the quadratic sieve on one composite.
     let pending = null;
+    let stage = null;
+    const CANCELLED = new Error("cancelled");
 
     function startWorker(index) {
       const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
       worker.onmessage = (event) => {
-        if (pending && event.data.id === pending.id) handle(index, event.data);
+        if (stage && event.data.id === stage.id) stage.onMessage(index, event.data);
       };
       workers[index] = worker;
     }
     for (let i = 0; i < WORKERS; i++) startWorker(i);
 
-    // Stops the workers that are still busy. Idle ones are kept.
-    function stopBusy() {
-      for (let i = 0; i < WORKERS; i++) {
-        if (pending.results[i] === undefined) {
-          workers[i].terminate();
-          startWorker(i);
-        }
-      }
+    function restart(index) {
+      workers[index].terminate();
+      startWorker(index);
     }
 
-    function handle(index, data) {
-      if (data.progress) {
-        pending.progress[index] = data.progress;
-        pending.label.textContent = describe(pending.progress);
-        return;
+    function setLabel(text) {
+      if (pending) pending.label.textContent = text;
+    }
+
+    // Runs the pipeline up to ECM on every worker. Resolves with the
+    // factors from the first run to end with every factor prime, or else
+    // from the run that split the most.
+    function runPipeline(n, ecmDigits) {
+      return new Promise((resolve, reject) => {
+        const id = nextId++;
+        const progress = [];
+        const results = {};
+        // Idle workers are kept.
+        const stopBusy = () => {
+          for (let i = 0; i < WORKERS; i++) if (results[i] === undefined) restart(i);
+        };
+        stage = {
+          id,
+          cancel() {
+            stopBusy();
+            reject(CANCELLED);
+          },
+          onMessage(index, data) {
+            if (data.progress) {
+              progress[index] = data.progress;
+              setLabel(describe(progress));
+              return;
+            }
+            results[index] = data;
+            if (data.error) {
+              stopBusy();
+              return reject(new Error(data.error));
+            }
+            if (data.factors.every((f) => f.prime)) {
+              stopBusy();
+              return resolve(data.factors);
+            }
+            const all = Object.values(results);
+            if (all.length === WORKERS) {
+              resolve(all.reduce((a, b) => (b.factors.length > a.factors.length ? b : a)).factors);
+            }
+          },
+        };
+        workers.forEach((worker, index) => {
+          worker.postMessage({ id, type: "factor", n: n.toString(), ecmDigits, worker: index, workers: WORKERS });
+        });
+      });
+    }
+
+    // Runs the quadratic sieve on every worker, with one more worker
+    // collecting the relations they find. Resolves with a proper factor of
+    // n, or null if there is none to find.
+    function runQs(n) {
+      return new Promise((resolve, reject) => {
+        const id = nextId++;
+        const collector = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+        let sieving = false;
+        const stopSieving = () => {
+          if (sieving) for (let i = 0; i < WORKERS; i++) restart(i);
+          sieving = false;
+        };
+        const stop = () => {
+          collector.terminate();
+          stopSieving();
+        };
+        const answer = (value) => {
+          stop();
+          resolve(value === null ? null : BigInt(value));
+        };
+        collector.onmessage = (event) => {
+          const data = event.data;
+          if (data.error) {
+            stop();
+            reject(new Error(data.error));
+          } else if ("immediate" in data) {
+            answer(data.immediate);
+          } else if (data.ready) {
+            sieving = true;
+            workers.forEach((worker, index) => {
+              worker.postMessage({ id, type: "sieve", n: n.toString(), seed: index });
+            });
+          } else if (data.progress) {
+            setLabel(describe([data.progress]));
+          } else if (data.solving) {
+            stopSieving();
+            setLabel(`Quadratic sieve: solving for the factor of a ${n.toString(2).length}-bit composite…`);
+          } else if ("found" in data) {
+            answer(data.found);
+          }
+        };
+        stage = {
+          id,
+          cancel() {
+            stop();
+            reject(CANCELLED);
+          },
+          onMessage(index, data) {
+            if (data.relations) {
+              collector.postMessage({ type: "relations", relations: data.relations }, [data.relations.buffer]);
+            } else if (data.error) {
+              stop();
+              reject(new Error(data.error));
+            }
+          },
+        };
+        collector.postMessage({ id, type: "collect", n: n.toString() });
+      });
+    }
+
+    const compare = (a, b) => (BigInt(a.value) < BigInt(b.value) ? -1 : BigInt(a.value) > BigInt(b.value) ? 1 : 0);
+
+    // The pipeline up to ECM, then the quadratic sieve on each composite
+    // it leaves, and the same again on the pieces that splits into.
+    async function factorAll(n, ecmDigits) {
+      const factors = [];
+      for (const f of await runPipeline(n, ecmDigits)) {
+        const value = BigInt(f.value);
+        const bits = value.toString(2).length;
+        const sieve = !f.prime && bits >= QS_MIN_BITS && bits <= QS_MAX_BITS;
+        const d = sieve ? await runQs(value) : null;
+        if (d) {
+          factors.push(...(await factorAll(d, ecmDigits)), ...(await factorAll(value / d, ecmDigits)));
+        } else {
+          factors.push(f);
+        }
       }
-      pending.results[index] = data;
-      if (data.error) return finish(data);
-      // The first run to end with every factor prime has the answer.
-      if (data.factors.every((f) => f.prime)) {
-        stopBusy();
-        return finish(data);
-      }
-      // Otherwise wait for all of them, and take the one that split most.
-      const results = Object.values(pending.results);
-      if (results.length === WORKERS) {
-        const best = results.reduce((a, b) => (b.factors.length > a.factors.length ? b : a));
-        finish(best);
-      }
+      return factors.sort(compare);
     }
 
     // Summarizes the workers' progress: during ECM, the curves done at the
@@ -381,8 +496,11 @@
         const total = level.reduce((sum, e) => sum + e.total, 0);
         return `ECM, ${top.digits}-digit level: ${done} of ${total} curves on a ${top.bits}-bit composite…`;
       }
-      const names = { rho: "Pollard rho", "p-1": "Pollard p−1", "p+1": "Williams p+1" };
       const first = events[0];
+      if (first?.method === "qs") {
+        return `Quadratic sieve: ${first.done} of ${first.total} relations on a ${first.bits}-bit composite…`;
+      }
+      const names = { rho: "Pollard rho", "p-1": "Pollard p−1", "p+1": "Williams p+1" };
       return first ? `${names[first.method]} on a ${first.bits}-bit composite…` : "Factoring…";
     }
 
@@ -494,27 +612,25 @@
       card.append(head, number, working);
       results.prepend(card);
 
-      const id = nextId++;
       const start = performance.now();
       const timer = setInterval(() => {
         time.textContent = formatTime(performance.now() - start);
       }, 100);
-      pending = { id, source, ecmDigits, n, card, working, label, time, timer, start, progress: [], results: {} };
+      pending = { source, ecmDigits, n, card, working, label, time, timer, start };
       go.disabled = true;
 
-      cancel.onclick = () => {
-        stopBusy();
-        finish({ id, cancelled: true });
-      };
-      workers.forEach((worker, index) => {
-        worker.postMessage({ id, n: n.toString(), ecmDigits, worker: index, workers: WORKERS });
-      });
+      cancel.onclick = () => stage?.cancel();
+      factorAll(n, ecmDigits).then(
+        (factors) => finish({ factors }),
+        (err) => finish(err === CANCELLED ? { cancelled: true } : { error: String(err?.message ?? err) }),
+      );
     }
 
     function finish(data) {
       const { source, ecmDigits, n, card, working, time, timer, start } = pending;
       clearInterval(timer);
       pending = null;
+      stage = null;
       go.disabled = false;
       working.remove();
 
@@ -558,7 +674,7 @@
         card.append(el("p", "note ok", "Prime (Baillie–PSW)."));
       } else if (composites > 0) {
         const note = el("p", "note warn",
-          `The dashed factor is composite, but ECM found no factor of up to about ${ecmDigits} digits. The quadratic sieve will handle these once it's implemented.`);
+          `The dashed factor is composite, but ECM found no factor of up to about ${ecmDigits} digits, and it's too large for the quadratic sieve here (up to 110 digits).`);
         card.append(note);
         if (ecmDigits < ECM_MAX_DIGITS) {
           const deeper = el("button", "ghost", `Search for ${ecmDigits + 5}-digit factors (about 4× longer)`);

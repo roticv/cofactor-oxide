@@ -1,6 +1,7 @@
 //! Sieving for relations, one polynomial at a time.
 
 use alloc::collections::BTreeSet;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -79,8 +80,9 @@ fn log2_uint<const LIMBS: usize>(x: &Uint<LIMBS>) -> f64 {
 /// The sieve adds `log₂ p` at every `x` where `p` divides `g(x)`. Where the
 /// sum comes close to `log₂ |g(x)|`, trial division decides whether `g(x)`
 /// is smooth, apart from at most one prime below the large-prime bound.
-pub struct Sieve<'a, const LIMBS: usize> {
-    fb: &'a FactorBase<LIMBS>,
+pub struct Sieve<const LIMBS: usize> {
+    /// Shared with the other sieves on the same number.
+    fb: Arc<FactorBase<LIMBS>>,
     /// Half the sieve interval.
     m: i64,
     large_bound: u64,
@@ -119,7 +121,7 @@ pub struct Sieve<'a, const LIMBS: usize> {
     magic: Vec<u64>,
 }
 
-impl<'a, const LIMBS: usize> Sieve<'a, LIMBS> {
+impl<const LIMBS: usize> Sieve<LIMBS> {
     /// Starts sieving with the first polynomial. Different seeds choose
     /// different values of `a`.
     ///
@@ -127,11 +129,11 @@ impl<'a, const LIMBS: usize> Sieve<'a, LIMBS> {
     ///
     /// Panics if the factor base has fewer than 4 primes that can go into
     /// `a`.
-    pub fn new(fb: &'a FactorBase<LIMBS>, params: &Params, seed: u64) -> Self {
-        let largest = fb.primes.last().unwrap();
+    pub fn new(fb: Arc<FactorBase<LIMBS>>, params: &Params, seed: u64) -> Self {
+        let largest = *fb.primes.last().unwrap();
         let large_bound = u64::from(largest.p) * u64::from(params.large_mult);
         let mut sieve = Self {
-            fb,
+            fb: Arc::clone(&fb),
             m: (params.blocks * BLOCK_SIZE) as i64,
             large_bound,
             slack: 0,
@@ -178,8 +180,9 @@ impl<'a, const LIMBS: usize> Sieve<'a, LIMBS> {
 
     /// The factor-base indices of a fresh `a` close to `√(2kN)/M`.
     fn choose_a(&mut self) -> Vec<usize> {
-        let k = self.fb.multiplier;
-        let primes = &self.fb.primes;
+        let fb = Arc::clone(&self.fb);
+        let k = fb.multiplier;
+        let primes = &fb.primes;
         let usable: Vec<usize> = (0..primes.len())
             .filter(|&i| primes[i].p > 2 && !k.is_multiple_of(primes[i].p))
             .collect();
@@ -237,7 +240,7 @@ impl<'a, const LIMBS: usize> Sieve<'a, LIMBS> {
 
     /// Moves to the first `b` of a fresh `a`.
     fn new_a(&mut self) {
-        let fb = self.fb;
+        let fb = Arc::clone(&self.fb);
         self.a_primes = self.choose_a();
         self.a = self.a_primes.iter().fold(Uint::ONE, |a, &i| {
             a.overflowing_mul_limb(fb.primes[i].p as Limb).0

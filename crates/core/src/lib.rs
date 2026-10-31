@@ -2,9 +2,9 @@
 //!
 //! The plan is a pipeline that removes small factors cheaply (trial division,
 //! p±1, ECM) before handing what is left to the quadratic sieve or GNFS.
-//! So far [`factor`] runs trial division, Pollard's rho, p−1, p+1 and ECM,
-//! with the Baillie–PSW test deciding primality, on the fixed-width integers
-//! in [`arith`].
+//! So far [`factor`] runs trial division, Pollard's rho, p−1, p+1, ECM and
+//! the quadratic sieve, with the Baillie–PSW test deciding primality, on the
+//! fixed-width integers in [`arith`].
 
 #![no_std]
 
@@ -24,4 +24,6 @@ pub mod rho;
 mod stage2;
 
 pub use arith::{Monty, Uint};
-pub use factor::{Config, Factor, Progress, factor, factor_str, factor_str_with, factor_with};
+pub use factor::{
+    Config, Factor, Progress, QS_MAX_BITS, QsMode, factor, factor_str, factor_str_with, factor_with,
+};

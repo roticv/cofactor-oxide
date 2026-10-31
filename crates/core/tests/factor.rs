@@ -3,7 +3,7 @@
 use cofox_core::prime::is_prime;
 use std::ops::ControlFlow;
 
-use cofox_core::{Config, Factor, Progress, Uint, factor, factor_str, factor_str_with};
+use cofox_core::{Config, Factor, Progress, QsMode, Uint, factor, factor_str, factor_str_with};
 
 fn factor_u64(n: u64) -> Vec<u64> {
     factor(&Uint::<2>::from_u64(n))
@@ -15,9 +15,10 @@ fn factor_u64(n: u64) -> Vec<u64> {
         .collect()
 }
 
-/// Factors with the given ECM level and no progress callback.
+/// Factors with the given ECM level, no quadratic sieve and no progress
+/// callback.
 fn with_ecm(n: &str, ecm_digits: u32) -> Vec<Factor<String>> {
-    let config = Config::default().ecm_digits(ecm_digits);
+    let config = Config::default().ecm_digits(ecm_digits).qs(QsMode::Off);
     factor_str_with(n, &config, |_| ControlFlow::Continue(())).unwrap()
 }
 
@@ -149,7 +150,8 @@ fn reports_progress() {
     let n = times_m89("941368429471859");
     let bits = n.parse::<Uint<8>>().unwrap().bits();
     let mut events = Vec::new();
-    let factors = factor_str_with(&n, &Config::default(), |event| {
+    let config = Config::default().qs(QsMode::Off);
+    let factors = factor_str_with(&n, &config, |event| {
         events.push(event);
         ControlFlow::Continue(())
     })
@@ -202,7 +204,7 @@ fn workers_share_the_curves() {
     let mut found_by = [false; 4];
     let mut totals = [0; 2];
     for worker in 0..4 {
-        let config = Config::default().worker(worker, 4);
+        let config = Config::default().worker(worker, 4).qs(QsMode::Off);
         let factors = factor_str_with(&n, &config, |event| {
             if let Progress::Ecm {
                 digits,
@@ -252,4 +254,93 @@ fn bad_input() {
     assert!(factor_str("12x").is_err());
     let too_big = "9".repeat(400);
     assert!(factor_str(&too_big).is_err());
+}
+
+/// Two 25-digit primes, beyond what ECM tries at 49 digits.
+const QS_SEMIPRIME: (&str, &str, &str) = (
+    "9371289581805834728418039021175914244350477206171",
+    "1424093917487413198662847",
+    "6580527777507807889536293",
+);
+
+#[test]
+fn needs_qs() {
+    let (n, p, q) = QS_SEMIPRIME;
+    let mut events = Vec::new();
+    let factors = factor_str_with(n, &Config::default(), |event| {
+        events.push(event);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert_eq!(factors, primes(&[p, q]));
+    // ECM stops at the 15-digit level (30% of 49 digits is below the
+    // lowest level), and the sieve reports after every polynomial until it
+    // has enough relations.
+    let bits = n.parse::<Uint<8>>().unwrap().bits();
+    assert!(events.contains(&Progress::Ecm {
+        bits,
+        digits: 15,
+        done: 30,
+        total: 30
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Progress::Ecm { digits: 20, .. }))
+    );
+    let Some(&Progress::Qs {
+        relations, target, ..
+    }) = events.last()
+    else {
+        panic!("last event {:?}", events.last());
+    };
+    assert!(
+        relations >= target && target > 1000,
+        "{relations} of {target}"
+    );
+    // Without the sieve, ECM gives up.
+    assert!(!with_ecm(n, 20)[0].is_prime);
+}
+
+#[test]
+fn stops_while_sieving() {
+    let (n, ..) = QS_SEMIPRIME;
+    let mut sieved = 0;
+    let factors = factor_str_with(n, &Config::default(), |event| match event {
+        Progress::Qs { .. } if sieved == 10 => ControlFlow::Break(()),
+        Progress::Qs { .. } => {
+            sieved += 1;
+            ControlFlow::Continue(())
+        }
+        _ => ControlFlow::Continue(()),
+    })
+    .unwrap();
+    assert_eq!(
+        factors,
+        [Factor {
+            value: n.to_string(),
+            is_prime: false
+        }]
+    );
+}
+
+#[test]
+fn deferred_sieving() {
+    // Defer leaves the composite for the caller, after the same short ECM.
+    let (n, ..) = QS_SEMIPRIME;
+    let config = Config::default().qs(QsMode::Defer);
+    let mut ecm_levels = Vec::new();
+    let factors = factor_str_with(n, &config, |event| {
+        if let Progress::Ecm {
+            digits, done: 0, ..
+        } = event
+        {
+            ecm_levels.push(digits);
+        }
+        assert!(!matches!(event, Progress::Qs { .. }));
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert!(!factors[0].is_prime);
+    assert_eq!(ecm_levels, [15]);
 }

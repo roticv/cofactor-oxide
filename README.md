@@ -8,11 +8,11 @@ WebAssembly so you can factor numbers right in your browser. **cofox** for
 short, which is also the name of the command-line tool.
 
 > **Status:** early development. The CLI factors numbers of up to 1024 bits
-> using trial division, Pollard rho, Pollard p−1, Williams p+1, ECM and the
-> BPSW primality test. That finds factors up to about 25 digits by default
-> (more with `--ecm`), and larger ones when p−1 or p+1 is smooth. ECM runs
-> on every core, natively and in the browser. The quadratic sieve and GNFS
-> are planned.
+> using trial division, Pollard rho, Pollard p−1, Williams p+1, ECM, the
+> self-initializing quadratic sieve and the BPSW primality test. ECM finds
+> factors up to about 25 digits by default (more with `--ecm`), and the
+> quadratic sieve splits what is left up to 110 digits. Both run on every
+> core, natively and in the browser. GNFS is planned.
 
 ## Goals
 
@@ -34,7 +34,7 @@ it can find, and whatever composite is left goes to the next stage.
 | 2 | **Pollard rho** (Brent's variant) | Primes up to about 8 digits, in a quick first run |
 | 3 | **Pollard p−1** and **Williams p+1** (B1 = 5·10⁴, B2 = 5·10⁶) | Primes *p* of any size where *p−1* or *p+1* is smooth |
 | 4 | **ECM** (Lenstra elliptic curve method, levels of 15 to 40 digits; 25 by default) | Primes up to about 30–40 digits, whatever the size of *n* |
-| 5 | **Quadratic Sieve** (SIQS) | Composites up to about 100 digits |
+| 5 | **Quadratic sieve** (SIQS, single large prime, block Lanczos) | Composites up to about 100 digits |
 | 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
 
 The Baillie–PSW primality test runs between stages so that nothing is spent on
@@ -55,9 +55,16 @@ core and the browser across up to eight Web Workers. On a 10-core machine,
 giving up on a 100-digit composite with no factor below 25 digits takes about
 7 seconds natively.
 
-The digit ranges for QS and GNFS are rough. The real crossover points will be
-measured once the implementations exist, and they will differ between native
-and Wasm.
+When the quadratic sieve follows, ECM stops sooner, at the level for primes
+of about 30% of the composite's digits (at least 15): past that, sieving is
+the quicker way to an answer. The sieve then runs on composites of 81 to 363
+bits (110 digits). Each thread or Web Worker sieves its own polynomials and
+sends the relations to one collector, which runs block Lanczos once it has
+enough. On a 10-core machine, two 30-digit primes take under a second, two
+33-digit primes about 2.5 seconds and two 40-digit primes about 40 seconds.
+
+The crossover to GNFS is a rough guess for now, to be measured once it
+exists.
 
 ## Native vs. browser
 
@@ -95,21 +102,24 @@ Native:
 
 ```sh
 cargo build --release
-./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561 7358668553614726823037645838094560989037094819 22402621473499677702312787220798894771372529738736380992481737381422651598174113
+./target/release/cofox 1000000016000000063 1427247692705959880439315947500961989719490561 7358668553614726823037645838094560989037094819 95741717322359106137862766319375166032677068850856466452653
 # 1000000016000000063: 1000000007 1000000009
 # 1427247692705959880439315947500961989719490561: 2305843009213693951 618970019642690137449562111
 # 7358668553614726823037645838094560989037094819: 11888570237800257629 618970019642690137449562111
-# 22402621473499677702312787220798894771372529738736380992481737381422651598174113: (22402621473499677702312787220798894771372529738736380992481737381422651598174113)
+# 95741717322359106137862766319375166032677068850856466452653: 266273800333898804119934270521 359561162992010719067582390293
 ```
 
 The second number is (2⁶¹−1)(2⁸⁹−1). Both factors are too large for rho, but
 p−1 finds 2⁶¹−1 because 2⁶¹−2 has only small prime factors. The third has a
 20-digit prime factor whose p−1 and p+1 aren't smooth, so it takes ECM. The
-fourth is a product of two 40-digit primes, too large for ECM: a factor in
-parentheses is composite, but the current algorithms can't split it.
+fourth is a product of two 30-digit primes, too large for ECM, so the
+quadratic sieve splits it.
+
 `--ecm 30` (or 35, 40) searches for larger factors, at about four times the
-cost per level, and `--threads N` sets the number of threads. While ECM runs,
-a status line on stderr shows the level and the curves done so far.
+cost per level, `--threads N` sets the number of threads, and `--no-qs`
+skips the quadratic sieve. A factor in parentheses is composite, but the
+algorithms that ran couldn't split it. While ECM or the sieve runs, a status
+line on stderr shows how far it has got.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
@@ -141,11 +151,11 @@ Every push to `main` also builds the demo and deploys it to GitHub Pages at
 - [x] Pollard p−1 (two stages)
 - [x] Williams p+1 (two stages, baby-step giant-step stage 2)
 - [x] ECM (Montgomery curves, Suyama parametrization, two stages)
-- [ ] Self-initializing quadratic sieve (SIQS)
+- [x] Self-initializing quadratic sieve (SIQS), with block Lanczos
 - [ ] GNFS
 - [x] Native CLI
 - [x] Wasm bindings and browser demo
-- [x] Parallel ECM: threads in the CLI, Web Workers in the browser
+- [x] Parallel ECM and sieving: threads in the CLI, Web Workers in the browser
 - [x] Progress reporting and cancellation
 
 ## License
