@@ -317,6 +317,38 @@ fn dependencies_sum_to_zero() {
             assert!(sum.iter().all(|&b| !b), "{rows}×{cols}: {dep:?}");
         }
     }
+    // Large enough for block Lanczos, with small columns much denser than
+    // large ones, as for primes in relations, and 32 more rows than
+    // columns. Many of the sparse columns are singletons, which pruning
+    // takes out with their rows.
+    for (rows, cols) in [(1500usize, 1468), (6000, 5968)] {
+        let matrix: Vec<Vec<usize>> = (0..rows)
+            .map(|_| {
+                (0..10 + next(20))
+                    .map(|_| {
+                        let c = next(cols);
+                        c * c / cols
+                    })
+                    .collect()
+            })
+            .collect();
+        let deps = dependencies(&matrix, cols);
+        assert!(
+            deps.len() >= 32,
+            "{rows}×{cols}: {} dependencies",
+            deps.len()
+        );
+        for dep in &deps {
+            assert!(!dep.is_empty() && dep.is_sorted());
+            let mut sum = vec![false; cols];
+            for &r in dep {
+                for &c in &matrix[r] {
+                    sum[c] ^= true;
+                }
+            }
+            assert!(sum.iter().all(|&b| !b), "{rows}×{cols}: {dep:?}");
+        }
+    }
     // An all-zero row is a dependency by itself, and a repeated row pairs
     // up with its copy.
     let deps = dependencies(&[vec![1, 2], vec![], vec![3, 3], vec![2, 1]], 4);
@@ -339,4 +371,18 @@ fn qs_edge_cases() {
     let n = p.widening_square().0;
     assert_eq!(multiplier(&n), 1);
     assert_eq!(qs(&n, &params), Some(p));
+}
+
+/// About 14 minutes on one thread, so run with `--ignored` when changing
+/// the sieve or block Lanczos.
+#[test]
+#[ignore]
+fn eighty_digits() {
+    let n = u("5783078982887739757788301949603111810137352482505406356698736447542686900836153");
+    let f = qs(&n, &Params::for_bits(n.bits())).expect("no factor");
+    let (p, q) = (
+        u("1328777112197581296397318694224180349887"),
+        u("4352181362699322384166653796609905670919"),
+    );
+    assert!(f == p || f == q, "{n} gave {f}");
 }

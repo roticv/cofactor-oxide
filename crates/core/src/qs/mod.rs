@@ -11,10 +11,11 @@
 //!
 //! [`qs`] runs the sieve with many polynomials ([`Sieve`]), keeps relations
 //! with one large prime and pairs them up, and finds the dependencies by
-//! dense Gaussian elimination, which limits it to factor bases of a few
-//! thousand primes for now.
+//! Gaussian elimination for small matrices and block Lanczos for large
+//! ones.
 
 mod base;
+mod lanczos;
 mod linalg;
 mod modp;
 mod params;
