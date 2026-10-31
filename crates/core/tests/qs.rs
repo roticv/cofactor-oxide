@@ -196,12 +196,12 @@ fn params_interpolate() {
     // Table rows, between rows, and clamped at both ends.
     assert_eq!(p(64), (100, 40, 1));
     assert_eq!(p(200), (3000, 50, 1));
-    assert_eq!(p(330), (97_647, 150, 9));
+    assert_eq!(p(330), (97_647, 150, 4));
     assert_eq!(p(250), (28_352, 100, 1));
     // The large-prime multiplier goes down between 266 and 283 bits.
-    assert_eq!(p(290), (57_333, 80, 5));
+    assert_eq!(p(290), (57_333, 80, 3));
     assert_eq!(p(20), (100, 40, 1));
-    assert_eq!(p(400), (210_000, 150, 13));
+    assert_eq!(p(400), (210_000, 150, 4));
 }
 
 /// Semiprimes with two random primes of equal size, from Python.
@@ -433,4 +433,40 @@ fn jobs_that_need_no_sieving() {
     let n = u("401").widening_mul(&u(SEMIPRIMES[0].0)).0.to_string();
     assert!(matches!(QsJob::start(&n).unwrap(), Start::Factor(f) if f == "401"));
     assert!(QsJob::start("12x").is_err());
+}
+
+/// RSA-100 on all cores, sharing the sieving as the CLI does. About 2
+/// hours on 10 cores.
+#[test]
+#[ignore]
+fn rsa100() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Start::Sieve(job) = QsJob::start(RSA100).unwrap() else {
+        panic!("no sieving needed");
+    };
+    let mut collector = job.collector();
+    let (send, receive) = std::sync::mpsc::channel();
+    let done = AtomicBool::new(false);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    std::thread::scope(|scope| {
+        for seed in 0..threads as u64 {
+            let (send, job, done) = (send.clone(), &job, &done);
+            scope.spawn(move || {
+                let mut sieve = job.sieve(seed);
+                while !done.load(Ordering::Relaxed) {
+                    if send.send(sieve.sieve_poly()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        while !collector.is_complete() {
+            collector.add(&receive.recv().unwrap());
+        }
+        done.store(true, Ordering::Relaxed);
+    });
+    let f = collector.finish().expect("no factor");
+    let p = "37975227936943673922808872755445627854565536638199";
+    let q = "40094690950920881030683735292761468389214899724061";
+    assert!(f == p || f == q, "RSA-100 gave {f}");
 }

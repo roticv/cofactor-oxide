@@ -3,8 +3,9 @@
 /// Bits of `kN`, factor-base size, large-prime multiplier and sieve blocks
 /// on each side. These start from msieve's table, with one block a side up
 /// to 249 bits, which measured faster than two or three from 199 to 232
-/// bits. The rest is still to be tuned; between rows, values are
-/// interpolated.
+/// bits, and four from 298 bits: at RSA-100's 330 bits, four gave 8 times
+/// the relations per second of msieve's nine. The rest is still to be
+/// tuned; between rows, values are interpolated.
 const TABLE: [(u32, u32, u32, u32); 14] = [
     (64, 100, 40, 1),
     (128, 450, 40, 1),
@@ -15,11 +16,11 @@ const TABLE: [(u32, u32, u32, u32); 14] = [
     (249, 27_000, 100, 1),
     (266, 50_000, 100, 3),
     (283, 55_000, 80, 3),
-    (298, 60_000, 80, 9),
-    (315, 80_000, 150, 9),
-    (332, 100_000, 150, 9),
-    (348, 140_000, 150, 9),
-    (363, 210_000, 150, 13),
+    (298, 60_000, 80, 4),
+    (315, 80_000, 150, 4),
+    (332, 100_000, 150, 4),
+    (348, 140_000, 150, 4),
+    (363, 210_000, 150, 4),
 ];
 
 /// Bytes in one sieve block, sized to stay in L1 cache.
