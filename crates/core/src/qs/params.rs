@@ -1,16 +1,18 @@
 //! Sieve parameters by the size of `kN`.
 
 /// Bits of `kN`, factor-base size, large-prime multiplier and sieve blocks
-/// per polynomial. These start from msieve's table and will be tuned with
-/// measurements; between rows, values are interpolated.
+/// on each side. These start from msieve's table, with one block a side up
+/// to 249 bits, which measured faster than two or three from 199 to 232
+/// bits. The rest is still to be tuned; between rows, values are
+/// interpolated.
 const TABLE: [(u32, u32, u32, u32); 14] = [
     (64, 100, 40, 1),
     (128, 450, 40, 1),
     (183, 2_000, 40, 1),
     (200, 3_000, 50, 1),
-    (212, 5_400, 50, 3),
-    (233, 10_000, 100, 3),
-    (249, 27_000, 100, 3),
+    (212, 5_400, 50, 1),
+    (233, 10_000, 100, 1),
+    (249, 27_000, 100, 1),
     (266, 50_000, 100, 3),
     (283, 55_000, 80, 3),
     (298, 60_000, 80, 9),

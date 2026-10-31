@@ -9,8 +9,10 @@
 //! of the matching `ax + b`, `X² ≡ y² (mod N)`, so `gcd(X − y, N)` is a
 //! factor of `N` about half the time.
 //!
-//! So far [`qs`] sieves a single polynomial, `a = 1` and `b = ⌈√kN⌉`, whose
-//! values grow steadily with `|x|`, which limits it to about 40 digits.
+//! [`qs`] runs the sieve with many polynomials ([`Sieve`]), keeps relations
+//! with one large prime and pairs them up, and finds the dependencies by
+//! dense Gaussian elimination, which limits it to factor bases of a few
+//! thousand primes for now.
 
 mod base;
 mod linalg;
@@ -18,6 +20,7 @@ mod modp;
 mod params;
 mod sieve;
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::arith::{Monty, Uint};
@@ -33,6 +36,16 @@ pub use sieve::{Relation, Sieve};
 /// with probability at least ½.
 const EXTRA_RELATIONS: usize = 32;
 
+/// A row of the matrix: `t² ≡ ±L²·∏ p (mod N)`, from a full relation
+/// (`L = 1`) or two partial relations sharing the large prime `L`.
+struct Row<const LIMBS: usize> {
+    /// `t mod N`, in Montgomery form.
+    t: Uint<LIMBS>,
+    negative: bool,
+    factors: Vec<u32>,
+    large: u64,
+}
+
 /// Factors `n` with the quadratic sieve, using `params`.
 ///
 /// Returns a proper factor of `n`, or `None` if every dependency gave a
@@ -42,7 +55,7 @@ const EXTRA_RELATIONS: usize = 32;
 /// # Panics
 ///
 /// Panics if `kN` overflows the integer width for the chosen multiplier `k`
-/// (at most 70).
+/// (at most 70), or if `n` is too small for the factor base.
 pub fn qs<const LIMBS: usize>(n: &Uint<LIMBS>, params: &Params) -> Option<Uint<LIMBS>> {
     let two = Uint::from_u64(2);
     if !n.is_odd() {
@@ -57,22 +70,51 @@ pub fn qs<const LIMBS: usize>(n: &Uint<LIMBS>, params: &Params) -> Option<Uint<L
     if s.widening_square() == (fb.kn, Uint::ZERO) {
         return proper(s.gcd(n));
     }
+    let monty = Monty::new(*n)?;
 
-    let mut sieve = Sieve::new(&fb);
+    let mut sieve = Sieve::new(&fb, params, 0);
     let target = fb.primes.len() + 1 + EXTRA_RELATIONS;
-    let mut relations = Vec::new();
-    // Blocks at x ≥ 0 and x < 0 in turn, outward from 0.
-    for i in 0i64.. {
-        let x0 = if i % 2 == 0 { i / 2 } else { -(i + 1) / 2 } * BLOCK_SIZE as i64;
-        relations.extend(sieve.block(x0));
-        if relations.len() >= target {
-            break;
+    let mut rows = Vec::new();
+    // The same relation can come from more than one polynomial.
+    let mut seen = BTreeSet::new();
+    let mut partials: BTreeMap<u64, Relation<LIMBS>> = BTreeMap::new();
+    while rows.len() < target {
+        for r in sieve.sieve_poly() {
+            if r.large == 1 {
+                if seen.insert(r.t) {
+                    rows.push(Row {
+                        t: monty.to_monty(&r.t),
+                        negative: r.negative,
+                        factors: r.factors,
+                        large: 1,
+                    });
+                }
+                continue;
+            }
+            // Each partial after the first with its large prime pairs up
+            // with the first.
+            match partials.get(&r.large) {
+                None => {
+                    partials.insert(r.large, r);
+                }
+                Some(first) if first.t != r.t => {
+                    let mut factors = first.factors.clone();
+                    factors.extend(&r.factors);
+                    rows.push(Row {
+                        t: monty.mul(&monty.to_monty(&first.t), &monty.to_monty(&r.t)),
+                        negative: first.negative != r.negative,
+                        factors,
+                        large: r.large,
+                    });
+                }
+                Some(_) => {}
+            }
         }
     }
-    relations.truncate(target);
+    rows.truncate(target);
 
     // Column 0 is the sign, column i + 1 the i-th factor-base prime.
-    let rows: Vec<Vec<usize>> = relations
+    let matrix: Vec<Vec<usize>> = rows
         .iter()
         .map(|r| {
             let sign = r.negative.then_some(0);
@@ -81,29 +123,29 @@ pub fn qs<const LIMBS: usize>(n: &Uint<LIMBS>, params: &Params) -> Option<Uint<L
                 .collect()
         })
         .collect();
-    dependencies(&rows, fb.primes.len() + 1)
+    dependencies(&matrix, fb.primes.len() + 1)
         .iter()
-        .find_map(|dep| square_root(n, &fb, &relations, dep).and_then(proper))
+        .find_map(|dep| proper(square_root(&monty, &fb, &rows, dep)))
 }
 
-/// For relations whose product is a square, `X = ∏ t` and `Y = √∏ |Q|`
-/// satisfy `X² ≡ Y² (mod n)`, and returns `gcd(X − Y, n)`.
+/// For rows whose product is a square, `X = ∏ t` and `Y = √∏ |Q|` satisfy
+/// `X² ≡ Y² (mod n)`, and returns `gcd(X − Y, n)`.
 fn square_root<const LIMBS: usize>(
-    n: &Uint<LIMBS>,
+    monty: &Monty<LIMBS>,
     fb: &FactorBase<LIMBS>,
-    relations: &[Relation<LIMBS>],
+    rows: &[Row<LIMBS>],
     dep: &[usize],
-) -> Option<Uint<LIMBS>> {
-    let monty = Monty::new(*n)?;
+) -> Uint<LIMBS> {
     let mut x = monty.one();
+    let mut y = monty.one();
     let mut exponents = alloc::vec![0u32; fb.primes.len()];
-    for r in dep.iter().map(|&i| &relations[i]) {
-        x = monty.mul(&x, &monty.to_monty(&r.t));
+    for r in dep.iter().map(|&i| &rows[i]) {
+        x = monty.mul(&x, &r.t);
+        y = monty.mul(&y, &monty.to_monty(&Uint::from_u64(r.large)));
         for &i in &r.factors {
             exponents[i as usize] += 1;
         }
     }
-    let mut y = monty.one();
     for (prime, &e) in fb.primes.iter().zip(&exponents) {
         debug_assert!(e % 2 == 0, "odd exponent of {}", prime.p);
         let p = monty.to_monty(&Uint::from_u64(prime.p.into()));
@@ -111,12 +153,13 @@ fn square_root<const LIMBS: usize>(
             y = monty.mul(&y, &p);
         }
     }
+    let n = monty.modulus();
     let (x, y) = (monty.from_monty(&x), monty.from_monty(&y));
     debug_assert_eq!(monty.mul(&x, &x), monty.mul(&y, &y), "X² ≢ Y²");
     // X − Y mod n, with both already reduced.
     let d = n.wrapping_sub(&y).wrapping_add(&x);
     let d = if d >= *n { d.wrapping_sub(n) } else { d };
-    Some(d.gcd(n))
+    d.gcd(n)
 }
 
 /// `log₂ x` for `x > 0`, to about 12 significant digits.

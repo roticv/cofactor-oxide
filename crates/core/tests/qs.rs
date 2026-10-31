@@ -8,7 +8,7 @@
 use cofox_core::Uint;
 use cofox_core::primes::Primes;
 use cofox_core::qs::{
-    BLOCK_SIZE, FactorBase, Params, Prime, Sieve, dependencies, multiplier, pow_mod, qs, sqrt_mod,
+    FactorBase, Params, Prime, Sieve, dependencies, multiplier, pow_mod, qs, sqrt_mod,
 };
 
 /// RSA-100 is 330 bits, and kN a few bits more: 12 limbs is at least 384
@@ -197,7 +197,7 @@ fn params_interpolate() {
     assert_eq!(p(64), (100, 40, 1));
     assert_eq!(p(200), (3000, 50, 1));
     assert_eq!(p(330), (97_647, 150, 9));
-    assert_eq!(p(250), (28_352, 100, 3));
+    assert_eq!(p(250), (28_352, 100, 1));
     // The large-prime multiplier goes down between 266 and 283 bits.
     assert_eq!(p(290), (57_333, 80, 5));
     assert_eq!(p(20), (100, 40, 1));
@@ -205,7 +205,7 @@ fn params_interpolate() {
 }
 
 /// Semiprimes with two random primes of equal size, from Python.
-const SEMIPRIMES: [(&str, &str, &str); 5] = [
+const SEMIPRIMES: [(&str, &str, &str); 7] = [
     ("16676409402120693011", "2030509027", "8212920593"),
     ("493209351866533939609967", "535900657741", "920337276587"),
     (
@@ -223,6 +223,16 @@ const SEMIPRIMES: [(&str, &str, &str); 5] = [
         "14864641071324530231",
         "26656680988053227431",
     ),
+    (
+        "9371289581805834728418039021175914244350477206171",
+        "1424093917487413198662847",
+        "6580527777507807889536293",
+    ),
+    (
+        "95741717322359106137862766319375166032677068850856466452653",
+        "266273800333898804119934270521",
+        "359561162992010719067582390293",
+    ),
 ];
 
 #[test]
@@ -236,22 +246,25 @@ fn sieve_semiprimes() {
 
 #[test]
 fn relations_hold() {
-    // Every relation from a block on each side of 0 is an exact
-    // factorization of t² − kN over the factor base.
-    let n = u(SEMIPRIMES[1].0);
-    let fb = FactorBase::new(&n, multiplier(&n), 100).unwrap();
-    let mut sieve = Sieve::new(&fb);
-    for x0 in [0, -(BLOCK_SIZE as i64)] {
-        let relations = sieve.block(x0);
-        assert!(
-            relations.len() > 10,
-            "{} relations at {x0}",
-            relations.len()
-        );
-        for r in relations {
+    // Every relation, full or partial, is an exact factorization of
+    // t² − kN, across enough polynomials to need a second a.
+    let n = u(SEMIPRIMES[4].0);
+    let params = Params::for_bits(n.bits());
+    let fb = FactorBase::new(&n, multiplier(&n), params.fb_size).unwrap();
+    let mut sieve = Sieve::new(&fb, &params, 1);
+    let (mut full, mut partial, mut a_values) = (0, 0, Vec::new());
+    for _ in 0..40 {
+        let (a, b_negative, b) = sieve.poly();
+        // b² ≡ kN (mod a), so a divides every Q(x).
+        let b2 = b.widening_square().0.div_rem(&a).1;
+        assert_eq!(b2, fb.kn.div_rem(&a).1, "a = {a}, b = {b}");
+        if !a_values.contains(&a) {
+            a_values.push(a);
+        }
+        for r in sieve.sieve_poly() {
             let (sq, hi) = r.t.widening_square();
             assert!(hi.is_zero());
-            let product = r.factors.iter().fold(U::ONE, |acc, &i| {
+            let product = r.factors.iter().fold(U::from_u64(r.large), |acc, &i| {
                 acc.widening_mul(&U::from_u64(fb.primes[i as usize].p.into()))
                     .0
             });
@@ -260,10 +273,21 @@ fn relations_hold() {
             } else {
                 sq.checked_sub(&fb.kn)
             };
-            assert_eq!(q, Some(product), "t = {}", r.t);
+            assert_eq!(q, Some(product), "t = {}, b negative: {b_negative}", r.t);
             assert!(r.factors.is_sorted());
+            if r.large == 1 {
+                full += 1;
+            } else {
+                assert!(r.large > u64::from(fb.primes.last().unwrap().p));
+                partial += 1;
+            }
         }
     }
+    assert!(a_values.len() >= 2, "{a_values:?}");
+    assert!(
+        full > 20 && partial > full,
+        "{full} full, {partial} partial"
+    );
 }
 
 #[test]
