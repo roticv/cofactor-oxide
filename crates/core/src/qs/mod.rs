@@ -10,11 +10,13 @@
 //! factor of `N` about half the time.
 //!
 //! [`qs`] runs the sieve with many polynomials ([`Sieve`]), keeps relations
-//! with one large prime and pairs them up, and finds the dependencies by
+//! with one or two large primes and combines them through cycles, and finds the dependencies by
 //! Gaussian elimination for small matrices and block Lanczos for large
 //! ones.
 
 mod base;
+mod cofactor;
+mod cycles;
 mod job;
 mod lanczos;
 mod linalg;
@@ -24,17 +26,19 @@ mod sieve;
 
 use core::ops::ControlFlow;
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::arith::{Monty, Uint};
 
+use cycles::Cycles;
+
 pub use base::{FactorBase, Prime, multiplier};
 pub use job::{QsCollector, QsJob, QsSieve, Start};
 pub use linalg::dependencies;
 pub use modp::{pow_mod, sqrt_mod};
-pub use params::{BLOCK_SIZE, Params};
+pub use params::{BLOCK_SIZE, DOUBLE_LARGE_BITS, Params};
 pub use sieve::{Relation, Sieve};
 
 /// Relations beyond the factor-base size (plus one for the sign) to
@@ -103,7 +107,8 @@ impl<const LIMBS: usize> Siqs<LIMBS> {
             target: self.fb.primes.len() + 1 + EXTRA_RELATIONS,
             rows: Vec::new(),
             seen: BTreeSet::new(),
-            partials: BTreeMap::new(),
+            partials: Vec::new(),
+            cycles: Cycles::default(),
         }
     }
 
@@ -132,15 +137,17 @@ impl<const LIMBS: usize> Siqs<LIMBS> {
     }
 }
 
-/// A row of the matrix: `t² ≡ ±L²·∏ p (mod N)`, from a full relation
-/// (`L = 1`) or two partial relations sharing the large prime `L`.
+/// A row of the matrix: `t² ≡ ±S²·∏ p (mod N)`, from a full relation
+/// (`S = 1`) or a cycle of partial relations, whose large primes each
+/// appear twice and multiply to `S²`.
 #[derive(Clone, Debug)]
 struct Row<const LIMBS: usize> {
     /// `t mod N`, in Montgomery form.
     t: Uint<LIMBS>,
     negative: bool,
     factors: Vec<u32>,
-    large: u64,
+    /// `S mod N`, in Montgomery form.
+    large: Uint<LIMBS>,
 }
 
 /// Relations collected for one number, as rows of the matrix.
@@ -151,41 +158,52 @@ pub struct Relations<const LIMBS: usize> {
     rows: Vec<Row<LIMBS>>,
     /// The same relation can come from more than one polynomial.
     seen: BTreeSet<Uint<LIMBS>>,
-    partials: BTreeMap<u64, Relation<LIMBS>>,
+    partials: Vec<Relation<LIMBS>>,
+    cycles: Cycles,
 }
 
 impl<const LIMBS: usize> Relations<LIMBS> {
     /// Adds a relation. A full one is a row by itself; a partial one makes
-    /// a row with the first earlier partial that has the same large prime.
+    /// a row whenever its large primes close a cycle with earlier ones.
     pub fn add(&mut self, r: Relation<LIMBS>) {
-        let monty = &self.monty;
-        if r.large == 1 {
-            if self.seen.insert(r.t) {
-                self.rows.push(Row {
-                    t: monty.to_monty(&r.t),
-                    negative: r.negative,
-                    factors: r.factors,
-                    large: 1,
-                });
-            }
+        if !self.seen.insert(r.t) {
             return;
         }
-        match self.partials.get(&r.large) {
-            None => {
-                self.partials.insert(r.large, r);
-            }
-            Some(first) if first.t != r.t => {
-                let mut factors = first.factors.clone();
-                factors.extend(&r.factors);
-                self.rows.push(Row {
-                    t: monty.mul(&monty.to_monty(&first.t), &monty.to_monty(&r.t)),
-                    negative: first.negative != r.negative,
-                    factors,
-                    large: r.large,
-                });
-            }
-            Some(_) => {}
+        let monty = &self.monty;
+        if r.large == [1, 1] {
+            self.rows.push(Row {
+                t: monty.to_monty(&r.t),
+                negative: r.negative,
+                factors: r.factors,
+                large: monty.one(),
+            });
+            return;
         }
+        let [a, b] = r.large;
+        self.partials.push(r);
+        let Some(cycle) = self.cycles.add(a, b, self.partials.len() - 1) else {
+            return;
+        };
+        let mut row = Row {
+            t: monty.one(),
+            negative: false,
+            factors: Vec::new(),
+            large: monty.one(),
+        };
+        let mut large = Vec::new();
+        for r in cycle.iter().map(|&i| &self.partials[i]) {
+            row.t = monty.mul(&row.t, &monty.to_monty(&r.t));
+            row.negative ^= r.negative;
+            row.factors.extend(&r.factors);
+            large.extend(r.large.iter().filter(|&&l| l != 1));
+        }
+        // Each large prime appears twice: take one of each pair.
+        large.sort_unstable();
+        debug_assert!(large.chunks(2).all(|pair| pair[0] == pair[1]));
+        for pair in large.chunks(2) {
+            row.large = monty.mul(&row.large, &monty.to_monty(&Uint::from_u64(pair[0])));
+        }
+        self.rows.push(row);
     }
 
     /// Rows so far.
@@ -261,7 +279,7 @@ fn square_root<const LIMBS: usize>(
     let mut exponents = alloc::vec![0u32; fb.primes.len()];
     for r in dep.iter().map(|&i| &rows[i]) {
         x = monty.mul(&x, &r.t);
-        y = monty.mul(&y, &monty.to_monty(&Uint::from_u64(r.large)));
+        y = monty.mul(&y, &r.large);
         for &i in &r.factors {
             exponents[i as usize] += 1;
         }

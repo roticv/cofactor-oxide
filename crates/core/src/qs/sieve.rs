@@ -6,13 +6,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::base::{FactorBase, rem};
+use super::cofactor::split;
 use super::log2;
 use super::modp::pow_mod;
 use super::params::{BLOCK_SIZE, Params};
 use crate::arith::{Limb, Uint};
 
-/// A congruence `t² ≡ ±L·∏ p (mod N)` with every `p` in the factor base and
-/// `L` either 1 or a single larger prime.
+/// A congruence `t² ≡ ±L₁·L₂·∏ p (mod N)` with every `p` in the factor base
+/// and `L₁`, `L₂` either 1 or primes outside it.
 #[derive(Clone, Debug)]
 pub struct Relation<const LIMBS: usize> {
     pub t: Uint<LIMBS>,
@@ -21,10 +22,12 @@ pub struct Relation<const LIMBS: usize> {
     /// Indices into the factor base, one per prime factor of `|t² − kN|`
     /// counted with multiplicity, in increasing order.
     pub factors: Vec<u32>,
-    /// The prime factor of `t² − kN` outside the factor base, or 1 for a
-    /// full relation. Two relations with the same large prime multiply to
-    /// one with a square cofactor.
-    pub large: u64,
+    /// The prime factors of `t² − kN` outside the factor base, `[L₁, L₂]`
+    /// with `L₁ ≤ L₂`: `[1, 1]` for a full relation, `[1, L]` for one large
+    /// prime and `[L₁, L₂]` for two. Relations whose large primes form a
+    /// cycle, each prime appearing twice, multiply to one with a square
+    /// cofactor.
+    pub large: [u64; 2],
 }
 
 /// Marks a prime that isn't sieved, only tried in trial division: 2, the
@@ -48,6 +51,16 @@ const SLACK: f64 = 2.4;
 
 /// `log₂ BLOCK_SIZE`.
 const BLOCK_BITS: u32 = BLOCK_SIZE.trailing_zeros();
+
+/// With double large primes, cofactors go up to the large-prime bound
+/// squared, divided by this.
+const DOUBLE_DIVISOR: u128 = 16;
+
+/// With double large primes, the threshold drops by this fraction of the
+/// extra bits that cofactors up to the double bound have. Most candidates
+/// that need all of them fail anyway: at 90 digits, 40% beat 25% and 100%,
+/// which made the sieve slower overall.
+const DOUBLE_SLACK: f64 = 0.4;
 
 /// A sign and magnitude.
 type Signed<const LIMBS: usize> = (bool, Uint<LIMBS>);
@@ -89,6 +102,12 @@ pub struct Sieve<const LIMBS: usize> {
     /// Half the sieve interval.
     m: i64,
     large_bound: u64,
+    /// A cofactor between the largest prime squared and this may be the
+    /// product of two large primes. 0 turns that off.
+    double_bound: u64,
+    /// The largest factor-base prime, squared: any cofactor below it is
+    /// prime.
+    largest_squared: u64,
     /// How far below `log₂ |g(x)|` a sum may be and still be tried.
     slack: u32,
     /// Primes before this index aren't sieved: they are slow to sieve and
@@ -149,10 +168,18 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
     pub fn new(fb: Arc<FactorBase<LIMBS>>, params: &Params, seed: u64) -> Self {
         let largest = *fb.primes.last().unwrap();
         let large_bound = u64::from(largest.p) * u64::from(params.large_mult);
+        let double_bound = if params.double_large {
+            let bound = u128::from(large_bound).pow(2) / DOUBLE_DIVISOR;
+            u64::try_from(bound).unwrap_or(u64::MAX)
+        } else {
+            0
+        };
         let mut sieve = Self {
             fb: Arc::clone(&fb),
             m: (params.blocks * BLOCK_SIZE) as i64,
             large_bound,
+            double_bound,
+            largest_squared: u64::from(largest.p).pow(2),
             slack: 0,
             first_sieved: 0,
             first_large: fb.primes.partition_point(|p| (p.p as usize) < BLOCK_SIZE),
@@ -199,6 +226,11 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             .map(|p| 2.0 * f64::from(p.log) / f64::from(p.p - 1))
             .sum();
         sieve.slack = (SLACK * f64::from(largest.log) + skipped) as u32;
+        if double_bound > 0 {
+            // Some of the room the cofactors up to the double bound need.
+            let room = log2(double_bound as f64) - log2(large_bound as f64);
+            sieve.slack += (DOUBLE_SLACK * room) as u32;
+        }
         sieve.new_a();
         sieve
     }
@@ -555,10 +587,7 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
                 factors.push(index);
             }
         }
-        // Every prime below the largest factor-base prime that can divide
-        // g(x) is in the factor base, so a cofactor below the bound, which
-        // is less than its square, is prime.
-        let large = g.to_u64().filter(|&g| g < self.large_bound)?;
+        let large = self.large_primes(g.to_u64()?)?;
         // And a itself, which divides Q(x) = a·g(x).
         factors.extend(self.a_primes.iter().map(|&i| i as u32));
         factors.sort_unstable();
@@ -568,5 +597,23 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             factors,
             large,
         })
+    }
+
+    /// The large primes in a cofactor left by trial division, if it is 1,
+    /// one prime below the large-prime bound, or two of them.
+    ///
+    /// Every prime below the largest factor-base prime that can divide
+    /// g(x) is in the factor base, so the cofactor's prime factors are all
+    /// larger than that, and a cofactor below its square is prime.
+    fn large_primes(&self, c: u64) -> Option<[u64; 2]> {
+        if c < self.large_bound {
+            return Some([1, c]);
+        }
+        if c < self.largest_squared || c >= self.double_bound {
+            return None;
+        }
+        // The bound keeps c below the cube of the largest prime, so it has
+        // at most two prime factors.
+        split(c).filter(|&[_, q]| q < self.large_bound)
     }
 }

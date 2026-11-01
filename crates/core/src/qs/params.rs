@@ -23,6 +23,11 @@ const TABLE: [(u32, u32, u32, u32); 14] = [
     (363, 210_000, 150, 4),
 ];
 
+/// From this size on, relations may have two large primes. At 80 digits
+/// (262 bits) they gained nothing measurable, at 90 digits (296 bits)
+/// about 30%.
+pub const DOUBLE_LARGE_BITS: u32 = 280;
+
 /// Bytes in one sieve block, sized to stay in L1 cache.
 pub const BLOCK_SIZE: usize = 1 << 16;
 
@@ -36,15 +41,19 @@ pub struct Params {
     pub large_mult: u32,
     /// Sieve blocks of [`BLOCK_SIZE`] bytes on each side of `x = 0`.
     pub blocks: usize,
+    /// Whether a relation may have two primes outside the factor base.
+    pub double_large: bool,
 }
 
 impl Params {
     /// The parameters for a `kN` of `bits` bits.
     pub fn for_bits(bits: u32) -> Self {
+        let double_large = bits >= DOUBLE_LARGE_BITS;
         let row = |(_, fb, mult, blocks): (u32, u32, u32, u32)| Self {
             fb_size: fb as usize,
             large_mult: mult,
             blocks: blocks as usize,
+            double_large,
         };
         let first = TABLE[0];
         let last = TABLE[TABLE.len() - 1];
@@ -66,6 +75,7 @@ impl Params {
             fb_size: lerp(lo.1, hi.1) as usize,
             large_mult: lerp(lo.2, hi.2),
             blocks: lerp(lo.3, hi.3) as usize,
+            double_large,
         }
     }
 }

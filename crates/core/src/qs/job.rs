@@ -185,7 +185,7 @@ impl<const LIMBS: usize> Collect for (Siqs<LIMBS>, Relations<LIMBS>) {
 }
 
 /// Appends a relation as: the number of words of `t`, the number of
-/// factors, the sign, the large prime's low and high halves, the words of
+/// factors, the sign, each large prime's low and high halves, the words of
 /// `t` from least significant, and the factors.
 // Limb is u32 or u64, so the casts are needed on one target and redundant
 // on the other.
@@ -209,8 +209,10 @@ fn encode<const LIMBS: usize>(r: &Relation<LIMBS>, out: &mut Vec<u32>) {
         t.len() as u32,
         r.factors.len() as u32,
         u32::from(r.negative),
-        r.large as u32,
-        (r.large >> 32) as u32,
+        r.large[0] as u32,
+        (r.large[0] >> 32) as u32,
+        r.large[1] as u32,
+        (r.large[1] >> 32) as u32,
     ]);
     out.extend(t);
     out.extend(&r.factors);
@@ -221,7 +223,7 @@ fn encode<const LIMBS: usize>(r: &Relation<LIMBS>, out: &mut Vec<u32>) {
 // on the other.
 #[allow(clippy::unnecessary_cast)]
 fn decode<const LIMBS: usize>(words: &mut &[u32]) -> Relation<LIMBS> {
-    let (head, rest) = words.split_at(5);
+    let (head, rest) = words.split_at(7);
     let (t_len, factors) = (head[0] as usize, head[1] as usize);
     let (t, rest) = rest.split_at(t_len);
     let (factors, rest) = rest.split_at(factors);
@@ -235,6 +237,9 @@ fn decode<const LIMBS: usize>(words: &mut &[u32]) -> Relation<LIMBS> {
         t: Uint::from_limbs(limbs),
         negative: head[2] != 0,
         factors: factors.to_vec(),
-        large: u64::from(head[3]) | u64::from(head[4]) << 32,
+        large: [
+            u64::from(head[3]) | u64::from(head[4]) << 32,
+            u64::from(head[5]) | u64::from(head[6]) << 32,
+        ],
     }
 }

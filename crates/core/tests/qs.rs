@@ -8,7 +8,8 @@
 use cofox_core::Uint;
 use cofox_core::primes::Primes;
 use cofox_core::qs::{
-    FactorBase, Params, Prime, QsJob, Sieve, Start, dependencies, multiplier, pow_mod, qs, sqrt_mod,
+    FactorBase, Params, Prime, QsJob, Relation, Sieve, Siqs, Start, dependencies, multiplier,
+    pow_mod, qs, sqrt_mod,
 };
 
 /// RSA-100 is 330 bits, and kN a few bits more: 12 limbs is at least 384
@@ -203,6 +204,10 @@ fn params_interpolate() {
     assert_eq!(p(290), (57_333, 80, 3));
     assert_eq!(p(20), (100, 40, 1));
     assert_eq!(p(400), (210_000, 150, 4));
+    // Double large primes from 280 bits.
+    assert!(!Params::for_bits(279).double_large);
+    assert!(Params::for_bits(280).double_large);
+    assert!(Params::for_bits(400).double_large);
 }
 
 /// Semiprimes with two random primes of equal size, from Python.
@@ -249,6 +254,7 @@ fn sieve_semiprimes() {
 struct Sieved {
     full: usize,
     partial: usize,
+    double: usize,
     a_values: Vec<U>,
     /// The largest factor-base prime in any relation.
     largest: u32,
@@ -263,6 +269,7 @@ fn sieve_and_check(n: &U, params: &Params, polys: usize) -> Sieved {
     let mut seen = Sieved {
         full: 0,
         partial: 0,
+        double: 0,
         a_values: Vec::new(),
         largest: 0,
     };
@@ -276,7 +283,9 @@ fn sieve_and_check(n: &U, params: &Params, polys: usize) -> Sieved {
         for r in sieve.sieve_poly() {
             let (sq, hi) = r.t.widening_square();
             assert!(hi.is_zero());
-            let product = r.factors.iter().fold(U::from_u64(r.large), |acc, &i| {
+            let [l1, l2] = r.large;
+            let large = U::from_u64(l1).widening_mul(&U::from_u64(l2)).0;
+            let product = r.factors.iter().fold(large, |acc, &i| {
                 acc.widening_mul(&U::from_u64(fb.primes[i as usize].p.into()))
                     .0
             });
@@ -289,11 +298,15 @@ fn sieve_and_check(n: &U, params: &Params, polys: usize) -> Sieved {
             assert!(r.factors.is_sorted());
             let largest = r.factors.iter().map(|&i| fb.primes[i as usize].p).max();
             seen.largest = seen.largest.max(largest.unwrap_or(0));
-            if r.large == 1 {
-                seen.full += 1;
-            } else {
-                assert!(r.large > u64::from(fb.primes.last().unwrap().p));
-                seen.partial += 1;
+            let pmax = u64::from(fb.primes.last().unwrap().p);
+            assert!(l1 <= l2 && (l1 == 1 || l1 > pmax), "{:?}", r.large);
+            match r.large {
+                [1, 1] => seen.full += 1,
+                [1, l] => {
+                    assert!(l > pmax);
+                    seen.partial += 1;
+                }
+                _ => seen.double += 1,
             }
         }
     }
@@ -322,6 +335,7 @@ fn relations_with_bucket_sieved_primes() {
     let n = u(SEMIPRIMES[6].0);
     let params = Params {
         fb_size: 8000,
+        double_large: false,
         ..Params::for_bits(n.bits())
     };
     let seen = sieve_and_check(&n, &params, 20);
@@ -331,6 +345,72 @@ fn relations_with_bucket_sieved_primes() {
         seen.largest
     );
     assert!(seen.full > 0 && seen.partial > 0);
+}
+
+#[test]
+fn relations_with_two_large_primes() {
+    let n = u(SEMIPRIMES[6].0);
+    let params = Params {
+        double_large: true,
+        ..Params::for_bits(n.bits())
+    };
+    let seen = sieve_and_check(&n, &params, 30);
+    assert!(seen.double > 0 && seen.partial > 0 && seen.full > 0);
+}
+
+#[test]
+fn cycles_of_large_primes() {
+    // Partial relations as edges between random large primes (1 standing
+    // for no second prime). Every independent cycle is a row: edges minus
+    // vertices plus components, counted here with union-find. The
+    // collector checks in debug builds that each row's large primes pair
+    // up.
+    let n = u(SEMIPRIMES[1].0);
+    let Ok(siqs) = Siqs::new(&n, &Params::for_bits(n.bits())) else {
+        panic!("no sieving needed");
+    };
+    let mut relations = siqs.relations();
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = |bound: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % bound
+    };
+    let primes = [
+        1, 1009, 1013, 1019, 1021, 1031, 1033, 1039, 1049, 1051, 1061,
+    ];
+    let mut parent: Vec<usize> = (0..primes.len()).collect();
+    fn find(parent: &mut [usize], mut v: usize) -> usize {
+        while parent[v] != v {
+            parent[v] = parent[parent[v]];
+            v = parent[v];
+        }
+        v
+    }
+    let mut cycles = 0;
+    for t in 1..=40u64 {
+        // Mostly distinct primes, sometimes the same one twice (L²).
+        let (i, j) = (next(11) as usize, next(11) as usize);
+        let (i, j) = (i.min(j), i.max(j));
+        if (i, j) == (0, 0) {
+            continue;
+        }
+        let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+        if a == b {
+            cycles += 1;
+        } else {
+            parent[a] = b;
+        }
+        relations.add(Relation {
+            t: U::from_u64(1000 + t),
+            negative: false,
+            factors: Vec::new(),
+            large: [primes[i], primes[j]],
+        });
+        assert_eq!(relations.len(), cycles, "after {t} relations");
+    }
+    assert!(cycles > 10, "{cycles}");
 }
 
 #[test]

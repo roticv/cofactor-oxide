@@ -34,7 +34,7 @@ it can find, and whatever composite is left goes to the next stage.
 | 2 | **Pollard rho** (Brent's variant) | Primes up to about 8 digits, in a quick first run |
 | 3 | **Pollard p−1** and **Williams p+1** (B1 = 5·10⁴, B2 = 5·10⁶) | Primes *p* of any size where *p−1* or *p+1* is smooth |
 | 4 | **ECM** (Lenstra elliptic curve method, levels of 15 to 40 digits; 25 by default) | Primes up to about 30–40 digits, whatever the size of *n* |
-| 5 | **Quadratic sieve** (SIQS, single large prime, block Lanczos) | Composites up to about 100 digits |
+| 5 | **Quadratic sieve** (SIQS, double large primes, block Lanczos) | Composites up to about 100 digits |
 | 6 | **General Number Field Sieve** (GNFS) | Composites beyond about 100 digits |
 
 The Baillie–PSW primality test runs between stages so that nothing is spent on
@@ -66,7 +66,10 @@ block they land in, and trial division reads a candidate's large primes
 back from its bucket. On a 10-core Apple M4 (4 performance and 6
 efficiency cores), two 30-digit primes take under a second, two 33-digit
 primes about a second, two 40-digit primes about 17 seconds, and RSA-100
-(two 50-digit primes) about 40 minutes.
+(two 50-digit primes) about 28 minutes. From 280 bits (about 85 digits)
+a relation may also have two primes outside the factor base: the sieve
+splits such cofactors with a 64-bit rho, and the collector combines
+relations whose large primes form cycles. That saves about 30% at 90 digits.
 
 The crossover to GNFS is a rough guess for now, to be measured once it
 exists.
