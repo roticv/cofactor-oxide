@@ -67,6 +67,10 @@ const RHO_MAX_BITS: u32 = 80;
 /// composites take days at best.
 pub const QS_MAX_BITS: u32 = 363;
 
+/// Up to this size (about 60 digits), the quadratic sieve on all cores
+/// takes no longer than p−1 and p+1, so they're skipped when it follows.
+const QUICK_SIEVE_BITS: u32 = 200;
+
 /// Widths, in limbs, that [`factor_str`] can pick from.
 const WIDTHS: [usize; 5] = [1, 2, 4, 8, 16];
 
@@ -125,10 +129,12 @@ pub struct Config {
 pub enum QsMode {
     /// Run the quadratic sieve on it, up to [`QS_MAX_BITS`]. ECM then stops
     /// at the level for primes of about 30% of its digits (at least 15),
-    /// past which the sieve is the quicker way.
+    /// past which the sieve is the quicker way, and up to 200 bits p−1 and
+    /// p+1 are skipped, since the sieve is quicker than they are.
     Run,
-    /// Return it unsplit, with ECM limited as for `Run`, for the caller to
-    /// sieve, for example on several threads with [`crate::qs::QsJob`].
+    /// Return it unsplit, with ECM and p±1 limited as for `Run`, for the
+    /// caller to sieve, for example on several threads with
+    /// [`crate::qs::QsJob`].
     Defer,
     /// Return it unsplit after ECM up to [`Config::ecm_digits`].
     Off,
@@ -315,14 +321,19 @@ fn split<const LIMBS: usize>(
     if let Some(g) = pollard_rho(m, 1, QUICK_RHO_STEPS) {
         return Ok(Some(g));
     }
-    report(method("p-1"))?;
-    if let Some(g) = pollard_pm1(m, PM1_B1, PM1_B2) {
-        return Ok(Some(g));
-    }
-    report(method("p+1"))?;
-    for seed in PP1_SEEDS {
-        if let Some(g) = williams_pp1(m, seed, PP1_B1, PP1_B2) {
+    let sieve = config.qs != QsMode::Off && bits > RHO_MAX_BITS && bits <= QS_MAX_BITS;
+    // p−1 and p+1 take about 50 ms whatever the size, longer than the
+    // sieve needs for a composite this small.
+    if !(sieve && bits <= QUICK_SIEVE_BITS) {
+        report(method("p-1"))?;
+        if let Some(g) = pollard_pm1(m, PM1_B1, PM1_B2) {
             return Ok(Some(g));
+        }
+        report(method("p+1"))?;
+        for seed in PP1_SEEDS {
+            if let Some(g) = williams_pp1(m, seed, PP1_B1, PP1_B2) {
+                return Ok(Some(g));
+            }
         }
     }
 
@@ -330,7 +341,6 @@ fn split<const LIMBS: usize>(
     // skipped, since the smallest prime factor is at most that.
     let workers = u64::from(config.workers.max(1));
     let worker = u64::from(config.worker) % workers;
-    let sieve = config.qs != QsMode::Off && bits > RHO_MAX_BITS && bits <= QS_MAX_BITS;
     let ecm_digits = if sieve {
         // 30% of the digits: log₁₀ 2 ≈ 0.301, so about 9% of the bits.
         config.ecm_digits.min((bits * 9 / 100).max(15))

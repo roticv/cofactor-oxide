@@ -42,7 +42,9 @@ cofactors that are already prime. No composite is known to pass it, and none
 exists below 2⁶⁴.
 
 A longer rho run follows ECM for composites up to 80 bits, where it is
-certain to succeed.
+certain to succeed. For composites of up to 200 bits (about 60 digits) that the
+quadratic sieve will take, p−1 and p+1 are skipped: they take about 50 ms
+whatever the size, longer than the sieve needs.
 
 Each ECM level runs about as many curves as it takes on average to find a
 prime of that size: 30 curves with B1 = 2000 for 15 digits, 100 with
@@ -126,11 +128,13 @@ cargo build --release
 # 95741717322359106137862766319375166032677068850856466452653: 266273800333898804119934270521 359561162992010719067582390293
 ```
 
-The second number is (2⁶¹−1)(2⁸⁹−1). Both factors are too large for rho, but
-p−1 finds 2⁶¹−1 because 2⁶¹−2 has only small prime factors. The third has a
-20-digit prime factor whose p−1 and p+1 aren't smooth, so it takes ECM. The
-fourth is a product of two 30-digit primes, too large for ECM, so the
-quadratic sieve splits it.
+The second number is (2⁶¹−1)(2⁸⁹−1). Both factors are too large for rho, and
+p−1 would find 2⁶¹−1 because 2⁶¹−2 has only small prime factors. The third
+has a 20-digit prime factor whose p−1 and p+1 aren't smooth, which ECM can
+find. At 46 digits, though, the quadratic sieve on all cores is quicker than
+either, so it splits both; with `--no-qs`, p−1 and ECM do. The fourth is a
+product of two 30-digit primes, too large for ECM, so the quadratic sieve
+splits it.
 
 `--ecm 30` (or 35, 40) searches for larger factors, at about four times the
 cost per level, `--threads N` sets the number of threads, and `--no-qs`
