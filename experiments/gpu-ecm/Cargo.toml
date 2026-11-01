@@ -1,0 +1,18 @@
+[package]
+name = "gpu-ecm"
+description = "Benchmarks of Montgomery multiplication and ECM stage 1 on Apple GPUs (Metal) against cofox-core on the CPU"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Kept out of the main workspace: it needs macOS and the metal crate.
+[workspace]
+
+[dependencies]
+cofox-core = { path = "../../crates/core" }
+metal = "0.29"
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -95,6 +95,11 @@ number, nothing to install. Expect it to be slower than the native binary:
 The likely outcome is that the browser handles trial division, p±1, ECM and
 QS comfortably, while large GNFS jobs are a job for the native binary.
 
+GPUs were measured too: [`experiments/gpu-ecm`](experiments/gpu-ecm)
+benchmarks ECM stage 1 on an Apple M4's GPU through Metal. It runs about 3×
+faster than all ten CPU cores, but only with thousands of curves at once,
+more than the pipeline's ECM levels use below 35 digits.
+
 ## Layout
 
 ```
@@ -103,6 +108,8 @@ cofactor-oxide/
 │   ├── core/    # cofox-core: arithmetic, primality testing, factoring (no_std)
 │   ├── cli/     # cofox: native command-line binary
 │   └── wasm/    # cofox-wasm: wasm-bindgen bindings for the browser
+├── experiments/
+│   └── gpu-ecm/ # ECM on Apple GPUs (Metal), outside the workspace
 └── web/         # browser front end
 ```
 
