@@ -63,13 +63,15 @@ sends the relations to one collector, which runs block Lanczos once it has
 enough. Primes too large to hit a 64 KB sieve block more than a few times
 are sieved through buckets: each polynomial drops their hits into the
 block they land in, and trial division reads a candidate's large primes
-back from its bucket. On a 10-core Apple M4 (4 performance and 6
-efficiency cores), two 30-digit primes take under a second, two 33-digit
-primes about a second, two 40-digit primes about 17 seconds, and RSA-100
-(two 50-digit primes) about 28 minutes. From 280 bits (about 85 digits)
-a relation may also have two primes outside the factor base: the sieve
-splits such cofactors with a 64-bit rho, and the collector combines
-relations whose large primes form cycles. That saves about 30% at 90 digits.
+back from its bucket. From 280 bits (about 85 digits) a relation may also
+have two primes outside the factor base: the sieve splits such cofactors
+with a 64-bit rho, and the collector combines relations whose large primes
+form cycles. That saves about 30% at 90 digits.
+
+On a 10-core Apple M4 (4 performance and 6 efficiency cores), two 30-digit
+primes take under a second, two 33-digit primes about a second, two
+40-digit primes about 15 seconds, two 45-digit primes about 2 minutes, and
+RSA-100 (two 50-digit primes) about 20 minutes.
 
 The crossover to GNFS is a rough guess for now, to be measured once it
 exists.

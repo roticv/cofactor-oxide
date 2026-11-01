@@ -121,6 +121,11 @@ pub struct Sieve<const LIMBS: usize> {
     /// most 2^16 primes long and with one rounded log, so that a hit fits
     /// in 32 bits: the index within its run, and the offset in the block.
     runs: Vec<(usize, usize, u8)>,
+    /// Primes from this index on are larger than the whole interval, so
+    /// each root hits it at most once.
+    first_huge: usize,
+    /// Scratch space for the huge primes' hits, as `pos << 16 | index`.
+    hits: Vec<u64>,
     /// For each block, the hits of the large primes in it, as
     /// `(index − first index of its run) << 16 | offset`, run by run.
     buckets: Vec<Vec<u32>>,
@@ -149,7 +154,12 @@ pub struct Sieve<const LIMBS: usize> {
     index: u64,
     /// The roots of `Q` mod each factor-base prime, or [`UNSIEVED`], as
     /// offsets `x + M` into the interval.
-    roots: Vec<(u32, u32)>,
+    roots: [Vec<u32>; 2],
+    /// The primes not sieved with the current `a`, whose roots are
+    /// [`UNSIEVED`].
+    unsieved: Vec<usize>,
+    /// Each factor-base prime, on its own for vectorized loops.
+    ps: Vec<u32>,
     /// Where each prime smaller than a block hits next in the current
     /// block, carried over from one block to the next.
     next: Vec<(u32, u32)>,
@@ -184,6 +194,8 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             first_sieved: 0,
             first_large: fb.primes.partition_point(|p| (p.p as usize) < BLOCK_SIZE),
             runs: Vec::new(),
+            first_huge: 0,
+            hits: Vec::new(),
             buckets: vec![Vec::new(); 2 * params.blocks],
             run_starts: vec![Vec::new(); 2 * params.blocks],
             block: vec![0; BLOCK_SIZE],
@@ -197,7 +209,12 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             c: (false, Uint::ZERO),
             minus: Vec::new(),
             index: 0,
-            roots: vec![(UNSIEVED, UNSIEVED); fb.primes.len()],
+            roots: [
+                vec![UNSIEVED; fb.primes.len()],
+                vec![UNSIEVED; fb.primes.len()],
+            ],
+            unsieved: Vec::new(),
+            ps: fb.primes.iter().map(|p| p.p).collect(),
             next: Vec::new(),
             magic: fb
                 .primes
@@ -206,13 +223,17 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
                 .collect(),
         };
         sieve.first_sieved = fb.primes.partition_point(|p| p.p < SMALL_PRIMES);
+        let interval = 2 * sieve.m as u64;
+        sieve.first_huge = fb.primes.partition_point(|p| u64::from(p.p) < interval);
         let mut start = sieve.first_large;
         while start < fb.primes.len() {
             let log = fb.primes[start].log;
+            // Runs don't straddle the first huge prime either.
+            let huge = start >= sieve.first_huge;
             let len = fb.primes[start..]
                 .iter()
                 .take(1 << 16)
-                .take_while(|p| p.log == log)
+                .take_while(|p| p.log == log && (u64::from(p.p) >= interval) == huge)
                 .count();
             sieve.runs.push((start, start + len, log));
             start += len;
@@ -333,10 +354,13 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
 
         let k = fb.multiplier;
         self.deltas = vec![vec![0; fb.primes.len()]; self.bs.len()];
+        self.unsieved.clear();
         for (i, prime) in fb.primes.iter().enumerate() {
             let p = u64::from(prime.p);
             if p == 2 || k.is_multiple_of(prime.p) || self.a_primes.contains(&i) {
-                self.roots[i] = (UNSIEVED, UNSIEVED);
+                self.roots[0][i] = UNSIEVED;
+                self.roots[1][i] = UNSIEVED;
+                self.unsieved.push(i);
                 continue;
             }
             let ainv = pow_mod(rem(&self.a, p), p - 2, p);
@@ -350,7 +374,8 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             let m = self.m as u64 % p;
             let r1 = ((s + p - bp) * ainv + m) % p;
             let r2 = ((2 * p - s - bp) * ainv + m) % p;
-            self.roots[i] = (r1 as u32, r2 as u32);
+            self.roots[0][i] = r1 as u32;
+            self.roots[1][i] = r2 as u32;
         }
     }
 
@@ -370,21 +395,26 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         // it subtracts.
         let two_bj = self.bs[j] << 1;
         self.b = signed_add(self.b, (!was_minus, two_bj));
-        for (i, roots) in self.roots.iter_mut().enumerate() {
-            if roots.0 == UNSIEVED {
-                continue;
-            }
-            let p = self.fb.primes[i].p;
-            let d = if was_minus {
-                p - self.deltas[j][i]
+        // Branch-free so that it vectorizes: r + d − p wraps around to a
+        // huge value exactly when r + d < p, so the smaller of the two is
+        // r + d mod p. The unsieved primes come out wrong and are reset.
+        for roots in &mut self.roots {
+            let roots = roots.iter_mut().zip(&self.deltas[j]).zip(&self.ps);
+            if was_minus {
+                for ((r, &d), &p) in roots {
+                    let a = r.wrapping_add(p - d);
+                    *r = a.min(a.wrapping_sub(p));
+                }
             } else {
-                self.deltas[j][i]
-            };
-            let step = |r: u32| {
-                let r = r + d;
-                if r >= p { r - p } else { r }
-            };
-            *roots = (step(roots.0), step(roots.1));
+                for ((r, &d), &p) in roots {
+                    let a = r.wrapping_add(d);
+                    *r = a.min(a.wrapping_sub(p));
+                }
+            }
+        }
+        for &i in &self.unsieved {
+            self.roots[0][i] = UNSIEVED;
+            self.roots[1][i] = UNSIEVED;
         }
     }
 
@@ -431,7 +461,13 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         let threshold = threshold.min(u32::from(u8::MAX)) as u8;
         let mut relations = Vec::new();
         self.next.clear();
-        self.next.extend_from_slice(&self.roots[..self.first_large]);
+        let [r1, r2] = &self.roots;
+        self.next.extend(
+            r1[..self.first_large]
+                .iter()
+                .copied()
+                .zip(r2[..self.first_large].iter().copied()),
+        );
         self.fill_buckets();
         let mut candidates = Vec::new();
         let mut large = Vec::new();
@@ -491,8 +527,33 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             for (bucket, starts) in self.buckets.iter().zip(&mut self.run_starts) {
                 starts.push(bucket.len() as u32);
             }
+            if first >= self.first_huge {
+                // Whether a root lands in the interval is close to a coin
+                // flip, which branches would mispredict half the time.
+                // Instead every root is written and only a hit advances.
+                // The unsieved primes' roots are past the end, so never hit.
+                self.hits.resize(2 * (end - first), 0);
+                let mut n = 0;
+                for (i, &r) in self.roots[0][first..end].iter().enumerate() {
+                    self.hits[n] = u64::from(r) << 16 | i as u64;
+                    n += usize::from(r < len);
+                }
+                for (i, &r) in self.roots[1][first..end].iter().enumerate() {
+                    self.hits[n] = u64::from(r) << 16 | i as u64;
+                    n += usize::from(r < len);
+                }
+                for &hit in &self.hits[..n] {
+                    let pos = (hit >> 16) as u32;
+                    let index = hit as u32 & 0xffff;
+                    self.buckets[(pos >> BLOCK_BITS) as usize].push(index << 16 | (pos & 0xffff));
+                }
+                continue;
+            }
             let primes = &self.fb.primes[first..end];
-            for (i, (prime, &(r1, r2))) in primes.iter().zip(&self.roots[first..end]).enumerate() {
+            let roots = self.roots[0][first..end]
+                .iter()
+                .zip(&self.roots[1][first..end]);
+            for (i, (prime, (&r1, &r2))) in primes.iter().zip(roots).enumerate() {
                 if r1 == UNSIEVED {
                     continue;
                 }
@@ -553,8 +614,9 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         }
         let mut factors = Vec::new();
         let n = self.first_large;
-        let primes = self.fb.primes[..n].iter().zip(&self.roots).zip(&self.magic);
-        for (index, ((prime, &(r1, r2)), &magic)) in primes.enumerate() {
+        let roots = self.roots[0][..n].iter().zip(&self.roots[1][..n]);
+        let primes = self.fb.primes[..n].iter().zip(roots).zip(&self.magic);
+        for (index, ((prime, (&r1, &r2)), &magic)) in primes.enumerate() {
             let p = prime.p;
             if r1 != UNSIEVED {
                 // A sieved prime divides g(x) exactly at its roots, which
