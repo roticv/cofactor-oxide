@@ -46,6 +46,9 @@ const SMALL_PRIMES: u32 = 100;
 /// 2.0 misses relations and 2.8 tries too many candidates.
 const SLACK: f64 = 2.4;
 
+/// `log₂ BLOCK_SIZE`.
+const BLOCK_BITS: u32 = BLOCK_SIZE.trailing_zeros();
+
 /// A sign and magnitude.
 type Signed<const LIMBS: usize> = (bool, Uint<LIMBS>);
 
@@ -91,6 +94,20 @@ pub struct Sieve<const LIMBS: usize> {
     /// Primes before this index aren't sieved: they are slow to sieve and
     /// add little. Trial division still tries them.
     first_sieved: usize,
+    /// Primes from this index on are larger than a block, so they hit each
+    /// block at most a few times. Instead of every block visiting every one
+    /// of them, each polynomial drops their hits into [`Sieve::buckets`].
+    first_large: usize,
+    /// Runs of large primes as `(first index, end index, log)`, each at
+    /// most 2^16 primes long and with one rounded log, so that a hit fits
+    /// in 32 bits: the index within its run, and the offset in the block.
+    runs: Vec<(usize, usize, u8)>,
+    /// For each block, the hits of the large primes in it, as
+    /// `(index − first index of its run) << 16 | offset`, run by run.
+    buckets: Vec<Vec<u32>>,
+    /// For each block, where each run's hits start in its bucket, and
+    /// where the last one ends.
+    run_starts: Vec<Vec<u32>>,
     block: Vec<u8>,
     rng: u64,
     /// Choices of `a`, by the factor-base indices of their primes.
@@ -114,8 +131,8 @@ pub struct Sieve<const LIMBS: usize> {
     /// The roots of `Q` mod each factor-base prime, or [`UNSIEVED`], as
     /// offsets `x + M` into the interval.
     roots: Vec<(u32, u32)>,
-    /// Where each prime hits next in the current block, carried over from
-    /// one block to the next.
+    /// Where each prime smaller than a block hits next in the current
+    /// block, carried over from one block to the next.
     next: Vec<(u32, u32)>,
     /// `⌈2^64/p⌉` for each prime, for remainders by multiplication.
     magic: Vec<u64>,
@@ -138,6 +155,10 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             large_bound,
             slack: 0,
             first_sieved: 0,
+            first_large: fb.primes.partition_point(|p| (p.p as usize) < BLOCK_SIZE),
+            runs: Vec::new(),
+            buckets: vec![Vec::new(); 2 * params.blocks],
+            run_starts: vec![Vec::new(); 2 * params.blocks],
             block: vec![0; BLOCK_SIZE],
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
             used: BTreeSet::new(),
@@ -158,6 +179,17 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
                 .collect(),
         };
         sieve.first_sieved = fb.primes.partition_point(|p| p.p < SMALL_PRIMES);
+        let mut start = sieve.first_large;
+        while start < fb.primes.len() {
+            let log = fb.primes[start].log;
+            let len = fb.primes[start..]
+                .iter()
+                .take(1 << 16)
+                .take_while(|p| p.log == log)
+                .count();
+            sieve.runs.push((start, start + len, log));
+            start += len;
+        }
         // What the unsieved primes would add on average: log₂ p from each
         // of two roots, at 1 in p of the positions.
         let k = fb.multiplier;
@@ -366,13 +398,47 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         let threshold = peak.bits().saturating_sub(self.slack);
         let threshold = threshold.min(u32::from(u8::MAX)) as u8;
         let mut relations = Vec::new();
-        self.next.clone_from(&self.roots);
-        for start in (0..2 * self.m as u32).step_by(BLOCK_SIZE) {
-            self.sieve_block();
-            for j in 0..BLOCK_SIZE {
-                if self.block[j] >= threshold
-                    && let Some(relation) = self.trial_divide(start + j as u32)
-                {
+        self.next.clear();
+        self.next.extend_from_slice(&self.roots[..self.first_large]);
+        self.fill_buckets();
+        let mut candidates = Vec::new();
+        let mut large = Vec::new();
+        for block in 0..self.buckets.len() {
+            self.sieve_block(block);
+            candidates.clear();
+            // Most 64-byte chunks hold no candidate, and their maximum is a
+            // vectorizable reduction.
+            for (c, chunk) in self.block.as_chunks::<64>().0.iter().enumerate() {
+                if chunk.iter().fold(0, |m, &b| m.max(b)) >= threshold {
+                    let base = 64 * c as u32;
+                    candidates.extend(
+                        (0..64)
+                            .filter(|&j| chunk[j as usize] >= threshold)
+                            .map(|j| base + j),
+                    );
+                }
+            }
+            if candidates.is_empty() {
+                continue;
+            }
+            // The large primes dividing each candidate are the ones whose
+            // hits landed on it.
+            large.clear();
+            large.resize(candidates.len(), Vec::new());
+            let (bucket, starts) = (&self.buckets[block], &self.run_starts[block]);
+            for (r, &(first, _, _)) in self.runs.iter().enumerate() {
+                for &hit in &bucket[starts[r] as usize..starts[r + 1] as usize] {
+                    let j = hit & 0xffff;
+                    if self.block[j as usize] >= threshold
+                        && let Ok(c) = candidates.binary_search(&j)
+                    {
+                        large[c].push(first as u32 + (hit >> 16));
+                    }
+                }
+            }
+            let start = (block * BLOCK_SIZE) as u32;
+            for (&j, large) in candidates.iter().zip(&large) {
+                if let Some(relation) = self.trial_divide(start + j, large) {
                     relations.push(relation);
                 }
             }
@@ -381,11 +447,47 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         relations
     }
 
-    /// Adds up the logs of the primes dividing `g(x)` over the next block.
-    fn sieve_block(&mut self) {
+    /// Drops every hit of the large primes in `[−M, M)` into the bucket for
+    /// its block.
+    fn fill_buckets(&mut self) {
+        for (bucket, starts) in self.buckets.iter_mut().zip(&mut self.run_starts) {
+            bucket.clear();
+            starts.clear();
+        }
+        let len = 2 * self.m as u32;
+        for &(first, end, _) in &self.runs {
+            for (bucket, starts) in self.buckets.iter().zip(&mut self.run_starts) {
+                starts.push(bucket.len() as u32);
+            }
+            let primes = &self.fb.primes[first..end];
+            for (i, (prime, &(r1, r2))) in primes.iter().zip(&self.roots[first..end]).enumerate() {
+                if r1 == UNSIEVED {
+                    continue;
+                }
+                let tag = (i as u32) << 16;
+                for r in [r1, r2] {
+                    // Positions stay below 2^32: the interval and the
+                    // primes are both far smaller.
+                    let mut pos = r;
+                    while pos < len {
+                        self.buckets[(pos >> BLOCK_BITS) as usize].push(tag | (pos & 0xffff));
+                        pos += prime.p;
+                    }
+                }
+            }
+        }
+        for (bucket, starts) in self.buckets.iter().zip(&mut self.run_starts) {
+            starts.push(bucket.len() as u32);
+        }
+    }
+
+    /// Adds up the logs of the primes dividing `g(x)` over block `block`,
+    /// which is the next one for the primes smaller than a block.
+    fn sieve_block(&mut self, block: usize) {
         self.block.fill(0);
-        let primes = &self.fb.primes[self.first_sieved..];
-        for (prime, next) in primes.iter().zip(&mut self.next[self.first_sieved..]) {
+        let range = self.first_sieved..self.first_large;
+        let primes = &self.fb.primes[range.clone()];
+        for (prime, next) in primes.iter().zip(&mut self.next[range]) {
             if next.0 == UNSIEVED {
                 continue;
             }
@@ -399,19 +501,27 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
                 *r = (j - BLOCK_SIZE) as u32;
             }
         }
+        let (bucket, starts) = (&self.buckets[block], &self.run_starts[block]);
+        for (r, &(_, _, log)) in self.runs.iter().enumerate() {
+            for &hit in &bucket[starts[r] as usize..starts[r + 1] as usize] {
+                let j = (hit & 0xffff) as usize;
+                self.block[j] = self.block[j].saturating_add(log);
+            }
+        }
     }
 
     /// Factors `a·g(x)` at offset `i = x + M` over the factor base, if
     /// `g(x)` is smooth apart from at most one prime below the large-prime
-    /// bound.
-    fn trial_divide(&self, i: u32) -> Option<Relation<LIMBS>> {
+    /// bound. `large` lists the primes larger than a block that hit `i`.
+    fn trial_divide(&self, i: u32, large: &[u32]) -> Option<Relation<LIMBS>> {
         let x = i64::from(i) - self.m;
         let (negative, mut g) = self.value(x);
         if g.is_zero() {
             return None;
         }
         let mut factors = Vec::new();
-        let primes = self.fb.primes.iter().zip(&self.roots).zip(&self.magic);
+        let n = self.first_large;
+        let primes = self.fb.primes[..n].iter().zip(&self.roots).zip(&self.magic);
         for (index, ((prime, &(r1, r2)), &magic)) in primes.enumerate() {
             let p = prime.p;
             if r1 != UNSIEVED {
@@ -432,6 +542,17 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
                 }
                 g = quot;
                 factors.push(index as u32);
+            }
+        }
+        for &index in large {
+            let p = self.fb.primes[index as usize].p;
+            loop {
+                let (quot, r) = g.div_rem_limb(p as Limb);
+                if r != 0 {
+                    break;
+                }
+                g = quot;
+                factors.push(index);
             }
         }
         // Every prime below the largest factor-base prime that can divide

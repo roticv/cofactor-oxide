@@ -60,8 +60,13 @@ of about 30% of the composite's digits (at least 15): past that, sieving is
 the quicker way to an answer. The sieve then runs on composites of 81 to 363
 bits (110 digits). Each thread or Web Worker sieves its own polynomials and
 sends the relations to one collector, which runs block Lanczos once it has
-enough. On a 10-core machine, two 30-digit primes take under a second, two
-33-digit primes about 2.5 seconds and two 40-digit primes about 40 seconds.
+enough. Primes too large to hit a 64 KB sieve block more than a few times
+are sieved through buckets: each polynomial drops their hits into the
+block they land in, and trial division reads a candidate's large primes
+back from its bucket. On a 10-core Apple M4 (4 performance and 6
+efficiency cores), two 30-digit primes take under a second, two 33-digit
+primes about a second, two 40-digit primes about 17 seconds, and RSA-100
+(two 50-digit primes) about 40 minutes.
 
 The crossover to GNFS is a rough guess for now, to be measured once it
 exists.

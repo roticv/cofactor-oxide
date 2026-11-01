@@ -137,7 +137,8 @@ fn check_base(
 fn rsa100_factor_base() {
     let n = u(RSA100);
     let k = multiplier(&n);
-    let base = FactorBase::new(&n, k, Params::for_bits(330).fb_size).unwrap();
+    // The size the Python reference was checked at.
+    let base = FactorBase::new(&n, k, 97_647).unwrap();
     assert_eq!(base.primes.len(), 97_647);
     check_base(
         &base,
@@ -196,7 +197,7 @@ fn params_interpolate() {
     // Table rows, between rows, and clamped at both ends.
     assert_eq!(p(64), (100, 40, 1));
     assert_eq!(p(200), (3000, 50, 1));
-    assert_eq!(p(330), (97_647, 150, 4));
+    assert_eq!(p(330), (110_882, 150, 4));
     assert_eq!(p(250), (28_352, 100, 1));
     // The large-prime multiplier goes down between 266 and 283 bits.
     assert_eq!(p(290), (57_333, 80, 3));
@@ -244,22 +245,33 @@ fn sieve_semiprimes() {
     }
 }
 
-#[test]
-fn relations_hold() {
-    // Every relation, full or partial, is an exact factorization of
-    // t² − kN, across enough polynomials to need a second a.
-    let n = u(SEMIPRIMES[4].0);
-    let params = Params::for_bits(n.bits());
-    let fb = FactorBase::new(&n, multiplier(&n), params.fb_size).unwrap();
-    let mut sieve = Sieve::new(std::sync::Arc::new(fb.clone()), &params, 1);
-    let (mut full, mut partial, mut a_values) = (0, 0, Vec::new());
-    for _ in 0..40 {
+/// What [`sieve_and_check`] saw.
+struct Sieved {
+    full: usize,
+    partial: usize,
+    a_values: Vec<U>,
+    /// The largest factor-base prime in any relation.
+    largest: u32,
+}
+
+/// Sieves `polys` polynomials and checks that every relation, full or
+/// partial, is an exact factorization of t² − kN, and every polynomial has
+/// b² ≡ kN (mod a), so that a divides every Q(x).
+fn sieve_and_check(n: &U, params: &Params, polys: usize) -> Sieved {
+    let fb = FactorBase::new(n, multiplier(n), params.fb_size).unwrap();
+    let mut sieve = Sieve::new(std::sync::Arc::new(fb.clone()), params, 1);
+    let mut seen = Sieved {
+        full: 0,
+        partial: 0,
+        a_values: Vec::new(),
+        largest: 0,
+    };
+    for _ in 0..polys {
         let (a, b_negative, b) = sieve.poly();
-        // b² ≡ kN (mod a), so a divides every Q(x).
         let b2 = b.widening_square().0.div_rem(&a).1;
         assert_eq!(b2, fb.kn.div_rem(&a).1, "a = {a}, b = {b}");
-        if !a_values.contains(&a) {
-            a_values.push(a);
+        if !seen.a_values.contains(&a) {
+            seen.a_values.push(a);
         }
         for r in sieve.sieve_poly() {
             let (sq, hi) = r.t.widening_square();
@@ -275,19 +287,50 @@ fn relations_hold() {
             };
             assert_eq!(q, Some(product), "t = {}, b negative: {b_negative}", r.t);
             assert!(r.factors.is_sorted());
+            let largest = r.factors.iter().map(|&i| fb.primes[i as usize].p).max();
+            seen.largest = seen.largest.max(largest.unwrap_or(0));
             if r.large == 1 {
-                full += 1;
+                seen.full += 1;
             } else {
                 assert!(r.large > u64::from(fb.primes.last().unwrap().p));
-                partial += 1;
+                seen.partial += 1;
             }
         }
     }
-    assert!(a_values.len() >= 2, "{a_values:?}");
+    seen
+}
+
+#[test]
+fn relations_hold() {
+    // Across enough polynomials to need a second a.
+    let n = u(SEMIPRIMES[4].0);
+    let seen = sieve_and_check(&n, &Params::for_bits(n.bits()), 40);
+    assert!(seen.a_values.len() >= 2, "{:?}", seen.a_values);
     assert!(
-        full > 20 && partial > full,
-        "{full} full, {partial} partial"
+        seen.full > 20 && seen.partial > seen.full,
+        "{} full, {} partial",
+        seen.full,
+        seen.partial
     );
+}
+
+#[test]
+fn relations_with_bucket_sieved_primes() {
+    // A factor base reaching past 2^17, so that the primes above the block
+    // size go through the buckets, both into the sieve and into trial
+    // division.
+    let n = u(SEMIPRIMES[6].0);
+    let params = Params {
+        fb_size: 8000,
+        ..Params::for_bits(n.bits())
+    };
+    let seen = sieve_and_check(&n, &params, 20);
+    assert!(
+        seen.largest > 1 << 17,
+        "largest prime used {}",
+        seen.largest
+    );
+    assert!(seen.full > 0 && seen.partial > 0);
 }
 
 #[test]
