@@ -1,5 +1,5 @@
 use cofox_core::Uint;
-use cofox_core::nfs::{FactorBase, Poly, alpha, degree, modp};
+use cofox_core::nfs::{FactorBase, Params, Poly, Relation, Sieve, alpha, degree, modp};
 use cofox_core::primes::Primes;
 use num_bigint::BigInt;
 
@@ -149,4 +149,96 @@ fn factor_base_primes_divide() {
         assert!(c.p > 200_000);
         assert_eq!(eval_mod(&poly.f, c.r.into(), c.p.into()), 0);
     }
+}
+
+/// Checks that `rel` factors as it says on both sides, and that each
+/// algebraic prime is a factor-base ideal: `(p, a/b mod p)` or, for `p | b`,
+/// the one at infinity.
+fn check_relation(poly: &Poly, fb: &FactorBase, rel: &Relation) {
+    let (a, b) = (BigInt::from(rel.a), BigInt::from(rel.b));
+    let rational = &a - &b * BigInt::from(poly.m);
+    assert_eq!(rational < BigInt::from(0), rel.negative, "{rel:?}");
+    let product = |ps: &[u32], large: u64| {
+        ps.iter()
+            .fold(BigInt::from(large), |acc, &p| acc * BigInt::from(p))
+    };
+    assert_eq!(
+        product(&rel.rational, rel.large[0]),
+        rational.magnitude().clone().into(),
+        "{rel:?}"
+    );
+    let d = poly.degree();
+    let norm: BigInt = poly
+        .f
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| BigInt::from(c) * a.pow(i as u32) * b.pow((d - i) as u32))
+        .sum();
+    assert_eq!(
+        product(&rel.algebraic, rel.large[1]),
+        norm.magnitude().clone().into(),
+        "{rel:?}"
+    );
+    for &p in &rel.algebraic {
+        let q = u64::from(p);
+        let ideal = if rel.b.is_multiple_of(q) {
+            p
+        } else {
+            let binv = modp_inv(rel.b % q, q);
+            ((rel.a.rem_euclid(q as i64) as u64) * binv % q) as u32
+        };
+        assert!(
+            fb.algebraic.iter().any(|x| x.p == p && x.r == ideal),
+            "({p}, {ideal}) not in the factor base, {rel:?}"
+        );
+    }
+}
+
+fn modp_inv(a: u64, p: u64) -> u64 {
+    let (mut r, mut b, mut e) = (1u64, a % p, p - 2);
+    while e > 0 {
+        if e & 1 == 1 {
+            r = (r as u128 * b as u128 % p as u128) as u64;
+        }
+        b = (b as u128 * b as u128 % p as u128) as u64;
+        e >>= 1;
+    }
+    r
+}
+
+/// Sieves `lines` lines for `n` and checks every relation found.
+fn sieve_lines(n: &str, lines: u64) -> Vec<Relation> {
+    let n = u(n);
+    let poly = Poly::select(&n);
+    let params = Params::for_bits(n.bits());
+    let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
+    let mut sieve = Sieve::new(&poly, &fb, &params);
+    let t = std::time::Instant::now();
+    let rels: Vec<Relation> = (1..=lines).flat_map(|b| sieve.line(b)).collect();
+    let full = rels.iter().filter(|r| r.large == [1, 1]).count();
+    println!(
+        "{} bits, {params:?}: {} relations ({full} full) from {lines} lines in {:.2?}, factor bases {} + {}",
+        n.bits(),
+        rels.len(),
+        t.elapsed(),
+        fb.rational.len(),
+        fb.algebraic.len()
+    );
+    for rel in &rels {
+        check_relation(&poly, &fb, rel);
+    }
+    rels
+}
+
+#[test]
+fn relations_hold() {
+    // 40 and 60 digits.
+    assert!(!sieve_lines("1176217249472123917871099760550263221639", 4).is_empty());
+    assert!(
+        !sieve_lines(
+            "336824692466468372742240828730960315277872725533762205050251",
+            4
+        )
+        .is_empty()
+    );
 }

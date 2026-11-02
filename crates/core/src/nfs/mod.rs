@@ -9,11 +9,16 @@
 //! with the size of `N`, which makes it faster past about 100 digits.
 //!
 //! So far: polynomial selection by the base-m method ([`Poly`]), the
-//! roots of `f` modulo primes, and the factor bases ([`FactorBase`]).
+//! roots of `f` modulo primes, the factor bases ([`FactorBase`]) and a line
+//! siever ([`Sieve`]).
 
 mod base;
 pub mod modp;
+mod params;
 mod poly;
+mod sieve;
 
 pub use base::{FactorBase, Prime};
+pub use params::{CHARACTERS, Params};
 pub use poly::{Poly, alpha, degree};
+pub use sieve::{Relation, Sieve};
