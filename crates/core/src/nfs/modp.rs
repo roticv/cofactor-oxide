@@ -30,7 +30,7 @@ fn trim(f: &mut Vec<u64>) {
     }
 }
 
-fn inv(a: u64, p: u64) -> u64 {
+pub(crate) fn inv(a: u64, p: u64) -> u64 {
     crate::qs::modp::pow_mod(a, p - 2, p)
 }
 
@@ -60,7 +60,7 @@ fn rem(a: &mut Vec<u64>, b: &[u64], p: u64) {
 }
 
 /// `a·b mod m`, for monic `m`.
-fn mul_mod(a: &[u64], b: &[u64], m: &[u64], p: u64) -> Vec<u64> {
+pub(crate) fn mul_mod(a: &[u64], b: &[u64], m: &[u64], p: u64) -> Vec<u64> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
@@ -75,7 +75,7 @@ fn mul_mod(a: &[u64], b: &[u64], m: &[u64], p: u64) -> Vec<u64> {
 }
 
 /// `base^e mod m`, for monic `m`.
-fn pow_mod(base: &[u64], mut e: u64, m: &[u64], p: u64) -> Vec<u64> {
+pub(crate) fn pow_mod(base: &[u64], mut e: u64, m: &[u64], p: u64) -> Vec<u64> {
     let mut b = base.to_vec();
     rem(&mut b, m, p);
     let mut r = vec![1];
@@ -91,7 +91,7 @@ fn pow_mod(base: &[u64], mut e: u64, m: &[u64], p: u64) -> Vec<u64> {
 }
 
 /// The monic greatest common divisor.
-fn gcd(mut a: Vec<u64>, mut b: Vec<u64>, p: u64) -> Vec<u64> {
+pub(crate) fn gcd(mut a: Vec<u64>, mut b: Vec<u64>, p: u64) -> Vec<u64> {
     trim(&mut a);
     trim(&mut b);
     while !b.is_empty() {
@@ -165,4 +165,30 @@ fn split(g: Vec<u64>, p: u64, mut delta: u64, out: &mut Vec<u64>) {
             }
         },
     }
+}
+
+/// Whether the monic `f` of degree `d` is irreducible mod `p`: `x^(p^d)
+/// ≡ x (mod f)`, and `gcd(x^(p^(d/q)) − x, f) = 1` for each prime `q`
+/// dividing `d`, so that no factor has degree below `d`.
+pub fn irreducible(f: &[u64], p: u64) -> bool {
+    let d = f.len() - 1;
+    // x^(p^i) for i = 0..=d.
+    let mut powers = vec![vec![0, 1]];
+    for i in 0..d {
+        let next = pow_mod(&powers[i], p, f, p);
+        powers.push(next);
+    }
+    let minus_x = |mut g: Vec<u64>| {
+        g.resize(g.len().max(2), 0);
+        g[1] = (g[1] + p - 1) % p;
+        g
+    };
+    let mut top = minus_x(powers[d].clone());
+    trim(&mut top);
+    if !top.is_empty() {
+        return false;
+    }
+    (2..=d)
+        .filter(|q| d.is_multiple_of(*q) && (2..*q).all(|k| !q.is_multiple_of(k)))
+        .all(|q| gcd(f.to_vec(), minus_x(powers[d / q].clone()), p).len() == 1)
 }

@@ -19,7 +19,7 @@ mod cofactor;
 mod cycles;
 mod job;
 mod lanczos;
-mod linalg;
+pub(crate) mod linalg;
 pub(crate) mod modp;
 mod params;
 mod sieve;

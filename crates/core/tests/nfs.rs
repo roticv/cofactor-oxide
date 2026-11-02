@@ -242,3 +242,17 @@ fn relations_hold() {
         .is_empty()
     );
 }
+
+#[test]
+fn gnfs_factors() {
+    // 40 digits, two 20-digit primes.
+    let (n, p, q) = (
+        u("1176217249472123917871099760550263221639"),
+        u("98936812917358800691"),
+        u("11888570237800257629"),
+    );
+    let t = std::time::Instant::now();
+    let f = cofox_core::nfs::gnfs(&n).expect("no factor");
+    println!("{} bits: {f} in {:.2?}", n.bits(), t.elapsed());
+    assert!(f == p || f == q, "{n} gave {f}");
+}

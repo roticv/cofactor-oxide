@@ -2,16 +2,21 @@
 
 /// Bits of `N`, the rational and algebraic factor-base bounds, the
 /// large-prime multiplier and `log₂` of the sieve line's half width
-/// before scaling by the skew.
-/// These are first guesses, still to be tuned; between rows, values are
-/// interpolated.
+/// before scaling by the skew. Between rows, values are interpolated.
+///
+/// Partial relations with a large prime on each side rarely combine until
+/// there are about as many relations as possible large primes, so nearly
+/// all the relations that count are full ones, and the factor bases have
+/// to be large. At 60 digits, bounds of 300,000 to 800,000 with
+/// multipliers of 10 or 30 all took 93 to 107 s; 60,000 never finished.
+/// The other rows are guesses, the larger ones not yet measured.
 const TABLE: [(u32, u32, u32, u32, u32); 6] = [
     (120, 5_000, 5_000, 30, 14),
-    (160, 20_000, 20_000, 40, 15),
-    (200, 60_000, 60_000, 50, 16),
-    (260, 250_000, 250_000, 60, 17),
-    (330, 1_200_000, 1_200_000, 80, 18),
-    (400, 4_000_000, 4_000_000, 100, 19),
+    (160, 60_000, 60_000, 20, 15),
+    (200, 500_000, 500_000, 10, 15),
+    (260, 2_000_000, 2_000_000, 10, 16),
+    (330, 6_000_000, 6_000_000, 10, 17),
+    (400, 15_000_000, 15_000_000, 10, 18),
 ];
 
 /// Quadratic characters: each makes a dependency that is not a square in

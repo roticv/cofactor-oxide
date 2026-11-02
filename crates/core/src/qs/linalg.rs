@@ -38,7 +38,7 @@ pub fn dependencies(rows: &[Vec<usize>], cols: usize) -> Vec<Vec<usize>> {
 ///
 /// Returns the indices of the rows kept, those rows, and the number of
 /// columns.
-fn prune(rows: &[Vec<usize>], cols: usize) -> (Vec<usize>, Vec<Vec<usize>>, usize) {
+pub(crate) fn prune(rows: &[Vec<usize>], cols: usize) -> (Vec<usize>, Vec<Vec<usize>>, usize) {
     let mut rows: Vec<Vec<usize>> = rows
         .iter()
         .map(|row| {
