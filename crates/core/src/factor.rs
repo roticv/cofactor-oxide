@@ -339,7 +339,7 @@ fn pow<const LIMBS: usize>(x: &Uint<LIMBS>, k: u32) -> Option<Uint<LIMBS>> {
 
 /// `⌊m^(1/k)⌋`, one bit at a time from the top: the root of a `b`-bit
 /// number has at most `⌈b/k⌉` bits.
-fn root<const LIMBS: usize>(m: &Uint<LIMBS>, k: u32) -> Uint<LIMBS> {
+pub(crate) fn root<const LIMBS: usize>(m: &Uint<LIMBS>, k: u32) -> Uint<LIMBS> {
     let mut r = Uint::ZERO;
     for bit in (0..m.bits().div_ceil(k)).rev() {
         let candidate = r.wrapping_add(&(Uint::ONE << bit));

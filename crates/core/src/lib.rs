@@ -15,6 +15,7 @@ mod batch;
 pub mod curve;
 pub mod ecm;
 mod factor;
+pub mod nfs;
 pub mod pm1;
 pub mod pp1;
 pub mod prime;

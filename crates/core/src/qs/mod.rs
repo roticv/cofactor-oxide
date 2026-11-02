@@ -20,7 +20,7 @@ mod cycles;
 mod job;
 mod lanczos;
 mod linalg;
-mod modp;
+pub(crate) mod modp;
 mod params;
 mod sieve;
 
