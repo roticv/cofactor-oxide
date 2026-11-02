@@ -344,3 +344,32 @@ fn deferred_sieving() {
     assert!(!factors[0].is_prime);
     assert_eq!(ecm_levels, [15]);
 }
+
+#[test]
+fn perfect_powers() {
+    let power = |base: &str, k: usize| {
+        let b: Uint<16> = base.parse().unwrap();
+        (1..k).fold(b, |acc, _| acc.widening_mul(&b).0).to_string()
+    };
+    // No method splits a prime power, the quadratic sieve least of all:
+    // this cube of a 15-digit prime used to come back unsplit.
+    let p = "941368429471859";
+    assert_eq!(factor_str(&power(p, 3)).unwrap(), primes(&[p; 3]));
+    let p = "11888570237800257629";
+    assert_eq!(factor_str(&power(p, 5)).unwrap(), primes(&[p; 5]));
+    // A sixth power is a square, then a cube.
+    let p = "1000000007";
+    assert_eq!(factor_str(&power(p, 6)).unwrap(), primes(&[p; 6]));
+    // The square of a composite: the root is factored once, and each of its
+    // factors counted twice.
+    let root = (1_000_000_007u64 as u128 * 941_368_429_471_859).to_string();
+    assert_eq!(
+        factor_str(&power(&root, 2)).unwrap(),
+        primes(&[
+            "1000000007",
+            "1000000007",
+            "941368429471859",
+            "941368429471859"
+        ])
+    );
+}

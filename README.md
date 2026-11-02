@@ -41,7 +41,8 @@ The Baillie–PSW primality test runs between stages so that nothing is spent on
 cofactors that are already prime. No composite is known to pass it, and none
 exists below 2⁶⁴.
 
-A longer rho run follows ECM for composites up to 80 bits, where it is
+A composite that is a perfect power is replaced by its root first, since none
+of the methods can split a prime power. A longer rho run follows ECM for composites up to 80 bits, where it is
 certain to succeed. For composites of up to 200 bits (about 60 digits) that the
 quadratic sieve will take, p−1 and p+1 are skipped: they take about 50 ms
 whatever the size, longer than the sieve needs.

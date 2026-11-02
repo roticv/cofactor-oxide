@@ -1,6 +1,7 @@
 //! The factoring pipeline: trial division, then Pollard's rho, p−1, p+1,
 //! ECM and the quadratic sieve on whatever composite remains, with BPSW
-//! deciding when a piece is prime.
+//! deciding when a piece is prime and perfect powers reduced to their
+//! roots.
 
 use core::fmt;
 use core::ops::ControlFlow;
@@ -14,6 +15,7 @@ use crate::ecm::ecm_curve;
 use crate::pm1::pollard_pm1;
 use crate::pp1::williams_pp1;
 use crate::prime::is_prime;
+use crate::primes::Primes;
 use crate::qs::{Params, qs_with};
 use crate::rho::pollard_rho;
 
@@ -266,14 +268,21 @@ pub fn factor_with<const LIMBS: usize>(
     // Everything left is free of factors below TRIAL_LIMIT, so any piece
     // smaller than TRIAL_LIMIT² is prime.
     let trial_bound = Uint::from_u64(TRIAL_LIMIT * TRIAL_LIMIT);
-    let mut pending = vec![m];
+    // Pieces still to factor, each with how many times it divides n.
+    let mut pending = vec![(m, 1)];
     let mut stopped = false;
-    while let Some(m) = pending.pop() {
+    while let Some((m, times)) = pending.pop() {
         if m == Uint::ONE {
             continue;
         }
         if m < trial_bound || is_prime(&m) {
-            factors.push(prime(m));
+            factors.extend((0..times).map(|_| prime(m)));
+            continue;
+        }
+        // None of the methods below can split a prime power (the quadratic
+        // sieve least of all), so take roots first.
+        if let Some((root, k)) = perfect_power(&m) {
+            pending.push((root, times * k));
             continue;
         }
         let found = if stopped {
@@ -286,18 +295,59 @@ pub fn factor_with<const LIMBS: usize>(
         };
         match found {
             Some(g) => {
-                pending.push(g);
-                pending.push(m.div_rem(&g).0);
+                pending.push((g, times));
+                pending.push((m.div_rem(&g).0, times));
             }
-            None => factors.push(Factor {
+            None => factors.extend((0..times).map(|_| Factor {
                 value: m,
                 is_prime: false,
-            }),
+            })),
         }
     }
 
     factors.sort_by_key(|f| f.value);
     factors
+}
+
+/// `(r, k)` with `m = r^k` for a prime `k`, if `m`, which has no factor
+/// below the trial-division limit, is such a power.
+///
+/// `r` is at least the limit, 2^12, so `k` is at most `bits(m)/12`.
+fn perfect_power<const LIMBS: usize>(m: &Uint<LIMBS>) -> Option<(Uint<LIMBS>, u32)> {
+    let bits = m.bits();
+    let max_k = bits / TRIAL_LIMIT.trailing_zeros();
+    Primes::new(2, max_k.into())
+        .map(|k| k as u32)
+        .find_map(|k| {
+            let r = root(m, k);
+            (pow(&r, k) == Some(*m)).then_some((r, k))
+        })
+}
+
+/// `x^k`, or `None` if it overflows.
+fn pow<const LIMBS: usize>(x: &Uint<LIMBS>, k: u32) -> Option<Uint<LIMBS>> {
+    let mut r = Uint::ONE;
+    for _ in 0..k {
+        let (lo, hi) = r.widening_mul(x);
+        if !hi.is_zero() {
+            return None;
+        }
+        r = lo;
+    }
+    Some(r)
+}
+
+/// `⌊m^(1/k)⌋`, one bit at a time from the top: the root of a `b`-bit
+/// number has at most `⌈b/k⌉` bits.
+fn root<const LIMBS: usize>(m: &Uint<LIMBS>, k: u32) -> Uint<LIMBS> {
+    let mut r = Uint::ZERO;
+    for bit in (0..m.bits().div_ceil(k)).rev() {
+        let candidate = r.wrapping_add(&(Uint::ONE << bit));
+        if pow(&candidate, k).is_some_and(|c| c <= *m) {
+            r = candidate;
+        }
+    }
+    r
 }
 
 /// Looks for a factor of `m`, a composite with no factors below the
