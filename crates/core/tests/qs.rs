@@ -203,7 +203,8 @@ fn params_interpolate() {
     // The large-prime multiplier goes down between 266 and 283 bits.
     assert_eq!(p(290), (57_333, 80, 3));
     assert_eq!(p(20), (100, 40, 1));
-    assert_eq!(p(400), (210_000, 150, 4));
+    assert_eq!(p(400), (380_000, 150, 4));
+    assert_eq!(p(500), (380_000, 150, 4));
     // Double large primes from 280 bits.
     assert!(!Params::for_bits(279).double_large);
     assert!(Params::for_bits(280).double_large);

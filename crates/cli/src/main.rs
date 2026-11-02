@@ -19,7 +19,7 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] <n>...
   --threads N   split ECM's curves and the sieving across N threads
                 (default: one per core)
   --no-qs       leave composites that ECM can't split, instead of running
-                the quadratic sieve on those of up to 110 digits";
+                the quadratic sieve on those of up to 120 digits";
 
 /// The widest numbers the command line takes.
 type Wide = Uint<16>;

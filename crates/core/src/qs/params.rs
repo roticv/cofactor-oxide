@@ -6,7 +6,7 @@
 /// bits, and four from 298 bits: at RSA-100's 330 bits, four gave 8 times
 /// the relations per second of msieve's nine. The rest is still to be
 /// tuned; between rows, values are interpolated.
-const TABLE: [(u32, u32, u32, u32); 14] = [
+const TABLE: [(u32, u32, u32, u32); 16] = [
     (64, 100, 40, 1),
     (128, 450, 40, 1),
     (183, 2_000, 40, 1),
@@ -21,6 +21,9 @@ const TABLE: [(u32, u32, u32, u32); 14] = [
     (332, 115_000, 150, 4),
     (348, 140_000, 150, 4),
     (363, 210_000, 150, 4),
+    // Extrapolated, not yet measured.
+    (382, 290_000, 150, 4),
+    (400, 380_000, 150, 4),
 ];
 
 /// From this size on, relations may have two large primes. At 80 digits

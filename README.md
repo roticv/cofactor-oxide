@@ -11,7 +11,7 @@ short, which is also the name of the command-line tool.
 > using trial division, Pollard rho, Pollard p−1, Williams p+1, ECM, the
 > self-initializing quadratic sieve and the BPSW primality test. ECM finds
 > factors up to about 25 digits by default (more with `--ecm`), and the
-> quadratic sieve splits what is left up to 110 digits. Both run on every
+> quadratic sieve splits what is left up to 120 digits. Both run on every
 > core, natively and in the browser. GNFS is planned.
 
 ## Goals
@@ -59,8 +59,8 @@ giving up on a 100-digit composite with no factor below 25 digits takes about
 
 When the quadratic sieve follows, ECM stops sooner, at the level for primes
 of about 30% of the composite's digits (at least 15): past that, sieving is
-the quicker way to an answer. The sieve then runs on composites of 81 to 363
-bits (110 digits). Each thread or Web Worker sieves its own polynomials and
+the quicker way to an answer. The sieve then runs on composites of 81 to 400
+bits (120 digits). Each thread or Web Worker sieves its own polynomials and
 sends the relations to one collector, which runs block Lanczos once it has
 enough. Primes too large to hit a 64 KB sieve block more than a few times
 are sieved through buckets: each polynomial drops their hits into the

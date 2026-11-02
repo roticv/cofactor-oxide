@@ -291,7 +291,7 @@
           <li><b>Elliptic curve method</b><span class="badge done">done</span>
             <span class="desc">Montgomery curves with a two-stage search, in levels for factors of up to 25 digits, shared across Web Workers. Each curve is a fresh chance, so larger factors turn up sometimes too.</span></li>
           <li><b>Self-initializing quadratic sieve</b><span class="badge done">done</span>
-            <span class="desc">Splits what ECM leaves, up to 110 digits, with the sieving shared across Web Workers and block Lanczos for the linear algebra. ECM stops sooner when the sieve follows: at about 30% of the composite's digits.</span></li>
+            <span class="desc">Splits what ECM leaves, up to 120 digits, with the sieving shared across Web Workers and block Lanczos for the linear algebra. ECM stops sooner when the sieve follows: at about 30% of the composite's digits.</span></li>
           <li><b>Number field sieve</b><span class="badge">planned</span>
             <span class="desc">The fastest known method for composites beyond about 100 digits.</span></li>
         </ul>
@@ -330,7 +330,7 @@
     // Composites that ECM leaves go to the quadratic sieve, up to this
     // size. Below 81 bits, rho always splits them first.
     const QS_MIN_BITS = 81;
-    const QS_MAX_BITS = 363;
+    const QS_MAX_BITS = 400;
 
     const workers = [];
     let nextId = 0;
@@ -674,7 +674,7 @@
         card.append(el("p", "note ok", "Prime (Baillie–PSW)."));
       } else if (composites > 0) {
         const note = el("p", "note warn",
-          `The dashed factor is composite, but ECM found no factor of up to about ${ecmDigits} digits, and it's too large for the quadratic sieve here (up to 110 digits).`);
+          `The dashed factor is composite, but ECM found no factor of up to about ${ecmDigits} digits, and it's too large for the quadratic sieve here (up to 120 digits).`);
         card.append(note);
         if (ecmDigits < ECM_MAX_DIGITS) {
           const deeper = el("button", "ghost", `Search for ${ecmDigits + 5}-digit factors (about 4× longer)`);

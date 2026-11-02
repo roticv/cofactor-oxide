@@ -63,9 +63,10 @@ const RHO_ATTEMPTS: u64 = 3;
 const RHO_STEPS: u64 = 1 << 22;
 const RHO_MAX_BITS: u32 = 80;
 
-/// The quadratic sieve's parameters go up to here (110 digits). Larger
-/// composites take days at best.
-pub const QS_MAX_BITS: u32 = 363;
+/// The quadratic sieve's parameters go up to here (120 digits), extrapolated
+/// beyond 110. Larger composites would take days; they need the number
+/// field sieve.
+pub const QS_MAX_BITS: u32 = 400;
 
 /// Up to this size (about 60 digits), the quadratic sieve on all cores
 /// takes no longer than p−1 and p+1, so they're skipped when it follows.
