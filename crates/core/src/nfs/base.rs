@@ -48,7 +48,7 @@ pub struct FactorBase {
     pub rational: Vec<Prime>,
     /// Every root of `f` modulo each prime up to the algebraic bound.
     pub algebraic: Vec<Prime>,
-    /// Pairs `(q, s)` from [`CHARACTER_PRIMES`] up with `s` a simple root
+    /// Pairs `(q, s)` from `CHARACTER_PRIMES` up with `s` a simple root
     /// of `f` mod `q`, `q` not dividing the leading coefficient.
     pub characters: Vec<Prime>,
 }

@@ -99,7 +99,7 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
     }
 
     /// The special-q of block `k`: the ideals `(q, r)` with `q` in the
-    /// `k`th run of [`Q_BLOCK`] integers from a quarter of the algebraic
+    /// `k`th run of `Q_BLOCK` integers from a quarter of the algebraic
     /// bound. Smaller `q` give smaller norms, and a `q` within the factor
     /// base is divided out like any other.
     pub fn special_qs(&self, k: u64) -> Vec<(u64, u64)> {
