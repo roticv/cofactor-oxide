@@ -252,10 +252,7 @@ pub fn factor<const LIMBS: usize>(
     let mut exponents: BTreeMap<u64, u32> = BTreeMap::new();
     for r in deps {
         for &p in &r.rational {
-            *exponents.entry(p.into()).or_default() += 1;
-        }
-        if r.large[0] > 1 {
-            *exponents.entry(r.large[0]).or_default() += 1;
+            *exponents.entry(p).or_default() += 1;
         }
     }
     let mut y = modulo(&lead, &nb).modpow(&BigInt::from(deps.len() / 2), &nb);

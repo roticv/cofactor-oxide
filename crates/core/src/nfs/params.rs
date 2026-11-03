@@ -1,22 +1,23 @@
 //! Sieve parameters by the size of `N`.
 
 /// Bits of `N`, the rational and algebraic factor-base bounds, the
-/// large-prime multiplier and `log₂` of the sieve line's half width
-/// before scaling by the skew. Between rows, values are interpolated.
+/// large-prime multiplier and `log₂` of the width `I` of the region sieved
+/// for each special-q. Between rows, values are interpolated.
 ///
 /// Partial relations with a large prime on each side rarely combine until
 /// there are about as many relations as possible large primes, so nearly
 /// all the relations that count are full ones, and the factor bases have
-/// to be large. At 60 digits, bounds of 300,000 to 800,000 with
-/// multipliers of 10 or 30 all took 93 to 107 s; 60,000 never finished.
-/// The other rows are guesses, the larger ones not yet measured.
+/// to be large. At 60 digits, with the line siever this replaced, bounds
+/// of 300,000 to 800,000 with multipliers of 10 or 30 all took 93 to
+/// 107 s; 60,000 never finished. The other rows, and the region widths,
+/// are guesses, not yet tuned for the lattice siever.
 const TABLE: [(u32, u32, u32, u32, u32); 6] = [
-    (120, 5_000, 5_000, 30, 14),
-    (160, 60_000, 60_000, 20, 15),
-    (200, 500_000, 500_000, 10, 15),
-    (260, 2_000_000, 2_000_000, 10, 16),
-    (330, 6_000_000, 6_000_000, 10, 17),
-    (400, 15_000_000, 15_000_000, 10, 18),
+    (120, 5_000, 5_000, 30, 9),
+    (160, 60_000, 60_000, 20, 10),
+    (200, 500_000, 500_000, 10, 11),
+    (260, 2_000_000, 2_000_000, 10, 12),
+    (330, 6_000_000, 6_000_000, 10, 12),
+    (400, 15_000_000, 15_000_000, 10, 13),
 ];
 
 /// Quadratic characters: each makes a dependency that is not a square in
@@ -32,9 +33,9 @@ pub struct Params {
     /// Each side may have one prime outside its factor base, below this
     /// multiple of the side's bound.
     pub large_mult: u32,
-    /// Each line `b` sieves `a` in `[−w, w)`, for `w` this times the
-    /// square root of the polynomial's skew.
-    pub half_width: u32,
+    /// Each special-q sieves `i` in `[−I/2, I/2)` and `j` in `[1, I/2)`,
+    /// for `I = 2^log_i`.
+    pub log_i: u32,
 }
 
 impl Params {
@@ -44,7 +45,7 @@ impl Params {
             rational_bound: r,
             algebraic_bound: a,
             large_mult: mult,
-            half_width: 1 << w,
+            log_i: w,
         };
         let (first, last) = (TABLE[0], TABLE[TABLE.len() - 1]);
         if bits <= first.0 {
@@ -69,7 +70,7 @@ impl Params {
             rational_bound: lerp(lo.1, hi.1),
             algebraic_bound: lerp(lo.2, hi.2),
             large_mult: lerp(lo.3, hi.3),
-            half_width: 1 << lerp(lo.4, hi.4),
+            log_i: lerp(lo.4, hi.4),
         }
     }
 }

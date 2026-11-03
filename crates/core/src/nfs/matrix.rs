@@ -4,7 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::base::FactorBase;
+use super::base::{FactorBase, Prime};
 use super::sieve::Relation;
 use crate::qs::modp::pow_mod;
 
@@ -24,8 +24,9 @@ pub fn root_of(rel: &Relation, p: u64) -> u64 {
 }
 
 /// The rows of the matrix, built as relations arrive: the fixed columns,
-/// the rational primes, the algebraic ideals, then a column for each large
-/// prime or large ideal, numbered as they appear. The quadratic
+/// the rational primes, the algebraic ideals, then a column for each prime
+/// or ideal past the factor bases, the special-q included, numbered as
+/// they appear. The quadratic
 /// characters, a fixed number of dense columns, are only added at the
 /// end, by [`Matrix::solvable`], to the rows that survive pruning.
 ///
@@ -51,20 +52,12 @@ impl Matrix {
     /// Adds the row for `rel`, with each column once, sorted.
     pub fn push(&mut self, fb: &FactorBase, rel: &Relation) {
         let a_base = FIXED + fb.rational.len();
-        let mut row = Vec::with_capacity(rel.rational.len() + rel.algebraic.len() + 4);
+        let r_max = fb.rational.last().map_or(0, |q| u64::from(q.p));
+        let a_max = fb.algebraic.last().map_or(0, |q| u64::from(q.p));
+        let mut row = Vec::with_capacity(rel.rational.len() + rel.algebraic.len() + 2);
         row.push(0);
         if rel.negative {
             row.push(1);
-        }
-        for &p in &rel.rational {
-            let i = fb.rational.partition_point(|q| q.p < p);
-            row.push((FIXED + i) as u32);
-        }
-        for &p in &rel.algebraic {
-            let r = root_of(rel, p.into()) as u32;
-            let i = fb.algebraic.partition_point(|q| (q.p, q.r) < (p, r));
-            debug_assert_eq!((fb.algebraic[i].p, fb.algebraic[i].r), (p, r));
-            row.push((a_base + i) as u32);
         }
         let mut column = |key| {
             *self.large.entry(key).or_insert_with(|| {
@@ -72,12 +65,24 @@ impl Matrix {
                 (self.cols - 1) as u32
             })
         };
-        if rel.large[0] > 1 {
-            row.push(column((rel.large[0], 0)));
+        for &p in &rel.rational {
+            row.push(if p <= r_max {
+                let i = fb.rational.partition_point(|q| u64::from(q.p) < p);
+                (FIXED + i) as u32
+            } else {
+                column((p, 0))
+            });
         }
-        if rel.large[1] > 1 {
-            let q = rel.large[1];
-            row.push(column((q, 1 + root_of(rel, q))));
+        for &p in &rel.algebraic {
+            let r = root_of(rel, p);
+            row.push(if p <= a_max {
+                let key = |q: &Prime| (u64::from(q.p), u64::from(q.r));
+                let i = fb.algebraic.partition_point(|q| key(q) < (p, r));
+                debug_assert_eq!(key(&fb.algebraic[i]), (p, r));
+                (a_base + i) as u32
+            } else {
+                column((p, 1 + r))
+            });
         }
         row.sort_unstable();
         let mut odd = Vec::with_capacity(row.len());

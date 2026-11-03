@@ -208,8 +208,8 @@ fn qs_parallel(
 }
 
 /// Runs the number field sieve on `threads` threads: each sieves the next
-/// line no thread has taken and sends its relations to this thread, until
-/// there are enough. Then each thread tries the next dependency until one
+/// block of special-q no thread has taken and sends its relations to this
+/// thread, until there are enough. Then each thread tries the next dependency until one
 /// gives a factor. Returns a proper factor of `n`, or `None` if it found
 /// none, which is what happens when `n` is a prime power.
 fn gnfs_parallel(
@@ -225,16 +225,22 @@ fn gnfs_parallel(
     let mut relations = gnfs.relations();
     let mut status = Status::new(1);
     let (send, receive) = mpsc::channel();
-    let (next_line, done) = (AtomicU64::new(1), AtomicBool::new(false));
+    let (next_block, last_q) = (AtomicU64::new(0), AtomicU64::new(0));
+    let done = AtomicBool::new(false);
     thread::scope(|scope| {
         for _ in 0..threads {
-            let (send, gnfs, next_line, done) = (send.clone(), &gnfs, &next_line, &done);
+            let (send, gnfs, next_block, last_q, done) =
+                (send.clone(), &gnfs, &next_block, &last_q, &done);
             scope.spawn(move || {
                 let mut sieve = gnfs.sieve();
                 while !done.load(Ordering::Relaxed) {
-                    let b = next_line.fetch_add(1, Ordering::Relaxed);
-                    if send.send(sieve.line(b)).is_err() {
-                        break;
+                    let k = next_block.fetch_add(1, Ordering::Relaxed);
+                    for (q, r) in gnfs.special_qs(k) {
+                        if done.load(Ordering::Relaxed) || send.send(sieve.special_q(q, r)).is_err()
+                        {
+                            return;
+                        }
+                        last_q.fetch_max(q, Ordering::Relaxed);
                     }
                 }
             });
@@ -242,9 +248,9 @@ fn gnfs_parallel(
         while !relations.is_ready() {
             relations.add(receive.recv().expect("sieving threads stopped"));
             if show_status {
-                let lines = next_line.load(Ordering::Relaxed) - 1;
+                let q = last_q.load(Ordering::Relaxed);
                 status.update_line(&format!(
-                    "Number field sieve: {} relations for {ideals} ideals, {lines} lines, \
+                    "Number field sieve: {} relations for {ideals} ideals, special-q {q}, \
                      on a {bits}-bit composite",
                     relations.len()
                 ));

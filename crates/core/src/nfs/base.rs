@@ -7,6 +7,11 @@ use super::poly::Poly;
 use crate::primes::Primes;
 use crate::qs::log2;
 
+/// The quadratic characters' primes start here, past every prime a
+/// relation has: a character `(q, s)` says nothing about a relation with
+/// `q | a − b·s`, as one from the special-q `(q, s)` would be.
+pub const CHARACTER_PRIMES: u64 = 1 << 31;
+
 /// A prime of a factor base with a root: `p` divides `a − b·r` (rational
 /// side) or `F(a, b)` (algebraic side) exactly when `a ≡ b·r (mod p)`. On
 /// the algebraic side, `r = p` stands for the root at infinity, where `p`
@@ -43,8 +48,8 @@ pub struct FactorBase {
     pub rational: Vec<Prime>,
     /// Every root of `f` modulo each prime up to the algebraic bound.
     pub algebraic: Vec<Prime>,
-    /// Pairs `(q, s)` past the algebraic bound with `s` a simple root of
-    /// `f` mod `q`, `q` not dividing the leading coefficient.
+    /// Pairs `(q, s)` from [`CHARACTER_PRIMES`] up with `s` a simple root
+    /// of `f` mod `q`, `q` not dividing the leading coefficient.
     pub characters: Vec<Prime>,
 }
 
@@ -70,7 +75,7 @@ impl FactorBase {
             .map(|(i, &c)| c * i as i128)
             .collect();
         let mut chars = Vec::with_capacity(characters);
-        for q in Primes::new(u64::from(algebraic_bound) + 1, u64::MAX >> 32) {
+        for q in Primes::new(CHARACTER_PRIMES, 1 << 32) {
             if chars.len() >= characters {
                 break;
             }
