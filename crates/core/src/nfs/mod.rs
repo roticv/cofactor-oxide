@@ -8,7 +8,8 @@
 //! quadratic sieve. Its values grow more slowly than the quadratic sieve's
 //! with the size of `N`, which makes it faster past about 100 digits.
 //!
-//! [`gnfs`] chooses polynomials by the base-m method ([`Poly`]), sieves
+//! [`gnfs`] chooses polynomials by the base-m method with Murphy's size
+//! and root optimization ([`Poly`]), sieves
 //! special-q lattices of `(a, b)` ([`Sieve`]), solves the matrix with the quadratic
 //! sieve's block Lanczos, and takes the square roots in `sqrt`. It is a
 //! first, unoptimized version: correct, but slower than the quadratic
@@ -19,6 +20,7 @@ mod matrix;
 pub mod modp;
 mod params;
 mod poly;
+mod score;
 mod sieve;
 mod sqrt;
 

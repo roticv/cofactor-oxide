@@ -75,7 +75,7 @@ fn roots_of_irreducible_and_degenerate_polynomials() {
 }
 
 #[test]
-fn base_m_writes_n_in_base_m() {
+fn selected_polynomials_have_root_m() {
     let numbers = [
         "1522605027922533360535618378132637429718068114961380688657908494580122963258952897654000350692006139",
         "250782620106046385035853403635783676572083888259628917477091391671746381406504458761424731",
@@ -86,6 +86,7 @@ fn base_m_writes_n_in_base_m() {
         let n = u(s);
         let poly = Poly::select(&n);
         assert_eq!(poly.degree(), degree(n.bits()));
+        // Translation and rotation keep f(m) = N exactly.
         let m = BigInt::from(poly.m);
         let value: BigInt = poly
             .f
@@ -93,15 +94,11 @@ fn base_m_writes_n_in_base_m() {
             .rev()
             .fold(BigInt::from(0), |acc, &c| acc * &m + BigInt::from(c));
         assert_eq!(value, s.parse::<BigInt>().unwrap(), "f(m) ≠ N for {poly:?}");
-        let half = (poly.m / 2 + 1) as i128;
-        for &c in &poly.f[..poly.degree()] {
-            assert!(c.abs() <= half, "{c} not centered in {poly:?}");
-        }
-        // At least as good as plain base-m, with leading coefficient 1.
+        // Better by Murphy's E than plain base-m with leading coefficient 1.
+        let params = Params::for_bits(n.bits());
         let plain = Poly::base_m(&n, &u(&m_plain(s, poly.degree())), poly.degree()).unwrap();
-        let score = |p: &Poly| p.size + alpha(&p.f);
         assert!(
-            score(&poly) <= score(&plain),
+            poly.murphy_e(&params) > plain.murphy_e(&params),
             "{poly:?} worse than {plain:?}"
         );
     }

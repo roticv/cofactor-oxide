@@ -1,15 +1,25 @@
-//! Polynomial selection by the base-m method.
+//! Polynomial selection: the base-m method, then Murphy's size and root
+//! optimization.
 //!
 //! GNFS needs two polynomials with a common root `m` modulo `N`. Writing
 //! `N` in base `m` gives `f` with `f(m) = N`, and the other is the linear
 //! `g(x) = x − m`. A good `f` has small values over the sieve region (its
 //! size) and many roots modulo small primes, which makes those values more
-//! often smooth (its α). Base-m is the simplest method: Kleinjung's and
-//! Murphy's methods find much better polynomials, but this is enough to
-//! start with.
+//! often smooth (its α).
+//!
+//! Two changes keep `f(m) ≡ 0 (mod N)` while changing both: translating
+//! `x` to `x + k`, which moves the root to `m − k`, and rotating `f` by a
+//! multiple of `g`. Size optimization searches both for the smallest
+//! values; root optimization sieves over small rotations for the most
+//! roots modulo small primes. Murphy's E, which weighs both sides' sizes
+//! and α together, picks the winner.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
+use super::modp::{eval, inv, reduce};
+use super::params::Params;
+use super::score::{Murphy, lognorm};
 use crate::arith::{Limb, Uint};
 use crate::factor::root;
 use crate::primes::Primes;
@@ -21,8 +31,24 @@ const LEADS: u64 = 2000;
 /// Values of `m` tried below the largest for each leading coefficient.
 const OFFSETS: u64 = 4;
 
-/// Candidates kept by size for scoring by α, which costs more.
-const FINALISTS: usize = 64;
+/// Base-m candidates kept by size for optimizing.
+const FINALISTS: usize = 32;
+
+/// Root optimization sieves rotations `(j₁·x + j₀)·g` with `|j₁| ≤ ROT1`
+/// (for degree 4 and up) and `|j₀| < ROT0`.
+const ROT1: i64 = 4;
+const ROT0: i64 = 1 << 12;
+
+/// Rotations with the best α kept for scoring by size.
+const ROOT_CELLS: usize = 32;
+
+/// Of those, the best by size plus α kept for Murphy's E.
+const ROOT_KEEP: usize = 4;
+
+/// Steps tried in size optimization, from `2^SIZE_STEPS` down to 1, each
+/// for at most `SIZE_PASSES` passes over the moves.
+const SIZE_STEPS: u32 = 48;
+const SIZE_PASSES: usize = 8;
 
 /// α counts the roots modulo primes up to this.
 const ALPHA_PRIMES: u64 = 200;
@@ -36,14 +62,18 @@ pub struct Poly {
     /// The common root.
     pub m: u128,
     /// How much wider the sieve region should be in `a` than in `b`: the
-    /// `s` that balances `|c₀|` against `|c_d|·s^d`.
+    /// `s` that makes `f`'s values smallest.
     pub skew: f64,
-    /// `log₂` of the typical size of `f` over the region, with the skew.
+    /// `log₂` of the L² norm of `f`'s values over a region of area 1 at
+    /// that skew.
     pub size: f64,
     /// Murphy's α in bits: how much smaller than its size a value of `f`
     /// behaves for smoothness, from its roots modulo small primes. Negative
     /// is better.
     pub alpha: f64,
+    /// Murphy's E: how often values of both polynomials are smooth at once,
+    /// for the parameters of this size of `N`. Larger is better.
+    pub e: f64,
 }
 
 /// The degree of `f` for a composite of `bits` bits.
@@ -56,10 +86,10 @@ pub fn degree(bits: u32) -> usize {
 }
 
 impl Poly {
-    /// Chooses polynomials for `n` by the base-m method: for each leading
-    /// coefficient `a`, `m` just below `(n/a)^(1/d)` makes `f`'s leading
-    /// coefficient `a`, and the others are `n`'s digits in base `m`,
-    /// centered on 0. The smallest by size, then by size plus α, wins.
+    /// Chooses polynomials for `n`: for each leading coefficient `a`, `m`
+    /// just below `(n/a)^(1/d)` makes `f`'s leading coefficient `a`, and the
+    /// others are `n`'s digits in base `m`, centered on 0. The smallest are
+    /// size-optimized and root-optimized, and the best by Murphy's E wins.
     ///
     /// # Panics
     ///
@@ -67,6 +97,7 @@ impl Poly {
     /// about 480 bits at degree 5.
     pub fn select<const LIMBS: usize>(n: &Uint<LIMBS>) -> Self {
         let d = degree(n.bits());
+        let murphy = Murphy::new(&Params::for_bits(n.bits()));
         let mut candidates: Vec<Self> = Vec::new();
         for a in 1..=LEADS {
             let (q, _) = n.div_rem(&Uint::from_u64(a));
@@ -80,13 +111,51 @@ impl Poly {
         }
         candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
         candidates.truncate(FINALISTS);
-        for c in &mut candidates {
-            c.alpha = alpha(&c.f);
+        let mut best: Option<Self> = None;
+        let mut seen: Vec<(Vec<i128>, u128)> = Vec::new();
+        for c in candidates {
+            // Nearby m often optimize to the same polynomial.
+            let (f, m) = size_optimize(&c.f, c.m, true);
+            if seen.contains(&(f.clone(), m)) {
+                continue;
+            }
+            seen.push((f.clone(), m));
+            for (f, m) in root_optimize(&f, m) {
+                let mut poly = Self::new(f, m);
+                poly.rate(&murphy);
+                if best.as_ref().is_none_or(|b| poly.e > b.e) {
+                    best = Some(poly);
+                }
+            }
         }
-        candidates
-            .into_iter()
-            .min_by(|x, y| (x.size + x.alpha).total_cmp(&(y.size + y.alpha)))
-            .expect("no polynomial")
+        best.expect("no polynomial")
+    }
+
+    /// The pair `f`, `x − m`, with its skew and size.
+    fn new(f: Vec<i128>, m: u128) -> Self {
+        let (skew, size) = lognorm(&f);
+        Self {
+            f,
+            m,
+            skew,
+            size,
+            alpha: 0.0,
+            e: 0.0,
+        }
+    }
+
+    /// Fills in α and Murphy's E.
+    fn rate(&mut self, murphy: &Murphy) {
+        self.alpha = alpha(&self.f);
+        let alpha_g = alpha(&[-(self.m as i128), 1]);
+        self.e = murphy.e(&self.f, self.m, self.skew, self.alpha, alpha_g);
+    }
+
+    /// Murphy's E for these polynomials with `params`.
+    pub fn murphy_e(&self, params: &Params) -> f64 {
+        let mut p = self.clone();
+        p.rate(&Murphy::new(params));
+        p.e
     }
 
     /// `n`'s digits in base `m`, centered on 0, as a polynomial of degree
@@ -110,14 +179,7 @@ impl Poly {
                 digits[i + 1] += 1;
             }
         }
-        let (skew, size) = skew_and_size(&digits);
-        Some(Self {
-            f: digits,
-            m: m128,
-            skew,
-            size,
-            alpha: 0.0,
-        })
+        Some(Self::new(digits, m128))
     }
 
     /// The degree of `f`.
@@ -126,26 +188,121 @@ impl Poly {
     }
 }
 
-/// The skew `s = |c₀/c_d|^(1/d)`, and `log₂` of the root mean square of
-/// the coefficients scaled by it, `c_i·s^(i − d/2)`: about the size of
-/// `F(a, b) = b^d·f(a/b)` for `|a| ≈ s·|b|`, divided by `|b|^d·s^(d/2)`,
-/// so polynomials of the same degree and skewed region compare fairly.
-fn skew_and_size(f: &[i128]) -> (f64, f64) {
+/// `f(x + k)` and the root `m − k`, or `None` on overflow.
+fn translate(f: &[i128], m: u128, k: i128) -> Option<(Vec<i128>, u128)> {
+    let m = (m as i128).checked_sub(k).filter(|&m| m > 1)?;
+    // Horner's rule with x + k for x: g ← g·(x + k) + cᵢ.
+    let mut g: Vec<i128> = Vec::with_capacity(f.len());
+    for &c in f.iter().rev() {
+        g.push(0);
+        for i in (1..g.len()).rev() {
+            g[i] = g[i - 1].checked_add(g[i].checked_mul(k)?)?;
+        }
+        g[0] = g[0].checked_mul(k)?.checked_add(c)?;
+    }
+    Some((g, m as u128))
+}
+
+/// `f + j·xⁱ·(x − m)`, or `None` on overflow.
+fn rotate(f: &[i128], m: u128, i: usize, j: i128) -> Option<Vec<i128>> {
+    let mut g = f.to_vec();
+    g[i + 1] = g[i + 1].checked_add(j)?;
+    g[i] = g[i].checked_sub(j.checked_mul(m as i128)?)?;
+    Some(g)
+}
+
+/// Searches translations and, if `rotations`, rotations by `xⁱ·g` for
+/// `i ≤ d − 3` for the smallest size, by steps from `2^SIZE_STEPS` down to
+/// 1 in each in turn. Translation leaves the number of roots modulo each
+/// prime, and so α, as it is.
+fn size_optimize(f: &[i128], m: u128, rotations: bool) -> (Vec<i128>, u128) {
     let d = f.len() - 1;
-    let c0 = (f[0].unsigned_abs() as f64).max(1.0);
-    let cd = (f[d].unsigned_abs() as f64).max(1.0);
-    let ls = ((log2(c0) - log2(cd)) / d as f64).max(0.0);
-    let half = d as f64 / 2.0;
-    let sum: f64 = f
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c != 0)
-        .map(|(i, &c)| {
-            let l = log2(c.unsigned_abs() as f64) + (i as f64 - half) * ls;
-            exp2(2.0 * (l - 64.0))
+    let moves = if rotations { d.saturating_sub(2) } else { 0 };
+    let (mut f, mut m) = (f.to_vec(), m);
+    let mut size = lognorm(&f).1;
+    for e in (0..=SIZE_STEPS).rev() {
+        let step = 1i128 << e;
+        for _ in 0..SIZE_PASSES {
+            let mut improved = false;
+            // Move 0 translates; move i + 1 rotates by xⁱ·g.
+            for mv in 0..=moves {
+                for j in [step, -step] {
+                    let next = if mv == 0 {
+                        translate(&f, m, j)
+                    } else {
+                        rotate(&f, m, mv - 1, j).map(|g| (g, m))
+                    };
+                    let Some((g, gm)) = next else { continue };
+                    let s = lognorm(&g).1;
+                    if s < size - 1e-6 {
+                        (f, m, size) = (g, gm, s);
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+    }
+    (f, m)
+}
+
+/// Sieves rotations `f + (j₁·x + j₀)·(x − m)` for the most roots modulo
+/// small primes, and returns the best few by size plus α, each
+/// size-optimized by translation.
+///
+/// For a prime `p` and an `x` with `g(x) ≢ 0`, the rotation has the root `x`
+/// exactly when `j₀ + j₁·x ≡ −f(x)/g(x) (mod p)`: for each `j₁`, an
+/// arithmetic progression of `j₀`. Each root lowers α by
+/// `p/(p + 1)·log₂ p/(p − 1)`.
+fn root_optimize(f: &[i128], m: u128) -> Vec<(Vec<i128>, u128)> {
+    let d = f.len() - 1;
+    let rot1 = if d >= 4 { ROT1 } else { 0 };
+    let width = 2 * ROT0 as usize;
+    let rows = 2 * rot1 as usize + 1;
+    let mut gain = vec![0f32; rows * width];
+    for p in Primes::new(2, ALPHA_PRIMES) {
+        let w = (p as f64 / (p + 1) as f64 * log2(p as f64) / (p - 1) as f64) as f32;
+        let fp = reduce(f, p);
+        let mp = (m % u128::from(p)) as u64;
+        for x in 0..p {
+            let gx = (x + p - mp) % p;
+            if gx == 0 {
+                continue;
+            }
+            let t = (p - eval(&fp, x, p)) % p * inv(gx, p) % p;
+            for (row, j1) in (-rot1..=rot1).enumerate() {
+                // j₀ ≡ t − j₁·x, at index j₀ + ROT0.
+                let r = (t as i64 - j1 * x as i64).rem_euclid(p as i64) as u64;
+                let cells = &mut gain[row * width..(row + 1) * width];
+                let mut i = ((r + ROT0 as u64) % p) as usize;
+                while i < width {
+                    cells[i] += w;
+                    i += p as usize;
+                }
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..gain.len()).collect();
+    order.sort_unstable_by(|&a, &b| gain[b].total_cmp(&gain[a]));
+    let mut rotated: Vec<(f64, Vec<i128>, u128)> = order
+        .into_iter()
+        .take(ROOT_CELLS)
+        .filter_map(|cell| {
+            let j1 = (cell / width) as i128 - i128::from(rot1);
+            let j0 = (cell % width) as i128 - i128::from(ROT0);
+            let g = rotate(&rotate(f, m, 1, j1)?, m, 0, j0)?;
+            let (g, gm) = size_optimize(&g, m, false);
+            Some((lognorm(&g).1 + alpha(&g), g, gm))
         })
-        .sum();
-    (exp2(ls), 64.0 + log2(sum / (d + 1) as f64) / 2.0)
+        .collect();
+    rotated.sort_by(|x, y| x.0.total_cmp(&y.0));
+    rotated
+        .into_iter()
+        .take(ROOT_KEEP)
+        .map(|(_, g, gm)| (g, gm))
+        .collect()
 }
 
 /// Murphy's α in bits: the sum over small primes `p` of
