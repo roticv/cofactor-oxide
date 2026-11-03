@@ -8,8 +8,8 @@
 use cofox_core::Uint;
 use cofox_core::primes::Primes;
 use cofox_core::qs::{
-    FactorBase, Params, Prime, QsJob, Relation, Sieve, Siqs, Start, dependencies, multiplier,
-    pow_mod, qs, sqrt_mod,
+    FactorBase, Params, Prime, QsJob, Relation, Sieve, Siqs, Start, dependencies,
+    dependencies_with, multiplier, pow_mod, qs, sqrt_mod,
 };
 
 /// RSA-100 is 330 bits, and kN a few bits more: 12 limbs is at least 384
@@ -414,6 +414,19 @@ fn cycles_of_large_primes() {
     assert!(cycles > 10, "{cycles}");
 }
 
+/// Work split as for this many threads, run on this one.
+struct Pieces(usize);
+
+impl cofox_core::parallel::Parallel for Pieces {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn map<T: Send>(&self, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        (0..self.0).map(f).collect()
+    }
+}
+
 #[test]
 fn dependencies_sum_to_zero() {
     // Random sparse rows, with repeated columns, which cancel.
@@ -456,21 +469,26 @@ fn dependencies_sum_to_zero() {
                     .collect()
             })
             .collect();
-        let deps = dependencies(&matrix, cols);
-        assert!(
-            deps.len() >= 32,
-            "{rows}×{cols}: {} dependencies",
-            deps.len()
-        );
-        for dep in &deps {
-            assert!(!dep.is_empty() && dep.is_sorted());
-            let mut sum = vec![false; cols];
-            for &r in dep {
-                for &c in &matrix[r] {
-                    sum[c] ^= true;
+        // Split into pieces for three threads, too, run one after another.
+        for deps in [
+            dependencies(&matrix, cols),
+            dependencies_with(&matrix, cols, &Pieces(3)),
+        ] {
+            assert!(
+                deps.len() >= 32,
+                "{rows}×{cols}: {} dependencies",
+                deps.len()
+            );
+            for dep in &deps {
+                assert!(!dep.is_empty() && dep.is_sorted());
+                let mut sum = vec![false; cols];
+                for &r in dep {
+                    for &c in &matrix[r] {
+                        sum[c] ^= true;
+                    }
                 }
+                assert!(sum.iter().all(|&b| !b), "{rows}×{cols}: {dep:?}");
             }
-            assert!(sum.iter().all(|&b| !b), "{rows}×{cols}: {dep:?}");
         }
     }
     // An all-zero row is a dependency by itself, and a repeated row pairs

@@ -10,12 +10,14 @@
 //!
 //! [`gnfs`] chooses polynomials by the base-m method with Murphy's size
 //! and root optimization ([`Poly`]), sieves
-//! special-q lattices of `(a, b)` ([`Sieve`]), solves the matrix with the quadratic
-//! sieve's block Lanczos, and takes the square roots in `sqrt`. It is a
+//! special-q lattices of `(a, b)` ([`Sieve`]), makes the matrix smaller by
+//! clique removal and merging, solves it with the quadratic sieve's block
+//! Lanczos, and takes the square roots in `sqrt`. It is a
 //! first, unoptimized version: correct, but slower than the quadratic
 //! sieve at every size so far.
 
 mod base;
+mod filter;
 mod kleinjung;
 mod matrix;
 pub mod modp;
@@ -26,6 +28,7 @@ mod sieve;
 mod sqrt;
 
 use alloc::collections::BTreeSet;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
@@ -35,8 +38,9 @@ pub use poly::{Poly, alpha, degree};
 pub use sieve::{Relation, Sieve, special_qs};
 
 use crate::arith::Uint;
-use crate::qs::dependencies;
-use matrix::Matrix;
+use crate::parallel::{Parallel, Serial};
+use crate::qs::dependencies_with;
+use matrix::{Matrix, characters};
 
 /// Rows beyond the columns, after pruning, before solving.
 const EXTRA: usize = 64;
@@ -167,10 +171,45 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
 
     /// The dependencies among the relations, as indices into them.
     pub fn dependencies(&self) -> Vec<Vec<usize>> {
-        let (kept, rows, cols) = self.matrix.solvable(&self.gnfs.fb, &self.relations);
-        dependencies(&rows, cols)
+        self.dependencies_with(&Serial)
+    }
+
+    /// [`Relations::dependencies`], with block Lanczos's products split by
+    /// `par`.
+    pub fn dependencies_with(&self, par: &impl Parallel) -> Vec<Vec<usize>> {
+        let fb = &self.gnfs.fb;
+        let (kept, rows, cols) = self.matrix.pruned();
+        let filtered = filter::filter(rows, cols, fb.characters.len() + EXTRA);
+        let chars: Vec<u64> = kept
+            .iter()
+            .map(|&r| characters(fb, &self.relations[r]))
+            .collect();
+        let rows: Vec<Vec<usize>> = filtered
+            .rows
+            .iter()
+            .zip(&filtered.sets)
+            .map(|(row, set)| {
+                let mask = set.iter().fold(0, |m, &i| m ^ chars[i as usize]);
+                let dense = (0..fb.characters.len()).filter(|i| mask >> i & 1 == 1);
+                row.iter()
+                    .map(|&c| c as usize)
+                    .chain(dense.map(|i| cols + i))
+                    .collect()
+            })
+            .collect();
+        dependencies_with(&rows, cols + fb.characters.len(), par)
             .into_iter()
-            .map(|dep| dep.into_iter().map(|i| kept[i]).collect())
+            .map(|dep| {
+                // The relations in an odd number of the dependency's rows.
+                let mut odd = vec![false; kept.len()];
+                for &i in dep.iter().flat_map(|&row| &filtered.sets[row]) {
+                    odd[i as usize] ^= true;
+                }
+                (0..kept.len())
+                    .filter(|&i| odd[i])
+                    .map(|i| kept[i])
+                    .collect()
+            })
             .collect()
     }
 

@@ -15,6 +15,14 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::parallel::{Parallel, split};
+
+/// Work is split into this many pieces per thread, which take the next
+/// piece left as they finish, so that faster cores do more of them.
+const PIECES_PER_THREAD: usize = 8;
 
 /// A 64×64 matrix over GF(2), one row per word.
 type Small = [u64; 64];
@@ -66,14 +74,11 @@ fn tables(x: &Small) -> Vec<[u64; 256]> {
         .collect()
 }
 
-/// `acc += v·x` for a block vector `v`.
-fn add_mul(acc: &mut [u64], v: &[u64], x: &Small) {
-    let t = tables(x);
-    for (a, &w) in acc.iter_mut().zip(v) {
-        for (b, t) in t.iter().enumerate() {
-            *a ^= t[(w >> (8 * b)) as usize & 0xff];
-        }
-    }
+/// The word `w` times the matrix of `tables`.
+fn mul_word(t: &[[u64; 256]], w: u64) -> u64 {
+    t.iter()
+        .enumerate()
+        .fold(0, |acc, (b, t)| acc ^ t[(w >> (8 * b)) as usize & 0xff])
 }
 
 /// `vᵀw` for block vectors `v` and `w`.
@@ -97,30 +102,142 @@ fn inner(v: &[u64], w: &[u64]) -> Small {
     out
 }
 
-/// The sparse matrix `B`: for each column (relation), its set rows.
-struct Sparse<'a> {
-    cols: &'a [Vec<usize>],
-    rows: usize,
+/// The matrix `B`: its heaviest rows packed, a bit per column, and the
+/// rest sparse, by columns (relations) and by rows, so that both `Bv` and
+/// `Bᵀw` gather. Each is split into pieces of about equal weight.
+struct Sparse<'a, P> {
+    /// Each column's sparse rows.
+    cols: Vec<Vec<u32>>,
+    /// Each sparse row's columns; empty for the dense rows.
+    by_row: Vec<Vec<u32>>,
+    /// The dense rows, by bit.
+    dense: Vec<usize>,
+    /// Each column's bits in the dense rows.
+    masks: Vec<u64>,
+    col_pieces: Vec<usize>,
+    row_pieces: Vec<usize>,
+    /// Equal pieces of a block vector, one word per column.
+    vec_pieces: Vec<usize>,
+    par: &'a P,
 }
 
-impl Sparse<'_> {
+impl<'a, P: Parallel> Sparse<'a, P> {
+    fn new(cols: &[Vec<usize>], rows: usize, par: &'a P) -> Self {
+        let mut weight = vec![0usize; rows];
+        for &r in cols.iter().flatten() {
+            weight[r] += 1;
+        }
+        let mut dense: Vec<usize> = (0..rows).collect();
+        dense.sort_unstable_by_key(|&r| core::cmp::Reverse(weight[r]));
+        dense.truncate(64);
+        let mut bit = vec![u8::MAX; rows];
+        for (i, &r) in dense.iter().enumerate() {
+            bit[r] = i as u8;
+        }
+        let mut masks = vec![0u64; cols.len()];
+        let mut by_row = vec![Vec::new(); rows];
+        let cols: Vec<Vec<u32>> = cols
+            .iter()
+            .enumerate()
+            .map(|(c, col)| {
+                let mut sparse = Vec::with_capacity(col.len());
+                for &r in col {
+                    if bit[r] == u8::MAX {
+                        sparse.push(r as u32);
+                        by_row[r].push(c as u32);
+                    } else {
+                        masks[c] |= 1 << bit[r];
+                    }
+                }
+                sparse
+            })
+            .collect();
+        let pieces = PIECES_PER_THREAD * par.threads();
+        Self {
+            col_pieces: split(cols.iter().map(|c| c.len() + 4), pieces),
+            row_pieces: split(by_row.iter().map(|r| r.len() + 1), pieces),
+            vec_pieces: split(cols.iter().map(|_| 1), pieces),
+            by_row,
+            cols,
+            dense,
+            masks,
+            par,
+        }
+    }
+
+    /// `f` over the pieces `bounds` of `0..n`, shared out among the
+    /// threads as they become free, giving each piece's results.
+    fn pieces<T: Send>(&self, bounds: &[usize], f: impl Fn(Range<usize>) -> T + Sync) -> Vec<T> {
+        let next = AtomicUsize::new(0);
+        let mut done: Vec<(usize, T)> = self
+            .par
+            .map(|_| {
+                let mut done = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i + 1 >= bounds.len() {
+                        return done;
+                    }
+                    done.push((i, f(bounds[i]..bounds[i + 1])));
+                }
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+        done.sort_unstable_by_key(|&(i, _)| i);
+        done.into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// `f` over the pieces `bounds` of `0..n`, each giving the words of
+    /// its range, joined.
+    fn gather(&self, bounds: &[usize], f: impl Fn(Range<usize>) -> Vec<u64> + Sync) -> Vec<u64> {
+        self.pieces(bounds, f).concat()
+    }
+
+    /// `f` at each word of a block vector, split across the threads.
+    fn each(&self, f: impl Fn(usize) -> u64 + Sync) -> Vec<u64> {
+        self.gather(&self.vec_pieces, |range| range.map(&f).collect())
+    }
+
+    /// `vᵀw`, split across the threads.
+    fn inner(&self, v: &[u64], w: &[u64]) -> Small {
+        self.pieces(&self.vec_pieces, |r| inner(&v[r.clone()], &w[r]))
+            .iter()
+            .fold([0; 64], |acc, x| add(&acc, x))
+    }
+
     /// `Bv`, with one word per row of `B`.
     fn mul(&self, v: &[u64]) -> Vec<u64> {
-        let mut out = vec![0; self.rows];
-        for (col, &w) in self.cols.iter().zip(v) {
-            for &r in col {
-                out[r] ^= w;
-            }
+        let mut out = self.gather(&self.row_pieces, |range| {
+            self.by_row[range]
+                .iter()
+                .map(|row| row.iter().fold(0, |acc, &c| acc ^ v[c as usize]))
+                .collect()
+        });
+        // Dense row i's word is the sum of v over the columns with bit i.
+        for (&r, w) in self.dense.iter().zip(self.inner(&self.masks, v)) {
+            out[r] = w;
         }
         out
     }
 
     /// `Bᵀw`, with one word per column of `B`.
     fn mul_t(&self, w: &[u64]) -> Vec<u64> {
-        self.cols
-            .iter()
-            .map(|col| col.iter().fold(0, |acc, &r| acc ^ w[r]))
-            .collect()
+        let mut rows = [0u64; 64];
+        for (i, &r) in self.dense.iter().enumerate() {
+            rows[i] = w[r];
+        }
+        let t = tables(&rows);
+        self.gather(&self.col_pieces, |range| {
+            let (cols, masks) = (&self.cols[range.clone()], &self.masks[range]);
+            cols.iter()
+                .zip(masks)
+                .map(|(col, &m)| {
+                    col.iter()
+                        .fold(mul_word(&t, m), |acc, &r| acc ^ w[r as usize])
+                })
+                .collect()
+        })
     }
 
     /// `Av = BᵀBv`.
@@ -186,11 +303,17 @@ fn choose(t: &Small, prev: u64) -> (Small, u64) {
 }
 
 /// Finds up to 64 vectors `x ≠ 0` with `Bx = 0`, as lists of columns, for
-/// `B` with `rows` rows and the given columns. Returns nothing if this
-/// `seed` fails, which another seed is unlikely to repeat.
-pub fn null_space(cols: &[Vec<usize>], rows: usize, seed: u64) -> Vec<Vec<usize>> {
+/// `B` with `rows` rows and the given columns, using `par` for the
+/// matrix and vector products. Returns nothing if this `seed` fails, which
+/// another seed is unlikely to repeat.
+pub fn null_space(
+    cols: &[Vec<usize>],
+    rows: usize,
+    seed: u64,
+    par: &impl Parallel,
+) -> Vec<Vec<usize>> {
     let n = cols.len();
-    let b = Sparse { cols, rows };
+    let b = Sparse::new(cols, rows, par);
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let y: Vec<u64> = (0..n)
         .map(|_| {
@@ -215,7 +338,7 @@ pub fn null_space(cols: &[Vec<usize>], rows: usize, seed: u64) -> Vec<Vec<usize>
     let mut steps = 0;
     loop {
         let av = b.mul_a(&v);
-        let vav = inner(&v, &av);
+        let vav = b.inner(&v, &av);
         if vav == [0; 64] {
             break;
         }
@@ -223,13 +346,14 @@ pub fn null_space(cols: &[Vec<usize>], rows: usize, seed: u64) -> Vec<Vec<usize>
         if steps > max_steps {
             return Vec::new();
         }
-        let va2v = inner(&av, &av);
+        let va2v = b.inner(&av, &av);
         let (winv, s) = choose(&vav, s1);
         if s == 0 {
             return Vec::new();
         }
         // X += V·W⁻¹·VᵀV₀.
-        add_mul(&mut x, &v, &mul(&winv, &inner(&v, &v0)));
+        let t = tables(&mul(&winv, &b.inner(&v, &v0)));
+        x = b.each(|i| x[i] ^ mul_word(&t, v[i]));
 
         // V' = AV·SSᵀ + V·D + V₁·E + V₂·F, which makes V' A-orthogonal to
         // V, V₁ and V₂, and so to every earlier block.
@@ -239,10 +363,9 @@ pub fn null_space(cols: &[Vec<usize>], rows: usize, seed: u64) -> Vec<Vec<usize>
             &mul(&winv2, &add(&IDENTITY, &mul(&vav1, &winv1))),
             &keep_cols(&add(&keep_cols(&va2v1, s1), &vav1), s),
         );
-        let mut next: Vec<u64> = av.iter().map(|&w| w & s).collect();
-        add_mul(&mut next, &v, &d);
-        add_mul(&mut next, &v1, &e);
-        add_mul(&mut next, &v2, &f);
+        let (d, e, f) = (tables(&d), tables(&e), tables(&f));
+        let next =
+            b.each(|i| av[i] & s ^ mul_word(&d, v[i]) ^ mul_word(&e, v1[i]) ^ mul_word(&f, v2[i]));
 
         v2 = core::mem::replace(&mut v1, core::mem::replace(&mut v, next));
         winv2 = core::mem::replace(&mut winv1, winv);

@@ -28,7 +28,7 @@ pub fn root_of(rel: &Relation, p: u64) -> u64 {
 /// or ideal past the factor bases, the special-q included, numbered as
 /// they appear. The quadratic
 /// characters, a fixed number of dense columns, are only added at the
-/// end, by [`Matrix::solvable`], to the rows that survive pruning.
+/// end, by [`characters`], to the rows that survive filtering.
 ///
 /// A large prime in only one relation makes a singleton column, which
 /// pruning removes, so partial relations combine through the matrix
@@ -150,35 +150,23 @@ impl Matrix {
         rows >= cols + dense + extra
     }
 
-    /// The rows that survive pruning, with the quadratic characters of
-    /// `relations`, the relations the rows were built from, in the last
-    /// columns. Returns the indices of the rows kept, the rows, and the
+    /// The rows that survive pruning: their indices, the rows, and the
     /// number of columns.
-    pub fn solvable(
-        &self,
-        fb: &FactorBase,
-        relations: &[Relation],
-    ) -> (Vec<usize>, Vec<Vec<usize>>, usize) {
+    pub fn pruned(&self) -> (Vec<usize>, Vec<Vec<u32>>, usize) {
         let (alive, _, _) = self.prune();
         let kept: Vec<usize> = (0..self.rows.len()).filter(|&r| alive[r]).collect();
-        let c_base = self.cols;
-        let rows = kept
-            .iter()
-            .map(|&r| {
-                let rel = &relations[r];
-                let mut row: Vec<usize> = self.rows[r].iter().map(|&c| c as usize).collect();
-                for (i, c) in fb.characters.iter().enumerate() {
-                    // The Legendre symbol of a − b·s mod q.
-                    let q = u64::from(c.p);
-                    let bs = i128::from(rel.b % q) * i128::from(c.r);
-                    let v = (i128::from(rel.a) - bs).rem_euclid(q.into()) as u64;
-                    if pow_mod(v, (q - 1) / 2, q) == q - 1 {
-                        row.push(c_base + i);
-                    }
-                }
-                row
-            })
-            .collect();
-        (kept, rows, c_base + fb.characters.len())
+        let rows = kept.iter().map(|&r| self.rows[r].clone()).collect();
+        (kept, rows, self.cols)
     }
+}
+
+/// The quadratic characters of `rel`, a bit for each of `fb`'s that is −1:
+/// the Legendre symbol of `a − b·s` mod `q`.
+pub fn characters(fb: &FactorBase, rel: &Relation) -> u64 {
+    fb.characters.iter().enumerate().fold(0, |mask, (i, c)| {
+        let q = u64::from(c.p);
+        let bs = i128::from(rel.b % q) * i128::from(c.r);
+        let v = (i128::from(rel.a) - bs).rem_euclid(q.into()) as u64;
+        mask | u64::from(pow_mod(v, (q - 1) / 2, q) == q - 1) << i
+    })
 }

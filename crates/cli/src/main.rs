@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use cofox_core::arith::ParseUintError;
 use cofox_core::nfs::{Gnfs, Params};
+use cofox_core::parallel::Parallel;
 use cofox_core::qs::{QsJob, Start};
 use cofox_core::{Config, Factor, Progress, QS_MAX_BITS, QsMode, Uint, factor_str_with};
 
@@ -263,7 +264,7 @@ fn gnfs_parallel(
             "Number field sieve: solving for a {bits}-bit composite"
         ));
     }
-    let deps = relations.dependencies();
+    let deps = relations.dependencies_with(&Threads(threads));
     let (next_dep, found) = (AtomicUsize::new(0), Mutex::new(None));
     thread::scope(|scope| {
         for _ in 0..threads.min(deps.len()) {
@@ -284,6 +285,30 @@ fn gnfs_parallel(
         status.clear();
     }
     Ok(found.into_inner().unwrap().map(|f| f.to_string()))
+}
+
+/// Splits work across this many scoped threads.
+struct Threads(usize);
+
+impl Parallel for Threads {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn map<T: Send>(&self, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        let f = &f;
+        thread::scope(|scope| {
+            let handles: Vec<_> = (1..self.0).map(|i| scope.spawn(move || f(i))).collect();
+            let first = f(0);
+            std::iter::once(first)
+                .chain(
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().expect("worker panicked")),
+                )
+                .collect()
+        })
+    }
 }
 
 /// Runs the pipeline on `threads` threads, each with its share of the ECM

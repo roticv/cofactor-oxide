@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::lanczos::null_space;
+use crate::parallel::{Parallel, Serial};
 
 /// Matrices with more rows than this go to block Lanczos.
 const DENSE_ROWS: usize = 1000;
@@ -19,12 +20,17 @@ const LANCZOS_TRIES: u64 = 4;
 /// dependency: at least `rows.len() − cols` of them. Larger ones are pruned
 /// and passed to block Lanczos, which finds up to 64.
 pub fn dependencies(rows: &[Vec<usize>], cols: usize) -> Vec<Vec<usize>> {
+    dependencies_with(rows, cols, &Serial)
+}
+
+/// [`dependencies`], with block Lanczos's products split by `par`.
+pub fn dependencies_with(rows: &[Vec<usize>], cols: usize, par: &impl Parallel) -> Vec<Vec<usize>> {
     if rows.len() <= DENSE_ROWS {
         return dense(rows, cols);
     }
     let (kept, pruned, cols) = prune(rows, cols);
     (0..LANCZOS_TRIES)
-        .map(|seed| null_space(&pruned, cols, seed))
+        .map(|seed| null_space(&pruned, cols, seed, par))
         .find(|deps| !deps.is_empty())
         .unwrap_or_default()
         .into_iter()
