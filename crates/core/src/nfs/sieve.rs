@@ -13,9 +13,11 @@
 //! each row at most once, and are walked from hit to hit by Franke and
 //! Kleinjung's method. The region is sieved in slabs of whole rows that
 //! fit in cache, rational side then algebraic; positions over both
-//! thresholds are candidates. The primes that hit them are found by
-//! sieving again, or recorded during the walk, and divided out; primes
-//! below 2^8 are tried directly.
+//! thresholds are candidates. Primes larger than a slab are walked once
+//! over the whole region, their hits dropped into a bucket per slab, so
+//! that a slab doesn't visit the many that miss it. The primes that hit
+//! candidates are found by sieving again, or recorded during the walk or
+//! in the buckets, and divided out; primes below 2^8 are tried directly.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -42,8 +44,14 @@ const RESIEVE: u32 = 256;
 /// The most positions along a row that share a threshold.
 const SEGMENT: usize = 256;
 
+/// Positions checked at once for candidates.
+const CHUNK: usize = 32;
+
 /// Positions that share a threshold near where a norm changes sign.
 const PIECE: usize = 16;
+
+/// Primes whose roots are transformed together in [`Side::start`].
+const LANES: usize = 4;
 
 /// Bits the thresholds allow beyond the large prime, for rounded logs and
 /// powers of primes the sieve counts once.
@@ -77,11 +85,13 @@ pub fn special_qs(poly: &Poly, lo: u64, hi: u64) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// A prime below `I`: it hits row `j` where `i ≡ ρ·j (mod p)`.
+/// A prime below `I`: it hits row `j` where `i ≡ ρ·j (mod p)`, first at
+/// `x = i + I/2` equal to `next` in the row being sieved.
 #[derive(Clone, Copy)]
 struct Small {
     p: u32,
     rho: u32,
+    next: u32,
     log: u8,
 }
 
@@ -100,6 +110,24 @@ struct Walk {
     log: u8,
 }
 
+impl Walk {
+    /// Moves to the next hit, in a region `2^log_i` wide.
+    fn step(&mut self, log_i: u32) {
+        let x = self.pos & ((1 << log_i) - 1);
+        let (a, b) = (u64::from(self.a), u64::from(self.b));
+        // The first case takes the step (−a, ja), the second (b, jb) and
+        // the third both: the first where x − a stays in the row or x + b
+        // doesn't, the second where x − a doesn't. Chosen by multiplying
+        // rather than branching, as which case comes next is close to
+        // random.
+        let first = x >= a || x + b >= 1 << log_i;
+        let second = x < a;
+        let da = (u64::from(self.ja) << log_i).wrapping_sub(a) * u64::from(first);
+        let db = ((u64::from(self.jb) << log_i) + b) * u64::from(second);
+        self.pos = self.pos.wrapping_add(da).wrapping_add(db);
+    }
+}
+
 /// One side's factor base and its sieve for the current special-q.
 struct Side {
     primes: Vec<Prime>,
@@ -113,12 +141,16 @@ struct Side {
     /// Expected `log₂` from the primes that aren't sieved.
     skipped: f64,
     small: Vec<Small>,
+    /// Walked primes smaller than a slab, walked slab by slab.
     walks: Vec<Walk>,
     /// Primes that divide every point of rows `j ≡ 0 (mod p)`.
     rows: Vec<Small>,
     block: Vec<u8>,
     /// `(offset, p)` of the walked primes' hits in the current slab.
     hits: Vec<(u32, u32)>,
+    /// For each slab, the hits of the primes from a slab's size up, walked
+    /// once over the whole region: `(offset | log << 24, p)`.
+    buckets: Vec<Vec<(u32, u32)>>,
 }
 
 impl Side {
@@ -141,71 +173,113 @@ impl Side {
             rows: Vec::new(),
             block: vec![0; slab],
             hits: Vec::new(),
+            buckets: Vec::new(),
         }
     }
 
     /// Finds each prime's lattice in the `(i, j)` plane for the special-q
-    /// basis `u`, `v`, in a region `2^log_i` wide.
-    fn start(&mut self, u: (i64, i64), v: (i64, i64), log_i: u32) {
+    /// basis `u`, `v`, in a region `2^log_i` wide and `2^log_j` high, and
+    /// fills the buckets.
+    fn start(&mut self, u: (i64, i64), v: (i64, i64), log_i: u32, log_j: u32) {
         let width = 1u64 << log_i;
+        let slab_bits = self.block.len().trailing_zeros();
+        let end = 1u64 << (log_i + log_j);
+        let slabs = (end >> slab_bits).max(1) as usize;
+        self.buckets.resize_with(slabs, Vec::new);
+        self.buckets.iter_mut().for_each(Vec::clear);
         self.small.clear();
         self.walks.clear();
         self.rows.clear();
-        for q in &self.primes {
-            if q.p < SMALL_PRIMES {
-                continue;
+        let first = self.primes.partition_point(|q| q.p < SMALL_PRIMES);
+        // In groups, so that the divisions of the inverses and the walks'
+        // steps overlap.
+        for group in self.primes[first..].chunks(LANES) {
+            let mut x = [1u32; LANES];
+            let mut ps = [1u32; LANES];
+            let mut betas = [0u64; LANES];
+            for (l, q) in group.iter().enumerate() {
+                let p = u64::from(q.p);
+                // a − R·b at the basis vectors, or b for the root at infinity.
+                let at = |(a, b): (i64, i64)| {
+                    let b = reduce_mod(b, q.p);
+                    if q.projective() {
+                        b
+                    } else {
+                        // a + (p − b)·R, below p + p², reduced once.
+                        (reduce_mod(a, q.p) + (p - b) * u64::from(q.r)) % p
+                    }
+                };
+                let alpha = at(u);
+                (x[l], ps[l], betas[l]) = (alpha as u32, q.p, at(v));
             }
-            let p = u64::from(q.p);
-            // a − R·b at the basis vectors, or b for the root at infinity.
-            let at = |(a, b): (i64, i64)| {
-                let b = b.rem_euclid(p as i64) as u64;
-                if q.projective() {
-                    b
-                } else {
-                    let a = a.rem_euclid(p as i64) as u64;
-                    (a + p - b * u64::from(q.r) % p) % p
+            let inv = inverses(x, ps);
+            let mut rhos = [0u32; LANES];
+            // The walked primes, for their steps; 0 for the others.
+            let mut walked = [0u32; LANES];
+            for (l, q) in group.iter().enumerate() {
+                let p = u64::from(q.p);
+                rhos[l] = ((p - betas[l]) * u64::from(inv[l]) % p) as u32;
+                if x[l] != 0 && p >= width {
+                    walked[l] = q.p;
                 }
-            };
-            let (alpha, beta) = (at(u), at(v));
-            if alpha == 0 {
-                if beta != 0 {
-                    self.rows.push(Small {
+            }
+            let steps = steps(walked, rhos, log_i);
+            for (l, q) in group.iter().enumerate() {
+                let (p, beta) = (u64::from(q.p), betas[l]);
+                if x[l] == 0 {
+                    if beta != 0 {
+                        self.rows.push(Small {
+                            p: q.p,
+                            rho: 0,
+                            next: 0,
+                            log: q.log,
+                        });
+                    }
+                    continue;
+                }
+                if p < width {
+                    self.small.push(Small {
                         p: q.p,
-                        rho: 0,
+                        rho: rhos[l],
+                        next: (width / 2 % p) as u32,
                         log: q.log,
                     });
+                } else if p < 1 << slab_bits {
+                    self.walks.push(walk(q, steps[l], log_i));
+                } else {
+                    let mut w = walk(q, steps[l], log_i);
+                    let mask = (1u64 << slab_bits) - 1;
+                    let tag = u32::from(q.log) << 24;
+                    while w.pos < end {
+                        self.buckets[(w.pos >> slab_bits) as usize]
+                            .push(((w.pos & mask) as u32 | tag, q.p));
+                        w.step(log_i);
+                    }
                 }
-                continue;
-            }
-            let rho = (p - beta) * inverse(alpha, p) % p;
-            if p < width {
-                self.small.push(Small {
-                    p: q.p,
-                    rho: rho as u32,
-                    log: q.log,
-                });
-            } else {
-                self.walks.push(walk(q, rho, log_i));
             }
         }
     }
 
-    /// Sieves the rows `[j0, j0 + rows)` of a region `2^log_i` wide.
+    /// Sieves the rows `[j0, j0 + rows)` of a region `2^log_i` wide, the
+    /// slabs in order from `j0 = 0`.
     fn sieve(&mut self, j0: u64, rows: usize, log_i: u32) {
         let width = 1usize << log_i;
-        let half = width as u64 / 2;
         self.block.fill(0);
         for (r, row) in self.block[..rows * width]
             .chunks_exact_mut(width)
             .enumerate()
         {
             let j = j0 + r as u64;
-            for s in &self.small {
-                let p = u64::from(s.p);
-                let mut x = ((u64::from(s.rho) * (j % p) + half) % p) as usize;
+            for s in &mut self.small {
+                let mut x = s.next as usize;
                 while x < width {
                     row[x] = row[x].saturating_add(s.log);
                     x += s.p as usize;
+                }
+                // From row j to j + 1, the first hit moves by ρ mod p.
+                s.next += s.rho;
+                if s.next >= s.p {
+                    s.next -= s.p;
                 }
             }
             for s in self.rows.iter().filter(|s| j.is_multiple_of(s.p.into())) {
@@ -216,24 +290,19 @@ impl Side {
         }
         let start = j0 << log_i;
         let end = start + (rows << log_i) as u64;
-        let mask = width as u64 - 1;
         self.hits.clear();
         for w in &mut self.walks {
             while w.pos < end {
                 let off = (w.pos - start) as usize;
                 self.block[off] = self.block[off].saturating_add(w.log);
                 self.hits.push((off as u32, w.p));
-                let x = w.pos & mask;
-                let (a, b) = (u64::from(w.a), u64::from(w.b));
-                let (ja, jb) = (u64::from(w.ja) << log_i, u64::from(w.jb) << log_i);
-                w.pos = if x >= a {
-                    w.pos + ja - a
-                } else if x + b < width as u64 {
-                    w.pos + jb + b
-                } else {
-                    w.pos + ja + jb + b - a
-                };
+                w.step(log_i);
             }
+        }
+        let slab = (start >> self.block.len().trailing_zeros()) as usize;
+        for &(tagged, _) in &self.buckets[slab] {
+            let off = (tagged & 0xff_ffff) as usize;
+            self.block[off] = self.block[off].saturating_add((tagged >> 24) as u8);
         }
     }
 
@@ -267,61 +336,79 @@ impl Side {
             }
         }
         out.extend(self.hits.iter().filter(|h| marked[h.0 as usize]));
+        let slab = ((j0 << log_i) >> self.block.len().trailing_zeros()) as usize;
+        out.extend(
+            self.buckets[slab]
+                .iter()
+                .map(|&(tagged, p)| (tagged & 0xff_ffff, p))
+                .filter(|h| marked[h.0 as usize]),
+        );
     }
 }
 
-/// The walk of a prime `p ≥ I` over the lattice `i ≡ ρ·j (mod p)`, from the
-/// origin to its first hit with `j > 0`.
+/// The steps `(a, ja, b, jb)` of the walks of primes `pₗ ≥ I` over the
+/// lattices `i ≡ ρₗ·j (mod pₗ)`, the lanes in step so that their divisions
+/// overlap; lanes with `pₗ = 0` are left alone.
 ///
 /// The steps come from reducing the basis `(−p, 0), (ρ, 1)` like a
 /// continued fraction until `(−a, ja)` and `(b, jb)` have `0 < a, b < I`
 /// and `a + b ≥ I`: from any point, the next one up is then one step away.
-fn walk(q: &Prime, rho: u64, log_i: u32) -> Walk {
-    let width = 1u64 << log_i;
-    let (mut a, mut ja, mut b, mut jb) = (u64::from(q.p), 0u64, rho, 1u64);
-    if b == 0 {
-        // Only i = 0: a can never be taken, b moves up a row.
-        a = width;
-    } else {
-        while a >= width && b >= width {
-            if a >= b {
-                let k = a / b;
-                a -= k * b;
-                ja += k * jb;
-            } else {
-                let k = b / a;
-                b -= k * a;
-                jb += k * ja;
-            }
-        }
-        if a < width {
-            let k = (b + a - width) / a;
-            b -= k * a;
-            jb += k * ja;
-        } else {
-            let k = (a + b - width) / b;
-            a -= k * b;
-            ja += k * jb;
+fn steps(p: [u32; LANES], rho: [u32; LANES], log_i: u32) -> [[u32; 4]; LANES] {
+    let width = 1u32 << log_i;
+    let mut s: [[u32; 4]; LANES] = core::array::from_fn(|l| [p[l], 0, rho[l], 1]);
+    for (l, [a, _, b, _]) in s.iter_mut().enumerate() {
+        if p[l] != 0 && *b == 0 {
+            // Only i = 0: a can never be taken, b moves up a row.
+            *a = width;
         }
     }
-    let cap = |j: u64| j.min(u64::from(u32::MAX >> 1)) as u32;
+    let busy = |&[a, _, b, _]: &[u32; 4]| a >= width && b >= width;
+    while s.iter().any(busy) {
+        for [a, ja, b, jb] in s.iter_mut() {
+            if *a >= width && *b >= width {
+                if *a >= *b {
+                    let k = *a / *b;
+                    *a -= k * *b;
+                    *ja += k * *jb;
+                } else {
+                    let k = *b / *a;
+                    *b -= k * *a;
+                    *jb += k * *ja;
+                }
+            }
+        }
+    }
+    for (l, [a, ja, b, jb]) in s.iter_mut().enumerate() {
+        if p[l] == 0 || rho[l] == 0 {
+            continue;
+        }
+        if *a < width {
+            let k = (*b + *a - width) / *a;
+            *b -= k * *a;
+            *jb += k * *ja;
+        } else {
+            let k = (*a + *b - width) / *b;
+            *a -= k * *b;
+            *ja += k * *jb;
+        }
+    }
+    s
+}
+
+/// The walk of `q` with steps `(a, ja, b, jb)`, from the origin to its
+/// first hit with `j > 0`.
+fn walk(q: &Prime, [a, ja, b, jb]: [u32; 4], log_i: u32) -> Walk {
+    let cap = |j: u32| j.min(u32::MAX >> 1);
     let mut w = Walk {
-        pos: width / 2,
-        a: a as u32,
-        b: b as u32,
+        pos: 1 << (log_i - 1),
+        a,
+        b,
         ja: cap(ja),
         jb: cap(jb),
         p: q.p,
         log: q.log,
     };
-    let x = w.pos;
-    w.pos = if x >= a {
-        x + (ja << log_i) - a
-    } else if x + b < width {
-        x + (jb << log_i) + b
-    } else {
-        x + ((ja + jb) << log_i) + b - a
-    };
+    w.step(log_i);
     w
 }
 
@@ -414,8 +501,8 @@ impl<'a> Sieve<'a> {
         let width = 1usize << log_i;
         let half = (width / 2) as i64;
         let (u, v) = reduce(q, r, self.poly.skew);
-        self.rational.start(u, v, log_i);
-        self.algebraic.start(u, v, log_i);
+        self.rational.start(u, v, log_i, log_j);
+        self.algebraic.start(u, v, log_i, log_j);
         let r_slack = self.rational.slack();
         let a_slack = self.algebraic.slack() + log2(q as f64);
         let segment = SEGMENT.min(width);
@@ -448,9 +535,22 @@ impl<'a> Sieve<'a> {
                             self.thresholds(x0, pieces, j, (u, v), (r_slack, a_slack))
                         };
                         let base = row * width + x0;
-                        for x in base..base + pieces {
-                            if self.rational.block[x] >= r_t && self.algebraic.block[x] >= a_t {
-                                candidates.push(x as u32);
+                        let rat = &self.rational.block[base..base + pieces];
+                        let alg = &self.algebraic.block[base..base + pieces];
+                        // Few positions pass, and whether any in a chunk
+                        // does is a vectorizable reduction.
+                        for (k, (r, a)) in rat.chunks(CHUNK).zip(alg.chunks(CHUNK)).enumerate() {
+                            let any = r
+                                .iter()
+                                .zip(a)
+                                .fold(false, |any, (&r, &a)| any | (r >= r_t) & (a >= a_t));
+                            if !any {
+                                continue;
+                            }
+                            for (i, (&r, &a)) in r.iter().zip(a).enumerate() {
+                                if r >= r_t && a >= a_t {
+                                    candidates.push((base + k * CHUNK + i) as u32);
+                                }
                             }
                         }
                     }
@@ -627,16 +727,37 @@ fn reduce(q: u64, r: u64, skew: f64) -> ((i64, i64), (i64, i64)) {
     }
 }
 
-/// `x⁻¹ mod p`, for `x` coprime to `p`.
-fn inverse(x: u64, p: u64) -> u64 {
-    let (mut r0, mut r1) = (p as i64, x as i64);
-    let (mut t0, mut t1) = (0i64, 1i64);
-    while r1 != 0 {
-        let k = r0 / r1;
-        (r0, r1) = (r1, r0 - k * r1);
-        (t0, t1) = (t1, t0 - k * t1);
+/// `x mod p` in `[0, p)`.
+fn reduce_mod(x: i64, p: u32) -> u64 {
+    let r = x % i64::from(p);
+    (if r < 0 { r + i64::from(p) } else { r }) as u64
+}
+
+/// `xₗ⁻¹ mod pₗ` for each lane, by Euclid's algorithm in 32 bits, the
+/// lanes in step so that their divisions overlap; 0 where `xₗ` is 0. The
+/// cofactors of `x` alternate in sign, so only their magnitudes are kept,
+/// and the last one's sign comes from the number of steps.
+fn inverses(x: [u32; LANES], p: [u32; LANES]) -> [u32; LANES] {
+    let (mut r0, mut r1) = (p, x);
+    let (mut t0, mut t1) = ([0u32; LANES], [1u32; LANES]);
+    let mut odd = [false; LANES];
+    while r1.iter().any(|&r| r != 0) {
+        for l in 0..LANES {
+            if let Some(k) = r0[l].checked_div(r1[l]) {
+                (r0[l], r1[l]) = (r1[l], r0[l] - k * r1[l]);
+                (t0[l], t1[l]) = (t1[l], t0[l] + k * t1[l]);
+                odd[l] = !odd[l];
+            }
+        }
     }
-    t0.rem_euclid(p as i64) as u64
+    // After n steps the cofactor has the sign of (−1)^(n+1).
+    core::array::from_fn(|l| {
+        if odd[l] || t0[l] == 0 {
+            t0[l]
+        } else {
+            p[l] - t0[l]
+        }
+    })
 }
 
 /// Whether `p` divides the norm at `(a, b)`: `a ≡ b·r (mod p)`, or `p | b`
