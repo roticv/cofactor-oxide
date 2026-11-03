@@ -20,6 +20,9 @@ const TABLE: [(u32, u32, u32, u32, u32); 6] = [
     (400, 15_000_000, 15_000_000, 10, 13),
 ];
 
+/// Large primes allowed on each side.
+const LARGE_PRIMES: u32 = 1;
+
 /// Quadratic characters: each makes a dependency that is not a square in
 /// the number field half as likely to survive.
 pub const CHARACTERS: usize = 48;
@@ -30,9 +33,11 @@ pub struct Params {
     pub rational_bound: u32,
     /// Primes up to this, with each root of `f`, are in the algebraic one.
     pub algebraic_bound: u32,
-    /// Each side may have one prime outside its factor base, below this
+    /// Each side may have primes outside its factor base, below this
     /// multiple of the side's bound.
     pub large_mult: u32,
+    /// How many such primes each side may have: 1 or 2.
+    pub large_primes: u32,
     /// Each special-q sieves `i` in `[−I/2, I/2)` and `j` in `[1, I/2)`,
     /// for `I = 2^log_i`.
     pub log_i: u32,
@@ -45,6 +50,7 @@ impl Params {
             rational_bound: r,
             algebraic_bound: a,
             large_mult: mult,
+            large_primes: LARGE_PRIMES,
             log_i: w,
         };
         let (first, last) = (TABLE[0], TABLE[TABLE.len() - 1]);
@@ -70,6 +76,7 @@ impl Params {
             rational_bound: lerp(lo.1, hi.1),
             algebraic_bound: lerp(lo.2, hi.2),
             large_mult: lerp(lo.3, hi.3),
+            large_primes: LARGE_PRIMES,
             log_i: lerp(lo.4, hi.4),
         }
     }

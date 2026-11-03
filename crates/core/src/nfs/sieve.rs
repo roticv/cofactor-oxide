@@ -26,6 +26,7 @@ use super::params::Params;
 use super::poly::Poly;
 use crate::arith::{Limb, Uint};
 use crate::primes::Primes;
+use crate::qs::cofactor::split;
 use crate::qs::log2;
 
 /// The most positions sieved at a time.
@@ -59,11 +60,12 @@ pub struct Relation {
     /// Whether `G(a, b)` is negative.
     pub negative: bool,
     /// The primes of `|G(a, b)|`, with repetition: factor-base primes and
-    /// at most one larger one.
+    /// up to [`Params::large_primes`] larger ones.
     pub rational: Vec<u64>,
     /// The primes of `|F(a, b)|`, with repetition: factor-base primes, the
-    /// special-q and at most one other larger one. Each stands for the
-    /// prime ideal `(p, a/b mod p)`, or the one at infinity if `p | b`.
+    /// special-q and up to [`Params::large_primes`] other larger ones. Each
+    /// stands for the prime ideal `(p, a/b mod p)`, or the one at infinity
+    /// if `p | b`.
     pub algebraic: Vec<u64>,
 }
 
@@ -102,6 +104,12 @@ struct Walk {
 struct Side {
     primes: Vec<Prime>,
     large_bound: u64,
+    /// How many primes past the factor base, below `large_bound`, a value
+    /// may have.
+    large_primes: u32,
+    /// The largest factor-base prime squared: any cofactor below it is
+    /// prime.
+    prime_below: u64,
     /// Expected `log₂` from the primes that aren't sieved.
     skipped: f64,
     small: Vec<Small>,
@@ -125,6 +133,8 @@ impl Side {
         Self {
             primes: primes.to_vec(),
             large_bound: u64::from(largest) * u64::from(params.large_mult),
+            large_primes: params.large_primes,
+            prime_below: u64::from(largest) * u64::from(largest),
             skipped,
             small: Vec::new(),
             walks: Vec::new(),
@@ -406,11 +416,8 @@ impl<'a> Sieve<'a> {
         let (u, v) = reduce(q, r, self.poly.skew);
         self.rational.start(u, v, log_i);
         self.algebraic.start(u, v, log_i);
-        let r_slack = log2(self.rational.large_bound as f64) + self.rational.skipped + FUDGE;
-        let a_slack = log2(self.algebraic.large_bound as f64)
-            + self.algebraic.skipped
-            + FUDGE
-            + log2(q as f64);
+        let r_slack = self.rational.slack();
+        let a_slack = self.algebraic.slack() + log2(q as f64);
         let segment = SEGMENT.min(width);
         let rows_per_slab = self.marked.len() >> log_i;
         let mut relations = Vec::new();
@@ -507,8 +514,8 @@ impl<'a> Sieve<'a> {
         let mut v = wide(la.checked_sub(bm)?.unsigned_abs());
         let mut rational = Vec::new();
         self.rational.divide(a, b, x, r_hits, &mut v, &mut rational);
-        if let Some(p) = cofactor(&v, self.rational.large_bound)? {
-            rational.push(p);
+        if !self.rational.cofactor(&v, &mut rational) {
+            return None;
         }
 
         // Algebraic side: F(a, b), which q divides.
@@ -517,8 +524,8 @@ impl<'a> Sieve<'a> {
         divide_out(&mut v, q as u32, &mut algebraic);
         self.algebraic
             .divide(a, b, x, a_hits, &mut v, &mut algebraic);
-        if let Some(p) = cofactor(&v, self.algebraic.large_bound)? {
-            algebraic.push(p);
+        if !self.algebraic.cofactor(&v, &mut algebraic) {
+            return None;
         }
         Some(Relation {
             a,
@@ -531,6 +538,44 @@ impl<'a> Sieve<'a> {
 }
 
 impl Side {
+    /// Bits a value's sieved logs may fall short of its size: room for the
+    /// large primes, the primes not sieved, and rounding.
+    fn slack(&self) -> f64 {
+        f64::from(self.large_primes) * log2(self.large_bound as f64) + self.skipped + FUDGE
+    }
+
+    /// Whether `v`, what trial division left, is 1 or splits into at most
+    /// `large_primes` primes below `large_bound`, which are added to
+    /// `factors`. The large-prime bound must be below the square of the
+    /// largest factor-base prime, so that anything that small is prime.
+    fn cofactor(&self, v: &Wide, factors: &mut Vec<u64>) -> bool {
+        let Some(c) = v.to_u64() else {
+            return false;
+        };
+        let bound = self.large_bound;
+        match c {
+            0 => false,
+            1 => true,
+            c if c < bound => {
+                factors.push(c);
+                true
+            }
+            c if self.large_primes < 2
+                || c < self.prime_below
+                || u128::from(c) >= u128::from(bound) * u128::from(bound) =>
+            {
+                false
+            }
+            c => match split(c) {
+                Some([p, q]) if q < bound => {
+                    factors.extend([p, q]);
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
     /// Divides the factor-base primes out of `v`, a norm at `(a, b)` and
     /// offset `x`: the small ones by trial, the rest from `hits`, sorted.
     fn divide(
@@ -617,17 +662,6 @@ fn divide_out(v: &mut Wide, p: u32, factors: &mut Vec<u64>) {
         }
         *v = q;
         factors.push(p.into());
-    }
-}
-
-/// What trial division left, if it's 1 (`Some(None)`) or a prime below
-/// `bound` (`Some(Some(p))`). `bound` must be below the square of the
-/// largest factor-base prime, so that anything that small is prime.
-fn cofactor(v: &Wide, bound: u64) -> Option<Option<u64>> {
-    match v.to_u64()? {
-        1 => Some(None),
-        c if c != 0 && c < bound => Some(Some(c)),
-        _ => None,
     }
 }
 
