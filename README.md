@@ -12,7 +12,8 @@ short, which is also the name of the command-line tool.
 > self-initializing quadratic sieve and the BPSW primality test. ECM finds
 > factors up to about 25 digits by default (more with `--ecm`), and the
 > quadratic sieve splits what is left up to 120 digits. Both run on every
-> core, natively and in the browser. GNFS is planned.
+> core, natively and in the browser. GNFS works end to end in the CLI with
+> `--gnfs`, but is still far slower than the quadratic sieve.
 
 ## Goals
 
@@ -138,8 +139,9 @@ product of two 30-digit primes, too large for ECM, so the quadratic sieve
 splits it.
 
 `--ecm 30` (or 35, 40) searches for larger factors, at about four times the
-cost per level, `--threads N` sets the number of threads, and `--no-qs`
-skips the quadratic sieve. A factor in parentheses is composite, but the
+cost per level, `--threads N` sets the number of threads, `--no-qs` skips
+the quadratic sieve, and `--gnfs` uses the experimental number field sieve
+in its place, for composites of 40 digits or more. A factor in parentheses is composite, but the
 algorithms that ran couldn't split it. While ECM or the sieve runs, a status
 line on stderr shows how far it has got.
 

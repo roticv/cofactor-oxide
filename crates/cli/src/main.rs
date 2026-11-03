@@ -1,16 +1,17 @@
 use std::io::{IsTerminal, Write};
 use std::ops::ControlFlow;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use cofox_core::arith::ParseUintError;
+use cofox_core::nfs::{Gnfs, Params};
 use cofox_core::qs::{QsJob, Start};
 use cofox_core::{Config, Factor, Progress, QS_MAX_BITS, QsMode, Uint, factor_str_with};
 
-const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] <n>...
+const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs] <n>...
 
   --ecm DIGITS  run ECM up to the level for primes of this many digits
                 (15 to 40, default 25); each level takes about four times
@@ -19,10 +20,17 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] <n>...
   --threads N   split ECM's curves and the sieving across N threads
                 (default: one per core)
   --no-qs       leave composites that ECM can't split, instead of running
-                the quadratic sieve on those of up to 120 digits";
+                the quadratic sieve on those of up to 120 digits
+  --gnfs        use the number field sieve instead of the quadratic sieve,
+                on composites of 40 digits or more (experimental: slower
+                than the quadratic sieve at every size so far)";
 
 /// The widest numbers the command line takes.
 type Wide = Uint<16>;
+
+/// The smallest composite `--gnfs` takes; the quadratic sieve takes the
+/// rest.
+const GNFS_MIN_BITS: u32 = 130;
 
 /// How often the status line is redrawn.
 const REDRAW: Duration = Duration::from_millis(100);
@@ -30,6 +38,7 @@ const REDRAW: Duration = Duration::from_millis(100);
 fn main() -> ExitCode {
     let mut ecm_digits = 25;
     let mut qs = true;
+    let mut gnfs = false;
     let mut threads = thread::available_parallelism().map_or(1, |n| n.get());
     let mut numbers = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -55,6 +64,7 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             },
             "--no-qs" => qs = false,
+            "--gnfs" => gnfs = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -75,6 +85,7 @@ fn main() -> ExitCode {
             ecm_digits,
             threads,
             qs,
+            gnfs,
             show_status,
         };
         match run.factor(arg) {
@@ -104,6 +115,7 @@ struct Run {
     ecm_digits: u32,
     threads: usize,
     qs: bool,
+    gnfs: bool,
     show_status: bool,
 }
 
@@ -117,7 +129,11 @@ impl Run {
         let mut factors = Vec::new();
         for f in factor_parallel(n, &config, self.threads, self.show_status)? {
             let bits = f.value.parse::<Wide>()?.bits();
-            let found = if f.is_prime || !self.qs || bits > QS_MAX_BITS {
+            let found = if f.is_prime || !self.qs {
+                None
+            } else if self.gnfs && bits >= GNFS_MIN_BITS {
+                gnfs_parallel(&f.value, self.threads, self.show_status)?
+            } else if bits > QS_MAX_BITS {
                 None
             } else {
                 qs_parallel(&f.value, self.threads, self.show_status)?
@@ -191,6 +207,79 @@ fn qs_parallel(
     Ok(found)
 }
 
+/// Runs the number field sieve on `threads` threads: each sieves the next
+/// line no thread has taken and sends its relations to this thread, until
+/// there are enough. Then each thread tries the next dependency until one
+/// gives a factor. Returns a proper factor of `n`, or `None` if it found
+/// none, which is what happens when `n` is a prime power.
+fn gnfs_parallel(
+    n: &str,
+    threads: usize,
+    show_status: bool,
+) -> Result<Option<String>, ParseUintError> {
+    let n = n.parse::<Wide>()?;
+    let bits = n.bits();
+    let gnfs = Gnfs::new(&n, &Params::for_bits(bits));
+    let fb = gnfs.factor_base();
+    let ideals = fb.rational.len() + fb.algebraic.len();
+    let mut relations = gnfs.relations();
+    let mut status = Status::new(1);
+    let (send, receive) = mpsc::channel();
+    let (next_line, done) = (AtomicU64::new(1), AtomicBool::new(false));
+    thread::scope(|scope| {
+        for _ in 0..threads {
+            let (send, gnfs, next_line, done) = (send.clone(), &gnfs, &next_line, &done);
+            scope.spawn(move || {
+                let mut sieve = gnfs.sieve();
+                while !done.load(Ordering::Relaxed) {
+                    let b = next_line.fetch_add(1, Ordering::Relaxed);
+                    if send.send(sieve.line(b)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        while !relations.is_ready() {
+            relations.add(receive.recv().expect("sieving threads stopped"));
+            if show_status {
+                let lines = next_line.load(Ordering::Relaxed) - 1;
+                status.update_line(&format!(
+                    "Number field sieve: {} relations for {ideals} ideals, {lines} lines, \
+                     on a {bits}-bit composite",
+                    relations.len()
+                ));
+            }
+        }
+        done.store(true, Ordering::Relaxed);
+    });
+    if show_status {
+        status.show(&format!(
+            "Number field sieve: solving for a {bits}-bit composite"
+        ));
+    }
+    let deps = relations.dependencies();
+    let (next_dep, found) = (AtomicUsize::new(0), Mutex::new(None));
+    thread::scope(|scope| {
+        for _ in 0..threads.min(deps.len()) {
+            let (relations, deps, next_dep, found) = (&relations, &deps, &next_dep, &found);
+            scope.spawn(move || {
+                while found.lock().unwrap().is_none() {
+                    let Some(dep) = deps.get(next_dep.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    if let Some(f) = relations.try_dependency(dep) {
+                        *found.lock().unwrap() = Some(f);
+                    }
+                }
+            });
+        }
+    });
+    if show_status {
+        status.clear();
+    }
+    Ok(found.into_inner().unwrap().map(|f| f.to_string()))
+}
+
 /// Runs the pipeline on `threads` threads, each with its share of the ECM
 /// curves. The first run to end with every factor prime stops the others.
 /// If none does, the run that split the most wins.
@@ -257,13 +346,23 @@ impl Status {
 
     fn update(&mut self, worker: usize, event: Progress) {
         self.events[worker] = Some(event);
-        // Stay quiet for quick factorizations.
-        if self.start.elapsed() < Duration::from_millis(300)
-            || self.drawn.is_some_and(|t| t.elapsed() < REDRAW)
-        {
-            return;
+        if self.due() {
+            self.show(&describe(&self.events));
         }
-        self.show(&describe(&self.events));
+    }
+
+    /// Draws `line` if it is time to redraw.
+    fn update_line(&mut self, line: &str) {
+        if self.due() {
+            self.show(line);
+        }
+    }
+
+    /// Whether to redraw: not for quick factorizations, and not more often
+    /// than every [`REDRAW`].
+    fn due(&self) -> bool {
+        self.start.elapsed() >= Duration::from_millis(300)
+            && self.drawn.is_none_or(|t| t.elapsed() >= REDRAW)
     }
 
     fn show(&mut self, line: &str) {

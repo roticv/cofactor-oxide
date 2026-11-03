@@ -26,14 +26,13 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 pub use base::{FactorBase, Prime};
-pub use matrix::{root_of, rows};
 pub use params::{CHARACTERS, Params};
 pub use poly::{Poly, alpha, degree};
 pub use sieve::{Relation, Sieve};
 
 use crate::arith::Uint;
 use crate::qs::dependencies;
-use crate::qs::linalg::prune;
+use matrix::Matrix;
 
 /// Rows beyond the columns, after pruning, before solving.
 const EXTRA: usize = 64;
@@ -41,6 +40,123 @@ const EXTRA: usize = 64;
 /// The callback asked [`gnfs_with`] to stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stopped;
+
+/// GNFS set up for one number: its polynomial, factor bases and
+/// parameters.
+///
+/// Sieving and collecting are separate so that they can run on different
+/// threads, as with the quadratic sieve: each thread sieves lines with its
+/// own [`Sieve`] from [`Gnfs::sieve`], each line `b` once, and one
+/// [`Relations`] gathers what they find until [`Relations::is_ready`].
+/// Each of [`Relations::dependencies`] then gives a factor with
+/// probability about ½, through [`Relations::try_dependency`]. [`gnfs`]
+/// does all of it on one thread.
+#[derive(Clone, Debug)]
+pub struct Gnfs<const LIMBS: usize> {
+    n: Uint<LIMBS>,
+    params: Params,
+    poly: Poly,
+    fb: FactorBase,
+}
+
+impl<const LIMBS: usize> Gnfs<LIMBS> {
+    /// Chooses the polynomial and builds the factor bases for `n`, an odd
+    /// composite that isn't a prime power.
+    pub fn new(n: &Uint<LIMBS>, params: &Params) -> Self {
+        let poly = Poly::select(n);
+        let fb = FactorBase::new(
+            &poly,
+            params.rational_bound,
+            params.algebraic_bound,
+            CHARACTERS,
+        );
+        Self {
+            n: *n,
+            params: *params,
+            poly,
+            fb,
+        }
+    }
+
+    pub fn poly(&self) -> &Poly {
+        &self.poly
+    }
+
+    pub fn factor_base(&self) -> &FactorBase {
+        &self.fb
+    }
+
+    /// A sieve for this number.
+    pub fn sieve(&self) -> Sieve<'_> {
+        Sieve::new(&self.poly, &self.fb, &self.params)
+    }
+
+    /// An empty collection of relations for this number.
+    pub fn relations(&self) -> Relations<'_, LIMBS> {
+        Relations {
+            gnfs: self,
+            relations: Vec::new(),
+            matrix: Matrix::new(&self.fb),
+            // Partial relations only start to combine once there are about
+            // as many relations as ideals in the factor bases.
+            next_check: self.fb.rational.len() + self.fb.algebraic.len(),
+            ready: false,
+        }
+    }
+}
+
+/// The relations found so far for one number, and their matrix.
+#[derive(Clone, Debug)]
+pub struct Relations<'a, const LIMBS: usize> {
+    gnfs: &'a Gnfs<LIMBS>,
+    relations: Vec<Relation>,
+    matrix: Matrix,
+    next_check: usize,
+    ready: bool,
+}
+
+impl<const LIMBS: usize> Relations<'_, LIMBS> {
+    pub fn add(&mut self, relations: impl IntoIterator<Item = Relation>) {
+        for rel in relations {
+            self.matrix.push(&self.gnfs.fb, &rel);
+            self.relations.push(rel);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.relations.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.relations.is_empty()
+    }
+
+    /// Whether the matrix has more rows than columns after pruning. Only
+    /// checked every 10% more relations.
+    pub fn is_ready(&mut self) -> bool {
+        if !self.ready && self.relations.len() >= self.next_check {
+            self.next_check = self.relations.len() + self.relations.len() / 10;
+            self.ready = self.matrix.ready(CHARACTERS, EXTRA);
+        }
+        self.ready
+    }
+
+    /// The dependencies among the relations, as indices into them.
+    pub fn dependencies(&self) -> Vec<Vec<usize>> {
+        let (kept, rows, cols) = self.matrix.solvable(&self.gnfs.fb, &self.relations);
+        dependencies(&rows, cols)
+            .into_iter()
+            .map(|dep| dep.into_iter().map(|i| kept[i]).collect())
+            .collect()
+    }
+
+    /// Takes the square roots for the dependency `dep`, returning a proper
+    /// factor of `n` if it gives one.
+    pub fn try_dependency(&self, dep: &[usize]) -> Option<Uint<LIMBS>> {
+        let dep: Vec<&Relation> = dep.iter().map(|&i| &self.relations[i]).collect();
+        sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &dep)
+    }
+}
 
 /// Factors `n`, an odd composite that isn't a prime power, with GNFS on
 /// one thread. Returns a proper factor, or `None` if none was found.
@@ -56,38 +172,20 @@ pub fn gnfs_with<const LIMBS: usize>(
     params: &Params,
     mut progress: impl FnMut(u64, usize) -> ControlFlow<()>,
 ) -> Result<Option<Uint<LIMBS>>, Stopped> {
-    let poly = Poly::select(n);
-    let fb = FactorBase::new(
-        &poly,
-        params.rational_bound,
-        params.algebraic_bound,
-        CHARACTERS,
-    );
-    let mut sieve = Sieve::new(&poly, &fb, params);
-    let mut relations: Vec<Relation> = Vec::new();
-    // Partial relations only start to combine once there are about as
-    // many relations as ideals in the factor bases.
-    let mut next_check = fb.rational.len() + fb.algebraic.len();
+    let gnfs = Gnfs::new(n, params);
+    let mut sieve = gnfs.sieve();
+    let mut relations = gnfs.relations();
     for b in 1.. {
-        relations.extend(sieve.line(b));
+        relations.add(sieve.line(b));
         if progress(b, relations.len()).is_break() {
             return Err(Stopped);
         }
-        if relations.len() < next_check {
-            continue;
-        }
-        next_check = relations.len() + relations.len() / 10;
-        let (rows, cols) = rows(&fb, &relations);
-        let (_, pruned, pruned_cols) = prune(&rows, cols);
-        if pruned.len() < pruned_cols + EXTRA {
-            continue;
-        }
-        for dep in dependencies(&rows, cols) {
-            let dep: Vec<&Relation> = dep.iter().map(|&i| &relations[i]).collect();
-            if let Some(f) = sqrt::factor(n, &poly, &dep) {
-                return Ok(Some(f));
-            }
+        if relations.is_ready() {
+            break;
         }
     }
-    Ok(None)
+    Ok(relations
+        .dependencies()
+        .iter()
+        .find_map(|dep| relations.try_dependency(dep)))
 }
