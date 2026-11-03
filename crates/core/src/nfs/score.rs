@@ -119,15 +119,15 @@ impl Murphy {
         self.rho[i] * (1.0 - t) + self.rho[i + 1] * t
     }
 
-    /// Murphy's E for `f` and `x − m`, at skew `skew`, with `f`'s α.
-    pub fn e(&self, f: &[i128], m: u128, skew: f64, alpha_f: f64, alpha_g: f64) -> f64 {
+    /// Murphy's E for `f` and `g = l·x − m`, given as `(m, l)`, at skew
+    /// `skew`, with each one's α.
+    pub fn e(&self, f: &[i128], (m, l): (f64, f64), skew: f64, alpha_f: f64, alpha_g: f64) -> f64 {
         let f: Vec<f64> = f.iter().map(|&c| c as f64).collect();
         let ls = log2(skew);
         let (rx, ry) = (
             exp2((self.log_area + ls) / 2.0),
             exp2((self.log_area - ls) / 2.0),
         );
-        let m = m as f64;
         let mut sum = 0.0;
         for k in 0..E_POINTS {
             let (c, s) = cos_sin(core::f64::consts::PI * (k as f64 + 0.5) / E_POINTS as f64);
@@ -139,7 +139,7 @@ impl Murphy {
                 yk *= y;
             }
             let lf = log2(v.abs().max(1.0)) + alpha_f;
-            let lg = log2((x - m * y).abs().max(1.0)) + alpha_g;
+            let lg = log2((l * x - m * y).abs().max(1.0)) + alpha_g;
             sum += self.rho(lf / self.log_bf) * self.rho(lg / self.log_bg);
         }
         sum / E_POINTS as f64

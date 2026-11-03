@@ -16,6 +16,7 @@
 //! sieve at every size so far.
 
 mod base;
+mod kleinjung;
 mod matrix;
 pub mod modp;
 mod params;

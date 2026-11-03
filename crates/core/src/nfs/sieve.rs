@@ -51,14 +51,14 @@ const FUDGE: f64 = 4.0;
 /// Wide enough for `F(a, b)` and `a − b·m` up to 400-bit `N`.
 pub(crate) type Wide = Uint<{ 512 / Limb::BITS as usize }>;
 
-/// A pair `(a, b)` with `a − b·m` and `F(a, b)` smooth.
+/// A pair `(a, b)` with `G(a, b) = l·a − m·b` and `F(a, b)` smooth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Relation {
     pub a: i64,
     pub b: u64,
-    /// Whether `a − b·m` is negative.
+    /// Whether `G(a, b)` is negative.
     pub negative: bool,
-    /// The primes of `|a − b·m|`, with repetition: factor-base primes and
+    /// The primes of `|G(a, b)|`, with repetition: factor-base primes and
     /// at most one larger one.
     pub rational: Vec<u64>,
     /// The primes of `|F(a, b)|`, with repetition: factor-base primes, the
@@ -371,11 +371,11 @@ impl<'a> Sieve<'a> {
         (r_slack, a_slack): (f64, f64),
     ) -> (u8, u8) {
         let half = (1i64 << self.log_i) / 2;
-        let m = self.poly.m as f64;
+        let (m, l) = (self.poly.m as f64, self.poly.l as f64);
         let ends = [x as i64 - half, (x + len) as i64 - half].map(|i| {
             let a = i as f64 * u.0 as f64 + j as f64 * v.0 as f64;
             let b = i as f64 * u.1 as f64 + j as f64 * v.1 as f64;
-            let rat = a - b * m;
+            let rat = l * a - b * m;
             let rl = if rat.abs() >= 1.0 {
                 log2(rat.abs())
             } else {
@@ -500,10 +500,11 @@ impl<'a> Sieve<'a> {
         if gcd(a.unsigned_abs(), b) != 1 {
             return None;
         }
-        // Rational side: a − b·m.
-        let bm = u128::from(b).checked_mul(self.poly.m)?;
-        let negative = i128::from(a) < bm as i128;
-        let mut v = wide((i128::from(a) - bm as i128).unsigned_abs());
+        // Rational side: l·a − b·m.
+        let bm = i128::try_from(u128::from(b).checked_mul(self.poly.m)?).ok()?;
+        let la = i128::try_from(self.poly.l).ok()?.checked_mul(a.into())?;
+        let negative = la < bm;
+        let mut v = wide(la.checked_sub(bm)?.unsigned_abs());
         let mut rational = Vec::new();
         self.rational.divide(a, b, x, r_hits, &mut v, &mut rational);
         if let Some(p) = cofactor(&v, self.rational.large_bound)? {

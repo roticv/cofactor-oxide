@@ -9,8 +9,9 @@
 //! `δ = ∏ (c·a − b·θ) · F′(θ)²` is a square in `ℤ[θ]`, and `S = √δ` is
 //! found modulo a prime `p` that stays prime in `ℤ[θ]`, then lifted by
 //! Newton's method modulo `p^(2^i)` until its coefficients are certain.
-//! Mapping `θ` to `c·m` gives `X = S(c·m)`, and on the rational side
-//! `Y = c^(k/2)·F′(c·m)·√∏ (a − b·m)`, with `X² ≡ Y² (mod N)`.
+//! Mapping `θ` to `c·m/l`, for the common root `m/l` of `f` and
+//! `g = l·x − m` modulo `N`, gives `X = S(c·m/l)`, and on the rational side
+//! `Y = c^(k/2)·F′(c·m/l)·√∏ (l·a − m·b) / l^(k/2)`, with `X² ≡ Y² (mod N)`.
 
 use alloc::collections::BTreeMap;
 use alloc::string::ToString;
@@ -140,11 +141,15 @@ fn field_sqrt(a: &[u64], f: &[u64], p: u64, q: u128) -> Option<Vec<u64>> {
     Some(r)
 }
 
-/// `Σ cᵢ·xⁱ mod n`.
-fn eval_mod(c: &[BigInt], x: &BigInt, n: &BigInt) -> BigInt {
-    c.iter()
-        .rev()
-        .fold(BigInt::zero(), |acc, ci| modulo(&(acc * x + ci), n))
+/// `Σ cᵢ·xⁱ·y^(d−1−i) mod n`, for `d` the number of coefficients `c`.
+fn eval_mod(c: &[BigInt], x: &BigInt, y: &BigInt, n: &BigInt) -> BigInt {
+    let mut yk = BigInt::one();
+    let mut acc = BigInt::zero();
+    for ci in c.iter().rev() {
+        acc = modulo(&(acc * x + ci * &yk), n);
+        yk = modulo(&(yk * y), n);
+    }
+    acc
 }
 
 /// The bits of the largest coefficient.
@@ -246,17 +251,21 @@ pub fn factor<const LIMBS: usize>(
     let delta = mul(&mul(&gamma, &df, &f), &df, &f);
     let s = algebraic_sqrt(&delta, &f, &lead)?;
 
+    // θ maps to c·m/l. Rather than invert l, both sides are multiplied by
+    // l^(d−1+k/2): X = S(c·m, l)·l^(k/2) and Y = c^(k/2)·F′(c·m, l)·∏ p^(e/2),
+    // with S and F′ homogenized to degree d − 1.
     let cm = modulo(&(&lead * BigInt::from(poly.m)), &nb);
-    let x = eval_mod(&s, &cm, &nb);
-    // Y = c^(k/2)·F′(c·m)·∏ p^(e/2).
+    let l = modulo(&BigInt::from(poly.l), &nb);
+    let half = BigInt::from(deps.len() / 2);
+    let x = modulo(&(eval_mod(&s, &cm, &l, &nb) * l.modpow(&half, &nb)), &nb);
     let mut exponents: BTreeMap<u64, u32> = BTreeMap::new();
     for r in deps {
         for &p in &r.rational {
             *exponents.entry(p).or_default() += 1;
         }
     }
-    let mut y = modulo(&lead, &nb).modpow(&BigInt::from(deps.len() / 2), &nb);
-    y = modulo(&(y * eval_mod(&df, &cm, &nb)), &nb);
+    let mut y = modulo(&lead, &nb).modpow(&half, &nb);
+    y = modulo(&(y * eval_mod(&df, &cm, &l, &nb)), &nb);
     for (p, e) in exponents {
         debug_assert!(e % 2 == 0, "odd exponent of {p}");
         y = modulo(

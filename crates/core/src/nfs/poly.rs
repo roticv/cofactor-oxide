@@ -17,6 +17,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::kleinjung;
 use super::modp::{eval, inv, reduce};
 use super::params::Params;
 use super::score::{Murphy, lognorm};
@@ -33,6 +34,17 @@ const OFFSETS: u64 = 4;
 
 /// Base-m candidates kept by size for optimizing.
 const FINALISTS: usize = 32;
+
+/// Kleinjung's candidates come from leading coefficients that are the
+/// first `KJ_LEADS` multiples of `KJ_STEP`, with `u` up to `KJ_SPREAD·P²`,
+/// at most `KJ_MAX` in all.
+const KJ_STEP: u64 = 12;
+const KJ_LEADS: u64 = 100;
+const KJ_SPREAD: u64 = 4;
+const KJ_MAX: usize = 256;
+
+/// Size-optimized candidates kept for root optimization.
+const ROOT_FINALISTS: usize = 16;
 
 /// Root optimization sieves rotations `(j₁·x + j₀)·g` with `|j₁| ≤ ROT1`
 /// (for degree 4 and up) and `|j₀| < ROT0`.
@@ -53,14 +65,16 @@ const SIZE_PASSES: usize = 8;
 /// α counts the roots modulo primes up to this.
 const ALPHA_PRIMES: u64 = 200;
 
-/// Two polynomials for GNFS: `f` of degree `d` and `x − m`, with
-/// `f(m) = N`.
+/// Two polynomials for GNFS: `f` of degree `d` and `g(x) = l·x − m`, with
+/// `F(m, l) = l^d·f(m/l) = N`, so that `m/l` is a common root modulo `N`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Poly {
     /// The coefficients of `f`, lowest degree first.
     pub f: Vec<i128>,
-    /// The common root.
+    /// `g`'s constant term, negated.
     pub m: u128,
+    /// `g`'s leading coefficient: 1 for base-m.
+    pub l: u128,
     /// How much wider the sieve region should be in `a` than in `b`: the
     /// `s` that makes `f`'s values smallest.
     pub skew: f64,
@@ -111,17 +125,33 @@ impl Poly {
         }
         candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
         candidates.truncate(FINALISTS);
-        let mut best: Option<Self> = None;
-        let mut seen: Vec<(Vec<i128>, u128)> = Vec::new();
-        for c in candidates {
-            // Nearby m often optimize to the same polynomial.
-            let (f, m) = size_optimize(&c.f, c.m, true);
-            if seen.contains(&(f.clone(), m)) {
-                continue;
+        // Kleinjung's candidates, whose a_{d−1} is small.
+        let p0 = kleinjung_prime(&candidates[0]);
+        let u_max = (KJ_SPREAD * p0 * p0) as i64;
+        let mut kj = 0;
+        for a in (KJ_STEP..=KJ_STEP * KJ_LEADS).step_by(KJ_STEP as usize) {
+            for (f, m, l) in kleinjung::candidates(n, d, a, p0, u_max) {
+                if kj < KJ_MAX {
+                    candidates.push(Self::new(f, m, l));
+                    kj += 1;
+                }
             }
-            seen.push((f.clone(), m));
-            for (f, m) in root_optimize(&f, m) {
-                let mut poly = Self::new(f, m);
+        }
+        // Size-optimize them all; nearby m often optimize to the same one.
+        let mut sized: Vec<Self> = Vec::new();
+        for c in candidates {
+            let (f, m) = size_optimize(&c.f, c.m, c.l, true);
+            let poly = Self::new(f, m, c.l);
+            if !sized.iter().any(|s| s.f == poly.f && s.m == poly.m) {
+                sized.push(poly);
+            }
+        }
+        sized.sort_by(|x, y| x.size.total_cmp(&y.size));
+        sized.truncate(ROOT_FINALISTS);
+        let mut best: Option<Self> = None;
+        for c in sized {
+            for (f, m) in root_optimize(&c.f, c.m, c.l) {
+                let mut poly = Self::new(f, m, c.l);
                 poly.rate(&murphy);
                 if best.as_ref().is_none_or(|b| poly.e > b.e) {
                     best = Some(poly);
@@ -131,12 +161,13 @@ impl Poly {
         best.expect("no polynomial")
     }
 
-    /// The pair `f`, `x − m`, with its skew and size.
-    fn new(f: Vec<i128>, m: u128) -> Self {
+    /// The pair `f`, `l·x − m`, with its skew and size.
+    fn new(f: Vec<i128>, m: u128, l: u128) -> Self {
         let (skew, size) = lognorm(&f);
         Self {
             f,
             m,
+            l,
             skew,
             size,
             alpha: 0.0,
@@ -147,8 +178,9 @@ impl Poly {
     /// Fills in α and Murphy's E.
     fn rate(&mut self, murphy: &Murphy) {
         self.alpha = alpha(&self.f);
-        let alpha_g = alpha(&[-(self.m as i128), 1]);
-        self.e = murphy.e(&self.f, self.m, self.skew, self.alpha, alpha_g);
+        let alpha_g = alpha(&[-(self.m as i128), self.l as i128]);
+        let g = (self.m as f64, self.l as f64);
+        self.e = murphy.e(&self.f, g, self.skew, self.alpha, alpha_g);
     }
 
     /// Murphy's E for these polynomials with `params`.
@@ -179,7 +211,7 @@ impl Poly {
                 digits[i + 1] += 1;
             }
         }
-        Some(Self::new(digits, m128))
+        Some(Self::new(digits, m128, 1))
     }
 
     /// The degree of `f`.
@@ -188,9 +220,18 @@ impl Poly {
     }
 }
 
-/// `f(x + k)` and the root `m − k`, or `None` on overflow.
-fn translate(f: &[i128], m: u128, k: i128) -> Option<(Vec<i128>, u128)> {
-    let m = (m as i128).checked_sub(k).filter(|&m| m > 1)?;
+/// The size of the primes `ℓ` in Kleinjung's `l = q·ℓ₁·ℓ₂`: about
+/// `m^(1/6)`, for a base-m candidate's `m`.
+fn kleinjung_prime(base: &Poly) -> u64 {
+    let bits = 128 - base.m.leading_zeros();
+    1u64 << ((bits + 3) / 6).clamp(6, 14)
+}
+
+/// `f(x + k)` and `g(x + k) = l·x − (m − l·k)`: the new `f` and `m`, or
+/// `None` on overflow.
+fn translate(f: &[i128], m: u128, l: u128, k: i128) -> Option<(Vec<i128>, u128)> {
+    let lk = (l as i128).checked_mul(k)?;
+    let m = (m as i128).checked_sub(lk).filter(|&m| m > 1)?;
     // Horner's rule with x + k for x: g ← g·(x + k) + cᵢ.
     let mut g: Vec<i128> = Vec::with_capacity(f.len());
     for &c in f.iter().rev() {
@@ -203,10 +244,10 @@ fn translate(f: &[i128], m: u128, k: i128) -> Option<(Vec<i128>, u128)> {
     Some((g, m as u128))
 }
 
-/// `f + j·xⁱ·(x − m)`, or `None` on overflow.
-fn rotate(f: &[i128], m: u128, i: usize, j: i128) -> Option<Vec<i128>> {
+/// `f + j·xⁱ·(l·x − m)`, or `None` on overflow.
+fn rotate(f: &[i128], m: u128, l: u128, i: usize, j: i128) -> Option<Vec<i128>> {
     let mut g = f.to_vec();
-    g[i + 1] = g[i + 1].checked_add(j)?;
+    g[i + 1] = g[i + 1].checked_add(j.checked_mul(l as i128)?)?;
     g[i] = g[i].checked_sub(j.checked_mul(m as i128)?)?;
     Some(g)
 }
@@ -215,7 +256,7 @@ fn rotate(f: &[i128], m: u128, i: usize, j: i128) -> Option<Vec<i128>> {
 /// `i ≤ d − 3` for the smallest size, by steps from `2^SIZE_STEPS` down to
 /// 1 in each in turn. Translation leaves the number of roots modulo each
 /// prime, and so α, as it is.
-fn size_optimize(f: &[i128], m: u128, rotations: bool) -> (Vec<i128>, u128) {
+fn size_optimize(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u128) {
     let d = f.len() - 1;
     let moves = if rotations { d.saturating_sub(2) } else { 0 };
     let (mut f, mut m) = (f.to_vec(), m);
@@ -228,9 +269,9 @@ fn size_optimize(f: &[i128], m: u128, rotations: bool) -> (Vec<i128>, u128) {
             for mv in 0..=moves {
                 for j in [step, -step] {
                     let next = if mv == 0 {
-                        translate(&f, m, j)
+                        translate(&f, m, l, j)
                     } else {
-                        rotate(&f, m, mv - 1, j).map(|g| (g, m))
+                        rotate(&f, m, l, mv - 1, j).map(|g| (g, m))
                     };
                     let Some((g, gm)) = next else { continue };
                     let s = lognorm(&g).1;
@@ -248,7 +289,7 @@ fn size_optimize(f: &[i128], m: u128, rotations: bool) -> (Vec<i128>, u128) {
     (f, m)
 }
 
-/// Sieves rotations `f + (j₁·x + j₀)·(x − m)` for the most roots modulo
+/// Sieves rotations `f + (j₁·x + j₀)·g` for the most roots modulo
 /// small primes, and returns the best few by size plus α, each
 /// size-optimized by translation.
 ///
@@ -256,7 +297,7 @@ fn size_optimize(f: &[i128], m: u128, rotations: bool) -> (Vec<i128>, u128) {
 /// exactly when `j₀ + j₁·x ≡ −f(x)/g(x) (mod p)`: for each `j₁`, an
 /// arithmetic progression of `j₀`. Each root lowers α by
 /// `p/(p + 1)·log₂ p/(p − 1)`.
-fn root_optimize(f: &[i128], m: u128) -> Vec<(Vec<i128>, u128)> {
+fn root_optimize(f: &[i128], m: u128, l: u128) -> Vec<(Vec<i128>, u128)> {
     let d = f.len() - 1;
     let rot1 = if d >= 4 { ROT1 } else { 0 };
     let width = 2 * ROT0 as usize;
@@ -266,8 +307,9 @@ fn root_optimize(f: &[i128], m: u128) -> Vec<(Vec<i128>, u128)> {
         let w = (p as f64 / (p + 1) as f64 * log2(p as f64) / (p - 1) as f64) as f32;
         let fp = reduce(f, p);
         let mp = (m % u128::from(p)) as u64;
+        let lp = (l % u128::from(p)) as u64;
         for x in 0..p {
-            let gx = (x + p - mp) % p;
+            let gx = (lp * x % p + p - mp) % p;
             if gx == 0 {
                 continue;
             }
@@ -292,8 +334,8 @@ fn root_optimize(f: &[i128], m: u128) -> Vec<(Vec<i128>, u128)> {
         .filter_map(|cell| {
             let j1 = (cell / width) as i128 - i128::from(rot1);
             let j0 = (cell % width) as i128 - i128::from(ROT0);
-            let g = rotate(&rotate(f, m, 1, j1)?, m, 0, j0)?;
-            let (g, gm) = size_optimize(&g, m, false);
+            let g = rotate(&rotate(f, m, l, 1, j1)?, m, l, 0, j0)?;
+            let (g, gm) = size_optimize(&g, m, l, false);
             Some((lognorm(&g).1 + alpha(&g), g, gm))
         })
         .collect();

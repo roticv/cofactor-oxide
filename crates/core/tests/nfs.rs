@@ -86,14 +86,19 @@ fn selected_polynomials_have_root_m() {
         let n = u(s);
         let poly = Poly::select(&n);
         assert_eq!(poly.degree(), degree(n.bits()));
-        // Translation and rotation keep f(m) = N exactly.
-        let m = BigInt::from(poly.m);
+        // Translation and rotation keep F(m, l) = N exactly.
+        let (m, l) = (BigInt::from(poly.m), BigInt::from(poly.l));
         let value: BigInt = poly
             .f
             .iter()
-            .rev()
-            .fold(BigInt::from(0), |acc, &c| acc * &m + BigInt::from(c));
-        assert_eq!(value, s.parse::<BigInt>().unwrap(), "f(m) ≠ N for {poly:?}");
+            .enumerate()
+            .map(|(i, &c)| BigInt::from(c) * m.pow(i as u32) * l.pow((poly.degree() - i) as u32))
+            .sum();
+        assert_eq!(
+            value,
+            s.parse::<BigInt>().unwrap(),
+            "F(m, l) ≠ N for {poly:?}"
+        );
         // Better by Murphy's E than plain base-m with leading coefficient 1.
         let params = Params::for_bits(n.bits());
         let plain = Poly::base_m(&n, &u(&m_plain(s, poly.degree())), poly.degree()).unwrap();
@@ -125,7 +130,12 @@ fn factor_base_primes_divide() {
     let fb = FactorBase::new(&poly, 100_000, 200_000, 40);
     assert_eq!(fb.rational.len(), Primes::new(2, 100_000).count());
     for q in &fb.rational {
-        assert_eq!(u128::from(q.r), poly.m % u128::from(q.p));
+        let p = u128::from(q.p);
+        if q.projective() {
+            assert_eq!(poly.l % p, 0);
+        } else {
+            assert_eq!((poly.l * u128::from(q.r) + p - poly.m % p) % p, 0, "{q:?}");
+        }
     }
     let lead = poly.f[poly.degree()];
     for q in &fb.algebraic {
@@ -154,7 +164,7 @@ fn factor_base_primes_divide() {
 /// infinity.
 fn check_relation(poly: &Poly, fb: &FactorBase, q: u64, rel: &Relation) {
     let (a, b) = (BigInt::from(rel.a), BigInt::from(rel.b));
-    let rational = &a - &b * BigInt::from(poly.m);
+    let rational = BigInt::from(poly.l) * &a - &b * BigInt::from(poly.m);
     assert_eq!(rational < BigInt::from(0), rel.negative, "{rel:?}");
     let product = |ps: &[u64]| {
         ps.iter()
@@ -252,14 +262,28 @@ fn relations_hold() {
 
 #[test]
 fn gnfs_factors() {
-    // 40 digits, two 20-digit primes.
-    let (n, p, q) = (
-        u("1176217249472123917871099760550263221639"),
-        u("98936812917358800691"),
-        u("11888570237800257629"),
-    );
-    let t = std::time::Instant::now();
-    let f = cofox_core::nfs::gnfs(&n).expect("no factor");
-    println!("{} bits: {f} in {:.2?}", n.bits(), t.elapsed());
-    assert!(f == p || f == q, "{n} gave {f}");
+    // 40 digits, with a base-m polynomial; 50, with one from Kleinjung's
+    // method, so that g = l·x − m with l > 1.
+    let cases = [
+        (
+            "1176217249472123917871099760550263221639",
+            "98936812917358800691",
+            "11888570237800257629",
+            false,
+        ),
+        (
+            "59858698299029333151760743317766029830337454377407",
+            "6005189888675219489059739",
+            "9967827730462411250327213",
+            true,
+        ),
+    ];
+    for (n, p, q, kleinjung) in cases {
+        let (n, p, q) = (u(n), u(p), u(q));
+        assert_eq!(Poly::select(&n).l > 1, kleinjung);
+        let t = std::time::Instant::now();
+        let f = cofox_core::nfs::gnfs(&n).expect("no factor");
+        println!("{} bits: {f} in {:.2?}", n.bits(), t.elapsed());
+        assert!(f == p || f == q, "{n} gave {f}");
+    }
 }

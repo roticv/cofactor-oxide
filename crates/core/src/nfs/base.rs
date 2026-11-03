@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::modp::{eval, reduce, roots};
+use super::modp::{eval, inv, reduce, roots};
 use super::poly::Poly;
 use crate::primes::Primes;
 use crate::qs::log2;
@@ -44,7 +44,7 @@ impl Prime {
 /// number field, not just of square norm.
 #[derive(Clone, Debug)]
 pub struct FactorBase {
-    /// Primes up to the rational bound, each with `m mod p`.
+    /// Primes up to the rational bound, each with the root of `g` mod `p`.
     pub rational: Vec<Prime>,
     /// Every root of `f` modulo each prime up to the algebraic bound.
     pub algebraic: Vec<Prime>,
@@ -57,9 +57,18 @@ impl FactorBase {
     pub fn new(poly: &Poly, rational_bound: u32, algebraic_bound: u32, characters: usize) -> Self {
         let f = &poly.f;
         let lead = f[f.len() - 1];
-        let m = poly.m;
+        // g(x) = l·x − m has the root m/l mod p, or one at infinity if p | l.
+        let (m, l) = (poly.m, poly.l);
         let rational = Primes::new(2, rational_bound.into())
-            .map(|p| Prime::new(p, (m % u128::from(p)) as u64))
+            .map(|p| {
+                let lp = (l % u128::from(p)) as u64;
+                let r = if lp == 0 {
+                    p
+                } else {
+                    (m % u128::from(p)) as u64 * inv(lp, p) % p
+                };
+                Prime::new(p, r)
+            })
             .collect();
         let mut algebraic = Vec::new();
         for p in Primes::new(2, algebraic_bound.into()) {
