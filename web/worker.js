@@ -9,8 +9,12 @@
 // - "collect" and then "relations": gathers the relations that the page
 //   forwards from the sieving workers, and finds the factor once there are
 //   enough. This runs in a worker of its own.
+// - "gnfs-collect", "gnfs-sieve" and "gnfs-relations": the same for the
+//   number field sieve. The collector chooses the polynomials, which the
+//   page passes to the sieving workers, and once there are enough
+//   relations it solves the matrix and tries dependencies one at a time.
 
-import init, { Collector, Sieve, factor } from "./pkg/cofox_wasm.js";
+import init, { Collector, GnfsCollector, GnfsSieve, Sieve, factor } from "./pkg/cofox_wasm.js";
 
 const ready = init();
 
@@ -41,6 +45,13 @@ self.onmessage = async (event) => {
         return self.postMessage({ id, ready: true });
       case "relations":
         return addRelations(message);
+      case "gnfs-collect":
+        collector = new GnfsCollector(message.n);
+        return self.postMessage({ id, poly: collector.poly() });
+      case "gnfs-sieve":
+        return runGnfsSieve(message);
+      case "gnfs-relations":
+        return addGnfsRelations(message);
     }
   } catch (err) {
     self.postMessage({ id, error: String(err?.message ?? err) });
@@ -95,4 +106,35 @@ function addRelations({ id, relations }) {
     self.postMessage({ id, solving: true });
     self.postMessage({ id, found: collector.finish() ?? null });
   }
+}
+
+function runGnfsSieve({ id, n, poly, worker, workers }) {
+  const sieve = new GnfsSieve(n, poly, worker, workers);
+  for (;;) {
+    const relations = sieve.sieve();
+    if (relations) self.postMessage({ id, gnfsRelations: relations });
+  }
+}
+
+function addGnfsRelations({ id, relations }) {
+  if (solving) return;
+  collector.add(relations);
+  const bits = collector.bits();
+  const ready = collector.is_ready();
+  const now = performance.now();
+  if (now - sent >= PROGRESS_MS || ready) {
+    sent = now;
+    const done = collector.relations();
+    self.postMessage({ id, progress: { method: "gnfs", bits, done, total: collector.ideals() } });
+  }
+  if (!ready) return;
+  solving = true;
+  self.postMessage({ id, solving: true });
+  const dependencies = collector.solve();
+  for (let i = 0; i < dependencies; i++) {
+    self.postMessage({ id, progress: { method: "gnfs-sqrt", bits, done: i, total: dependencies } });
+    const found = collector.try_dependency(i);
+    if (found !== undefined) return self.postMessage({ id, found });
+  }
+  self.postMessage({ id, found: null });
 }

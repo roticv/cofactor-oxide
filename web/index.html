@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>cofox · factor integers in your browser</title>
-  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho, Pollard p−1, Williams p+1, ECM, the quadratic sieve and BPSW, running entirely in your browser.">
+  <meta name="description" content="Integer factorization in Rust, compiled to WebAssembly. Trial division, Pollard rho, Pollard p−1, Williams p+1, ECM, the quadratic sieve, the number field sieve and BPSW, running entirely in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23b4532a'/%3E%3Cpath d='M10 10l12 12M22 10L10 22' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -291,9 +291,9 @@
           <li><b>Elliptic curve method</b><span class="badge done">done</span>
             <span class="desc">Montgomery curves with a two-stage search, in levels for factors of up to 25 digits, shared across Web Workers. Each curve is a fresh chance, so larger factors turn up sometimes too.</span></li>
           <li><b>Self-initializing quadratic sieve</b><span class="badge done">done</span>
-            <span class="desc">Splits what ECM leaves, up to 120 digits, with the sieving shared across Web Workers and block Lanczos for the linear algebra. ECM stops sooner when the sieve follows: at about 30% of the composite's digits.</span></li>
-          <li><b>Number field sieve</b><span class="badge">planned</span>
-            <span class="desc">The fastest known method for composites beyond about 100 digits.</span></li>
+            <span class="desc">Splits what ECM leaves, up to about 105 digits, with the sieving shared across Web Workers and block Lanczos for the linear algebra. ECM stops sooner when the sieve follows: at about 30% of the composite's digits.</span></li>
+          <li><b>Number field sieve</b><span class="badge done">done</span>
+            <span class="desc">The fastest known method beyond about 100 digits, and here for composites from about 105 digits: polynomials from Kleinjung's method, a lattice siever shared across Web Workers, filtering and block Lanczos, and square roots by Newton's method. The matrix and square roots run on one worker. Very slow at these sizes in a browser: hours.</span></li>
         </ul>
         <p style="margin-top: 14px">
           WebAssembly lacks a 64×64→128-bit multiply, so the browser build runs
@@ -327,10 +327,15 @@
     // its share of the ECM curves.
     const WORKERS = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
 
-    // Composites that ECM leaves go to the quadratic sieve, up to this
-    // size. Below 81 bits, rho always splits them first.
+    // Composites that ECM leaves go to the quadratic sieve from this size.
+    // Below 81 bits, rho always splits them first.
     const QS_MIN_BITS = 81;
-    const QS_MAX_BITS = 400;
+    // From this size, the number field sieve runs instead: about 105
+    // digits, a little past where it overtakes the quadratic sieve
+    // natively, since here its matrix and square roots get one worker.
+    // `?gnfs=BITS` in the URL lowers it, down to 130 bits, to try the
+    // number field sieve on numbers that take minutes rather than hours.
+    const GNFS_MIN_BITS = Math.max(130, Number(new URLSearchParams(location.search).get("gnfs")) || 350);
 
     const workers = [];
     let nextId = 0;
@@ -463,6 +468,67 @@
       });
     }
 
+    // Runs the number field sieve: one more worker chooses the polynomials
+    // and collects the relations that every worker sieves, then solves the
+    // matrix and takes square roots. Resolves with a proper factor of n, or
+    // null if there is none to find.
+    function runGnfs(n) {
+      return new Promise((resolve, reject) => {
+        const id = nextId++;
+        const bits = n.toString(2).length;
+        const collector = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+        let sieving = false;
+        const stopSieving = () => {
+          if (sieving) for (let i = 0; i < WORKERS; i++) restart(i);
+          sieving = false;
+        };
+        const stop = () => {
+          collector.terminate();
+          stopSieving();
+        };
+        const answer = (value) => {
+          stop();
+          resolve(value === null ? null : BigInt(value));
+        };
+        setLabel(`Number field sieve: choosing polynomials for a ${bits}-bit composite…`);
+        collector.onmessage = (event) => {
+          const data = event.data;
+          if (data.error) {
+            stop();
+            reject(new Error(data.error));
+          } else if (data.poly) {
+            sieving = true;
+            workers.forEach((worker, index) => {
+              worker.postMessage({ id, type: "gnfs-sieve", n: n.toString(), poly: data.poly, worker: index, workers: WORKERS });
+            });
+          } else if (data.progress) {
+            setLabel(describe([data.progress]));
+          } else if (data.solving) {
+            stopSieving();
+            setLabel(`Number field sieve: filtering and solving the matrix for a ${bits}-bit composite…`);
+          } else if ("found" in data) {
+            answer(data.found);
+          }
+        };
+        stage = {
+          id,
+          cancel() {
+            stop();
+            reject(CANCELLED);
+          },
+          onMessage(index, data) {
+            if (data.gnfsRelations) {
+              collector.postMessage({ type: "gnfs-relations", relations: data.gnfsRelations });
+            } else if (data.error) {
+              stop();
+              reject(new Error(data.error));
+            }
+          },
+        };
+        collector.postMessage({ id, type: "gnfs-collect", n: n.toString() });
+      });
+    }
+
     const compare = (a, b) => (BigInt(a.value) < BigInt(b.value) ? -1 : BigInt(a.value) > BigInt(b.value) ? 1 : 0);
 
     // The pipeline up to ECM, then the quadratic sieve on each composite
@@ -472,8 +538,8 @@
       for (const f of await runPipeline(n, ecmDigits)) {
         const value = BigInt(f.value);
         const bits = value.toString(2).length;
-        const sieve = !f.prime && bits >= QS_MIN_BITS && bits <= QS_MAX_BITS;
-        const d = sieve ? await runQs(value) : null;
+        const sieve = !f.prime && bits >= QS_MIN_BITS;
+        const d = !sieve ? null : bits >= GNFS_MIN_BITS ? await runGnfs(value) : await runQs(value);
         if (d) {
           factors.push(...(await factorAll(d, ecmDigits)), ...(await factorAll(value / d, ecmDigits)));
         } else {
@@ -499,6 +565,12 @@
       const first = events[0];
       if (first?.method === "qs") {
         return `Quadratic sieve: ${first.done} of ${first.total} relations on a ${first.bits}-bit composite…`;
+      }
+      if (first?.method === "gnfs") {
+        return `Number field sieve: ${first.done} relations for ${first.total} ideals on a ${first.bits}-bit composite…`;
+      }
+      if (first?.method === "gnfs-sqrt") {
+        return `Number field sieve: square roots for dependency ${first.done + 1} of ${first.total}, on a ${first.bits}-bit composite…`;
       }
       const names = { rho: "Pollard rho", "p-1": "Pollard p−1", "p+1": "Williams p+1" };
       return first ? `${names[first.method]} on a ${first.bits}-bit composite…` : "Factoring…";
@@ -674,7 +746,7 @@
         card.append(el("p", "note ok", "Prime (Baillie–PSW)."));
       } else if (composites > 0) {
         const note = el("p", "note warn",
-          `The dashed factor is composite, but ECM found no factor of up to about ${ecmDigits} digits, and it's too large for the quadratic sieve here (up to 120 digits).`);
+          `The dashed factor is composite, but neither ECM, up to about ${ecmDigits}-digit factors, nor the sieve split it.`);
         card.append(note);
         if (ecmDigits < ECM_MAX_DIGITS) {
           const deeper = el("button", "ghost", `Search for ${ecmDigits + 5}-digit factors (about 4× longer)`);

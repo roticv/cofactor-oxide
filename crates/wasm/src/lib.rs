@@ -2,6 +2,10 @@
 
 use std::ops::ControlFlow;
 
+use cofox_core::nfs::{
+    Gnfs, Params, Relations, Sieve as NfsSieve, parse_poly, parse_relation, poly_text,
+    relation_line,
+};
 use cofox_core::qs::{QsCollector, QsJob, QsSieve, Start};
 use cofox_core::{Config, Progress, QsMode};
 use wasm_bindgen::prelude::*;
@@ -153,5 +157,130 @@ impl Collector {
     /// every dependency gave a trivial one.
     pub fn finish(&self) -> Option<String> {
         self.collector.as_ref().and_then(QsCollector::finish)
+    }
+}
+
+/// The widest numbers the bindings take: 512 bits.
+type Wide = cofox_core::Uint<16>;
+
+/// One Web Worker's share of the number field sieve: special-q blocks
+/// `worker`, `worker + workers`, … with the polynomials the
+/// [`GnfsCollector`] chose.
+#[wasm_bindgen]
+pub struct GnfsSieve {
+    gnfs: Gnfs<16>,
+    sieve: NfsSieve,
+    next_block: u64,
+    workers: u64,
+}
+
+#[wasm_bindgen]
+impl GnfsSieve {
+    /// A sieve for `n` with the polynomials in `poly`, as
+    /// [`GnfsCollector::poly`] gives them.
+    #[wasm_bindgen(constructor)]
+    pub fn new(n: &str, poly: &str, worker: u32, workers: u32) -> Result<GnfsSieve, JsError> {
+        let n: Wide = n.trim().parse()?;
+        let params = Params::for_bits(n.bits());
+        let poly = parse_poly(&n, poly, &params)
+            .ok_or_else(|| JsError::new("not a polynomial pair for this number"))?;
+        let gnfs = Gnfs::with_poly(&n, &params, poly);
+        let sieve = gnfs.sieve();
+        Ok(GnfsSieve {
+            gnfs,
+            sieve,
+            next_block: worker.into(),
+            workers: workers.max(1).into(),
+        })
+    }
+
+    /// Sieves this worker's next block of special-q, returning the
+    /// relations as lines of text for [`GnfsCollector::add`].
+    pub fn sieve(&mut self) -> String {
+        let mut text = String::new();
+        for (q, r) in self.gnfs.special_qs(self.next_block) {
+            for rel in self.sieve.special_q(q, r) {
+                text += &relation_line(&rel);
+                text.push('\n');
+            }
+        }
+        self.next_block += self.workers;
+        text
+    }
+}
+
+/// Chooses the polynomials for the number field sieve, gathers the
+/// relations from every [`GnfsSieve`], then solves the matrix and takes
+/// square roots, one dependency at a time.
+#[wasm_bindgen]
+pub struct GnfsCollector {
+    relations: Relations<16>,
+    poly: String,
+    ideals: u32,
+    bits: u32,
+    dependencies: Vec<Vec<usize>>,
+}
+
+#[wasm_bindgen]
+impl GnfsCollector {
+    #[wasm_bindgen(constructor)]
+    pub fn new(n: &str) -> Result<GnfsCollector, JsError> {
+        let n: Wide = n.trim().parse()?;
+        let gnfs = Gnfs::new(&n, &Params::for_bits(n.bits()));
+        let fb = gnfs.factor_base();
+        Ok(GnfsCollector {
+            poly: poly_text(&n, gnfs.poly()),
+            ideals: (fb.rational.len() + fb.algebraic.len()) as u32,
+            bits: n.bits(),
+            relations: gnfs.relations(),
+            dependencies: Vec::new(),
+        })
+    }
+
+    /// The polynomials chosen, for each [`GnfsSieve`].
+    pub fn poly(&self) -> String {
+        self.poly.clone()
+    }
+
+    pub fn bits(&self) -> u32 {
+        self.bits
+    }
+
+    /// The ideals in the factor bases, which the relations must outnumber
+    /// after pruning.
+    pub fn ideals(&self) -> u32 {
+        self.ideals
+    }
+
+    /// Adds the relations in `text`, from [`GnfsSieve::sieve`]. Lines that
+    /// aren't relations for these polynomials are skipped.
+    pub fn add(&mut self, text: &str) {
+        let poly = self.relations.poly().clone();
+        self.relations
+            .add(text.lines().filter_map(|line| parse_relation(&poly, line)));
+    }
+
+    /// The distinct relations so far.
+    pub fn relations(&self) -> u32 {
+        self.relations.len() as u32
+    }
+
+    /// Whether there are enough relations to solve the matrix.
+    pub fn is_ready(&mut self) -> bool {
+        self.relations.is_ready()
+    }
+
+    /// Filters and solves the matrix, returning how many dependencies it
+    /// found for [`GnfsCollector::try_dependency`].
+    pub fn solve(&mut self) -> u32 {
+        self.dependencies = self.relations.dependencies();
+        self.dependencies.len() as u32
+    }
+
+    /// The square roots for dependency `i`: a proper factor, or
+    /// `undefined` if it gives none.
+    pub fn try_dependency(&self, i: u32) -> Option<String> {
+        let dep = self.dependencies.get(i as usize)?;
+        self.relations.try_dependency(dep).map(|f| f.to_string())
     }
 }

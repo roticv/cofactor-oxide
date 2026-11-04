@@ -27,8 +27,8 @@ mod poly;
 mod score;
 mod sieve;
 mod sqrt;
+mod store;
 
-use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
@@ -43,6 +43,7 @@ use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, split};
 use crate::qs::dependencies_post;
 use matrix::{Matrix, characters};
+use store::{Seen, Store};
 
 /// Rows beyond the columns, after pruning, before solving.
 const EXTRA: usize = 64;
@@ -111,7 +112,7 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
     }
 
     /// A sieve for this number.
-    pub fn sieve(&self) -> Sieve<'_> {
+    pub fn sieve(&self) -> Sieve {
         Sieve::new(&self.poly, &self.fb, &self.params)
     }
 
@@ -124,12 +125,13 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
         special_qs(&self.poly, start, start + Q_BLOCK)
     }
 
-    /// An empty collection of relations for this number.
-    pub fn relations(&self) -> Relations<'_, LIMBS> {
+    /// An empty collection of relations for this number, with its own copy
+    /// of the polynomials and factor bases.
+    pub fn relations(&self) -> Relations<LIMBS> {
         Relations {
-            gnfs: self,
-            relations: Vec::new(),
-            seen: BTreeSet::new(),
+            gnfs: self.clone(),
+            store: Store::new(),
+            seen: Seen::default(),
             matrix: Matrix::new(&self.fb),
             // Partial relations only start to combine once there are about
             // as many relations as ideals in the factor bases.
@@ -141,41 +143,44 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
 
 /// The relations found so far for one number, and their matrix.
 #[derive(Clone, Debug)]
-pub struct Relations<'a, const LIMBS: usize> {
-    gnfs: &'a Gnfs<LIMBS>,
-    relations: Vec<Relation>,
+pub struct Relations<const LIMBS: usize> {
+    gnfs: Gnfs<LIMBS>,
+    store: Store,
     /// The pairs `(a, b)` so far, since special-q lattices overlap.
-    seen: BTreeSet<(i64, u64)>,
+    seen: Seen,
     matrix: Matrix,
     next_check: usize,
     ready: bool,
 }
 
-impl<const LIMBS: usize> Relations<'_, LIMBS> {
+impl<const LIMBS: usize> Relations<LIMBS> {
+    /// The polynomials the relations are for.
+    pub fn poly(&self) -> &Poly {
+        &self.gnfs.poly
+    }
+
     /// Adds `relations`, skipping any already found.
     pub fn add(&mut self, relations: impl IntoIterator<Item = Relation>) {
         for rel in relations {
-            if !self.seen.insert((rel.a, rel.b)) {
-                continue;
+            if self.seen.insert(rel.a, rel.b) && self.store.push(&rel) {
+                self.matrix.push(&self.gnfs.fb, &rel);
             }
-            self.matrix.push(&self.gnfs.fb, &rel);
-            self.relations.push(rel);
         }
     }
 
     pub fn len(&self) -> usize {
-        self.relations.len()
+        self.store.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.relations.is_empty()
+        self.store.len() == 0
     }
 
     /// Whether the matrix has more rows than columns after pruning. Only
     /// checked every 10% more relations.
     pub fn is_ready(&mut self) -> bool {
-        if !self.ready && self.relations.len() >= self.next_check {
-            self.next_check = self.relations.len() + self.relations.len() / 10;
+        if !self.ready && self.len() >= self.next_check {
+            self.next_check = self.len() + self.len() / 10;
             self.ready = self.matrix.ready(CHARACTERS + POST_ROWS, EXTRA);
         }
         self.ready
@@ -197,7 +202,7 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
             .map(|i| {
                 kept[pieces[i]..pieces[i + 1]]
                     .iter()
-                    .map(|&r| characters(fb, &self.relations[r]))
+                    .map(|&r| characters(fb, self.store.ab(r)))
                     .collect::<Vec<_>>()
             })
             .concat();
@@ -244,7 +249,8 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
     /// [`Relations::try_dependency`], with the large products split by
     /// `par`.
     pub fn try_dependency_with(&self, dep: &[usize], par: &impl Parallel) -> Option<Uint<LIMBS>> {
-        let dep: Vec<&Relation> = dep.iter().map(|&i| &self.relations[i]).collect();
+        let dep: Vec<Relation> = dep.iter().map(|&i| self.store.get(i)).collect();
+        let dep: Vec<&Relation> = dep.iter().collect();
         sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &dep, par)
     }
 }

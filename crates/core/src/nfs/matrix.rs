@@ -35,7 +35,10 @@ pub fn root_of(rel: &Relation, p: u64) -> u64 {
 /// itself, with no cycle finding.
 #[derive(Clone, Debug)]
 pub struct Matrix {
-    rows: Vec<Vec<u32>>,
+    /// The rows' columns, one row after another.
+    entries: Vec<u32>,
+    /// Where each row starts, and where the last ends.
+    starts: Vec<usize>,
     cols: usize,
     large: BTreeMap<(u64, u64), u32>,
 }
@@ -43,7 +46,8 @@ pub struct Matrix {
 impl Matrix {
     pub fn new(fb: &FactorBase) -> Self {
         Self {
-            rows: Vec::new(),
+            entries: Vec::new(),
+            starts: vec![0],
             cols: FIXED + fb.rational.len() + fb.algebraic.len(),
             large: BTreeMap::new(),
         }
@@ -85,15 +89,23 @@ impl Matrix {
             });
         }
         row.sort_unstable();
-        let mut odd = Vec::with_capacity(row.len());
+        let start = self.entries.len();
         for c in row {
-            if odd.last() == Some(&c) {
-                odd.pop();
+            if self.entries.len() > start && self.entries.last() == Some(&c) {
+                self.entries.pop();
             } else {
-                odd.push(c);
+                self.entries.push(c);
             }
         }
-        self.rows.push(odd);
+        self.starts.push(self.entries.len());
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn row(&self, r: usize) -> &[u32] {
+        &self.entries[self.starts[r]..self.starts[r + 1]]
     }
 
     /// Removes rows with a column no other row has, until none are left.
@@ -102,7 +114,7 @@ impl Matrix {
     fn prune(&self) -> (Vec<bool>, usize, usize) {
         // Each column's rows, and its weight among the rows still alive.
         let mut weight = vec![0u32; self.cols];
-        for &c in self.rows.iter().flatten() {
+        for &c in &self.entries {
             weight[c as usize] += 1;
         }
         let mut start = vec![0usize; self.cols + 1];
@@ -111,15 +123,15 @@ impl Matrix {
         }
         let mut fill = start.clone();
         let mut by_col = vec![0u32; start[self.cols]];
-        for (r, row) in self.rows.iter().enumerate() {
-            for &c in row {
+        for r in 0..self.len() {
+            for &c in self.row(r) {
                 by_col[fill[c as usize]] = r as u32;
                 fill[c as usize] += 1;
             }
         }
-        let mut alive = vec![true; self.rows.len()];
+        let mut alive = vec![true; self.len()];
         let mut singles: Vec<usize> = (0..self.cols).filter(|&c| weight[c] == 1).collect();
-        let mut rows = self.rows.len();
+        let mut rows = self.len();
         let mut cols = weight.iter().filter(|&&w| w > 0).count();
         while let Some(c) = singles.pop() {
             let Some(&r) = by_col[start[c]..start[c + 1]]
@@ -130,7 +142,7 @@ impl Matrix {
             };
             alive[r as usize] = false;
             rows -= 1;
-            for &c in &self.rows[r as usize] {
+            for &c in self.row(r as usize) {
                 let c = c as usize;
                 weight[c] -= 1;
                 match weight[c] {
@@ -154,19 +166,19 @@ impl Matrix {
     /// number of columns.
     pub fn pruned(&self) -> (Vec<usize>, Vec<Vec<u32>>, usize) {
         let (alive, _, _) = self.prune();
-        let kept: Vec<usize> = (0..self.rows.len()).filter(|&r| alive[r]).collect();
-        let rows = kept.iter().map(|&r| self.rows[r].clone()).collect();
+        let kept: Vec<usize> = (0..self.len()).filter(|&r| alive[r]).collect();
+        let rows = kept.iter().map(|&r| self.row(r).to_vec()).collect();
         (kept, rows, self.cols)
     }
 }
 
-/// The quadratic characters of `rel`, a bit for each of `fb`'s that is −1:
-/// the Legendre symbol of `a − b·s` mod `q`.
-pub fn characters(fb: &FactorBase, rel: &Relation) -> u64 {
+/// The quadratic characters of the pair `(a, b)`, a bit for each of
+/// `fb`'s that is −1: the Legendre symbol of `a − b·s` mod `q`.
+pub fn characters(fb: &FactorBase, (a, b): (i64, u64)) -> u64 {
     fb.characters.iter().enumerate().fold(0, |mask, (i, c)| {
         let q = u64::from(c.p);
-        let bs = i128::from(rel.b % q) * i128::from(c.r);
-        let v = (i128::from(rel.a) - bs).rem_euclid(q.into()) as u64;
+        let bs = i128::from(b % q) * i128::from(c.r);
+        let v = (i128::from(a) - bs).rem_euclid(q.into()) as u64;
         mask | u64::from(pow_mod(v, (q - 1) / 2, q) == q - 1) << i
     })
 }

@@ -413,8 +413,8 @@ fn walk(q: &Prime, [a, ja, b, jb]: [u32; 4], log_i: u32) -> Walk {
 }
 
 /// Sieves special-q lattices.
-pub struct Sieve<'a> {
-    poly: &'a Poly,
+pub struct Sieve {
+    poly: Poly,
     log_i: u32,
     log_j: u32,
     rational: Side,
@@ -423,13 +423,13 @@ pub struct Sieve<'a> {
     marked: Vec<bool>,
 }
 
-impl<'a> Sieve<'a> {
-    pub fn new(poly: &'a Poly, fb: &'a FactorBase, params: &Params) -> Self {
+impl Sieve {
+    pub fn new(poly: &Poly, fb: &FactorBase, params: &Params) -> Self {
         let log_i = params.log_i;
         let log_j = log_i - 1;
         let slab = 1usize << SLAB_BITS.min(log_i + log_j).max(log_i);
         Self {
-            poly,
+            poly: poly.clone(),
             log_i,
             log_j,
             rational: Side::new(&fb.rational, params, slab),

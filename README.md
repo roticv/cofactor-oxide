@@ -12,9 +12,10 @@ short, which is also the name of the command-line tool.
 > self-initializing quadratic sieve and the BPSW primality test. ECM finds
 > factors up to about 25 digits by default (more with `--ecm`), and the
 > quadratic sieve splits what is left up to 120 digits. Both run on every
-> core, natively and in the browser. GNFS works end to end in the CLI with
-> `--gnfs`: it factored RSA-100 in 29 minutes on six threads, where the
-> quadratic sieve takes about 20 on ten.
+> core, natively and in the browser. The number field sieve works end to
+> end in the CLI with `--gnfs`, where it factored RSA-100 in 29 minutes on
+> six threads (the quadratic sieve takes about 20 on ten), and in the
+> browser, which uses it from about 105 digits.
 
 ## Goals
 
@@ -95,10 +96,15 @@ number, nothing to install. Expect it to be slower than the native binary:
   only works when the page is served with cross-origin isolation headers. Work
   can also be split across Web Workers.
 - **Memory limits.** 32-bit Wasm can address at most 4 GiB. That's plenty for
-  ECM and QS, but the linear algebra step of a large GNFS job may not fit.
+  ECM and QS. GNFS keeps its relations packed, so that the collecting
+  worker needs about 1.5 GB at 90 digits, but much past RSA-100 it won't
+  fit.
 
-The likely outcome is that the browser handles trial division, p±1, ECM and
-QS comfortably, while large GNFS jobs are a job for the native binary.
+In practice the browser handles trial division, p±1, ECM and QS
+comfortably. It runs GNFS too, from about 105 digits (`?gnfs=BITS` in the
+URL lowers that, to try it on smaller numbers), but with the matrix and
+square roots on one worker and everything about 3× slower, jobs of that
+size take hours: they're a job for the native binary.
 
 GPUs were measured too: [`experiments/gpu-ecm`](experiments/gpu-ecm)
 benchmarks ECM stage 1 on an Apple M4's GPU through Metal. It runs about 3×
@@ -193,7 +199,8 @@ Every push to `main` also builds the demo and deploys it to GitHub Pages at
 - [x] Williams p+1 (two stages, baby-step giant-step stage 2)
 - [x] ECM (Montgomery curves, Suyama parametrization, two stages)
 - [x] Self-initializing quadratic sieve (SIQS), with block Lanczos
-- [ ] GNFS
+- [x] GNFS: Kleinjung polynomials, lattice sieve, filtering, block Lanczos,
+      Newton square root; in the CLI and the browser
 - [x] Native CLI
 - [x] Wasm bindings and browser demo
 - [x] Parallel ECM and sieving: threads in the CLI, Web Workers in the browser
