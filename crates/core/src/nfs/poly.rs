@@ -23,6 +23,7 @@ use super::params::Params;
 use super::score::{Murphy, lognorm};
 use crate::arith::{Limb, Uint};
 use crate::factor::root;
+use crate::parallel::{Parallel, Serial, map_dynamic};
 use crate::primes::Primes;
 use crate::qs::log2;
 
@@ -36,20 +37,39 @@ const OFFSETS: u64 = 4;
 const FINALISTS: usize = 32;
 
 /// Kleinjung's candidates come from leading coefficients that are the
-/// first `KJ_LEADS` multiples of `KJ_STEP`, with `u` up to `KJ_SPREAD·P²`,
-/// at most `KJ_MAX` in all.
+/// first multiples of `KJ_STEP`, as many as [`Effort`] says, with `u` up
+/// to `KJ_SPREAD·P²`, at most `KJ_MAX` in all.
 const KJ_STEP: u64 = 12;
-const KJ_LEADS: u64 = 100;
 const KJ_SPREAD: u64 = 4;
-const KJ_MAX: usize = 256;
+const KJ_MAX: usize = 20000;
 
 /// Size-optimized candidates kept for root optimization.
-const ROOT_FINALISTS: usize = 16;
+const ROOT_FINALISTS: usize = 32;
 
-/// Root optimization sieves rotations `(j₁·x + j₀)·g` with `|j₁| ≤ ROT1`
-/// (for degree 4 and up) and `|j₀| < ROT0`.
-const ROT1: i64 = 4;
-const ROT0: i64 = 1 << 12;
+/// How hard to search, by the size of `N`: the leading coefficients for
+/// Kleinjung's method, and the rotations `(j₁·x + j₀)·g` root optimization
+/// sieves, `|j₁| ≤ rot1` (for degree 4 and up) and `|j₀| < rot0`. The
+/// search grows with the time sieving will take, from the small settings
+/// below 210 bits to the full ones from 290; at 90 and 100 digits, the
+/// full ones made sieving a third and three fifths faster.
+#[derive(Clone, Copy, Debug)]
+struct Effort {
+    leads: u64,
+    rot1: i64,
+    rot0: i64,
+}
+
+impl Effort {
+    fn for_bits(bits: u32) -> Self {
+        // 0 up to 210 bits, 4 from 290.
+        let step = (bits.saturating_sub(210) / 20).min(4);
+        Self {
+            leads: (125 << step).min(2000),
+            rot1: 4 << step.saturating_sub(2),
+            rot0: 1 << (12 + step),
+        }
+    }
+}
 
 /// Rotations with the best α kept for scoring by size.
 const ROOT_CELLS: usize = 32;
@@ -110,6 +130,12 @@ impl Poly {
     /// Panics if `m` doesn't fit in 96 bits, which happens only past
     /// about 480 bits at degree 5.
     pub fn select<const LIMBS: usize>(n: &Uint<LIMBS>) -> Self {
+        Self::select_with(n, &Serial)
+    }
+
+    /// [`Poly::select`], with Kleinjung's search, size optimization and
+    /// root optimization shared out by `par`.
+    pub fn select_with<const LIMBS: usize>(n: &Uint<LIMBS>, par: &impl Parallel) -> Self {
         let d = degree(n.bits());
         let murphy = Murphy::new(&Params::for_bits(n.bits()));
         let mut candidates: Vec<Self> = Vec::new();
@@ -128,37 +154,42 @@ impl Poly {
         // Kleinjung's candidates, whose a_{d−1} is small.
         let p0 = kleinjung_prime(&candidates[0]);
         let u_max = (KJ_SPREAD * p0 * p0) as i64;
-        let mut kj = 0;
-        for a in (KJ_STEP..=KJ_STEP * KJ_LEADS).step_by(KJ_STEP as usize) {
-            for (f, m, l) in kleinjung::candidates(n, d, a, p0, u_max) {
-                if kj < KJ_MAX {
-                    candidates.push(Self::new(f, m, l));
-                    kj += 1;
-                }
-            }
-        }
+        let effort = Effort::for_bits(n.bits());
+        let found = map_dynamic(par, effort.leads as usize, |i| {
+            kleinjung::candidates(n, d, KJ_STEP * (i as u64 + 1), p0, u_max)
+        });
+        candidates.extend(
+            found
+                .into_iter()
+                .flatten()
+                .take(KJ_MAX)
+                .map(|(f, m, l)| Self::new(f, m, l)),
+        );
         // Size-optimize them all; nearby m often optimize to the same one.
-        let mut sized: Vec<Self> = Vec::new();
-        for c in candidates {
+        let mut sized = map_dynamic(par, candidates.len(), |i| {
+            let c = &candidates[i];
             let (f, m) = size_optimize(&c.f, c.m, c.l, true);
-            let poly = Self::new(f, m, c.l);
-            if !sized.iter().any(|s| s.f == poly.f && s.m == poly.m) {
-                sized.push(poly);
-            }
-        }
+            Self::new(f, m, c.l)
+        });
         sized.sort_by(|x, y| x.size.total_cmp(&y.size));
+        sized.dedup_by(|x, y| x.f == y.f && x.m == y.m);
         sized.truncate(ROOT_FINALISTS);
-        let mut best: Option<Self> = None;
-        for c in sized {
-            for (f, m) in root_optimize(&c.f, c.m, c.l) {
-                let mut poly = Self::new(f, m, c.l);
-                poly.rate(&murphy);
-                if best.as_ref().is_none_or(|b| poly.e > b.e) {
-                    best = Some(poly);
-                }
-            }
-        }
-        best.expect("no polynomial")
+        let rated = map_dynamic(par, sized.len(), |i| {
+            let c = &sized[i];
+            root_optimize(&c.f, c.m, c.l, effort)
+                .into_iter()
+                .map(|(f, m)| {
+                    let mut poly = Self::new(f, m, c.l);
+                    poly.rate(&murphy);
+                    poly
+                })
+                .collect::<Vec<_>>()
+        });
+        rated
+            .into_iter()
+            .flatten()
+            .reduce(|best, poly| if poly.e > best.e { poly } else { best })
+            .expect("no polynomial")
     }
 
     /// The pair `f`, `l·x − m`, with its skew and size.
@@ -232,7 +263,7 @@ impl Poly {
 /// `m^(1/6)`, for a base-m candidate's `m`.
 fn kleinjung_prime(base: &Poly) -> u64 {
     let bits = 128 - base.m.leading_zeros();
-    1u64 << ((bits + 3) / 6).clamp(6, 14)
+    1u64 << ((bits + 3) / 6 + 1).clamp(6, 15)
 }
 
 /// `f(x + k)` and `g(x + k) = l·x − (m − l·k)`: the new `f` and `m`, or
@@ -305,43 +336,70 @@ fn size_optimize(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u
 /// exactly when `j₀ + j₁·x ≡ −f(x)/g(x) (mod p)`: for each `j₁`, an
 /// arithmetic progression of `j₀`. Each root lowers α by
 /// `p/(p + 1)·log₂ p/(p − 1)`.
-fn root_optimize(f: &[i128], m: u128, l: u128) -> Vec<(Vec<i128>, u128)> {
+/// A small prime for the root sieve: its weight in α, and the pairs
+/// `(x, t)` with `f + t·g ≡ 0` at `x`.
+struct RootPrime {
+    p: u64,
+    w: f32,
+    roots: Vec<(u64, u64)>,
+}
+
+fn root_optimize(f: &[i128], m: u128, l: u128, effort: Effort) -> Vec<(Vec<i128>, u128)> {
     let d = f.len() - 1;
-    let rot1 = if d >= 4 { ROT1 } else { 0 };
-    let width = 2 * ROT0 as usize;
-    let rows = 2 * rot1 as usize + 1;
-    let mut gain = vec![0f32; rows * width];
-    for p in Primes::new(2, ALPHA_PRIMES) {
-        let w = (p as f64 / (p + 1) as f64 * log2(p as f64) / (p - 1) as f64) as f32;
-        let fp = reduce(f, p);
-        let mp = (m % u128::from(p)) as u64;
-        let lp = (l % u128::from(p)) as u64;
-        for x in 0..p {
-            let gx = (lp * x % p + p - mp) % p;
-            if gx == 0 {
-                continue;
-            }
-            let t = (p - eval(&fp, x, p)) % p * inv(gx, p) % p;
-            for (row, j1) in (-rot1..=rot1).enumerate() {
-                // j₀ ≡ t − j₁·x, at index j₀ + ROT0.
+    let rot1 = if d >= 4 { effort.rot1 } else { 0 };
+    let rot0 = effort.rot0;
+    let width = 2 * rot0 as usize;
+    // For each small prime, its weight and the pairs (x, t) with
+    // f + t·g ≡ 0 at x: rotations by j₀ ≡ t − j₁·x gain a root at x.
+    let primes: Vec<RootPrime> = Primes::new(2, ALPHA_PRIMES)
+        .map(|p| {
+            let w = (p as f64 / (p + 1) as f64 * log2(p as f64) / (p - 1) as f64) as f32;
+            let fp = reduce(f, p);
+            let mp = (m % u128::from(p)) as u64;
+            let lp = (l % u128::from(p)) as u64;
+            let roots = (0..p)
+                .filter_map(|x| {
+                    let gx = (lp * x % p + p - mp) % p;
+                    (gx != 0).then(|| (x, (p - eval(&fp, x, p)) % p * inv(gx, p) % p))
+                })
+                .collect();
+            RootPrime { p, w, roots }
+        })
+        .collect();
+    // One row of j₀ at a time, so that it stays in cache, keeping the best
+    // cells of all rows seen as (gain, j₁, index of j₀).
+    let mut best: Vec<(f32, i64, usize)> = Vec::new();
+    let mut row = vec![0f32; width];
+    let mut order: Vec<u32> = (0..width as u32).collect();
+    for j1 in -rot1..=rot1 {
+        row.fill(0.0);
+        for &RootPrime { p, w, ref roots } in &primes {
+            for &(x, t) in roots {
+                // j₀ ≡ t − j₁·x, at index j₀ + rot0.
                 let r = (t as i64 - j1 * x as i64).rem_euclid(p as i64) as u64;
-                let cells = &mut gain[row * width..(row + 1) * width];
-                let mut i = ((r + ROT0 as u64) % p) as usize;
+                let mut i = ((r + rot0 as u64) % p) as usize;
                 while i < width {
-                    cells[i] += w;
+                    row[i] += w;
                     i += p as usize;
                 }
             }
         }
+        let by_gain = |a: &u32, b: &u32| row[*b as usize].total_cmp(&row[*a as usize]);
+        order.select_nth_unstable_by(ROOT_CELLS - 1, by_gain);
+        best.extend(
+            order[..ROOT_CELLS]
+                .iter()
+                .map(|&i| (row[i as usize], j1, i as usize)),
+        );
+        if best.len() > ROOT_CELLS {
+            best.select_nth_unstable_by(ROOT_CELLS - 1, |a, b| b.0.total_cmp(&a.0));
+            best.truncate(ROOT_CELLS);
+        }
     }
-    let mut order: Vec<usize> = (0..gain.len()).collect();
-    order.sort_unstable_by(|&a, &b| gain[b].total_cmp(&gain[a]));
-    let mut rotated: Vec<(f64, Vec<i128>, u128)> = order
+    let mut rotated: Vec<(f64, Vec<i128>, u128)> = best
         .into_iter()
-        .take(ROOT_CELLS)
-        .filter_map(|cell| {
-            let j1 = (cell / width) as i128 - i128::from(rot1);
-            let j0 = (cell % width) as i128 - i128::from(ROT0);
+        .filter_map(|(_, j1, i)| {
+            let (j1, j0) = (i128::from(j1), i as i128 - i128::from(rot0));
             let g = rotate(&rotate(f, m, l, 1, j1)?, m, l, 0, j0)?;
             let (g, gm) = size_optimize(&g, m, l, false);
             Some((lognorm(&g).1 + alpha(&g), g, gm))

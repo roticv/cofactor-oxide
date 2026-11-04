@@ -82,9 +82,11 @@ fn selected_polynomials_have_root_m() {
         "5783078982887739757788301949603111810137352482505406356698736447542686900836153",
         "35794234179725868774991807832568455403003778024228226193532908190484670252364677411513516111204504060317568667",
     ];
+    // At these sizes the search is long, so it runs on every core.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     for s in numbers {
         let n = u(s);
-        let poly = Poly::select(&n);
+        let poly = Poly::select_with(&n, &Threads(threads));
         assert_eq!(poly.degree(), degree(n.bits()));
         // Translation and rotation keep F(m, l) = N exactly.
         let (m, l) = (BigInt::from(poly.m), BigInt::from(poly.l));
@@ -285,6 +287,26 @@ fn gnfs_factors() {
         let f = cofox_core::nfs::gnfs(&n).expect("no factor");
         println!("{} bits: {f} in {:.2?}", n.bits(), t.elapsed());
         assert!(f == p || f == q, "{n} gave {f}");
+    }
+}
+
+/// Work on this many scoped threads.
+struct Threads(usize);
+
+impl cofox_core::parallel::Parallel for Threads {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn map<T: Send>(&self, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        let f = &f;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (1..self.0).map(|i| scope.spawn(move || f(i))).collect();
+            let first = f(0);
+            std::iter::once(first)
+                .chain(handles.into_iter().map(|h| h.join().unwrap()))
+                .collect()
+        })
     }
 }
 

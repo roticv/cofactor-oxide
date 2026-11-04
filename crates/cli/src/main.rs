@@ -287,7 +287,7 @@ fn gnfs_parallel(
     let from_file = loaded_poly.is_some();
     let gnfs = match loaded_poly {
         Some(poly) => Gnfs::with_poly(&n, &params, poly),
-        None => Gnfs::new(&n, &params),
+        None => Gnfs::new_with(&n, &params, &Threads(threads)),
     };
     let fb = gnfs.factor_base();
     let ideals = fb.rational.len() + fb.algebraic.len();

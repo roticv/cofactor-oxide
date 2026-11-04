@@ -83,7 +83,12 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
     /// Chooses the polynomial and builds the factor bases for `n`, an odd
     /// composite that isn't a prime power.
     pub fn new(n: &Uint<LIMBS>, params: &Params) -> Self {
-        Self::with_poly(n, params, Poly::select(n))
+        Self::new_with(n, params, &Serial)
+    }
+
+    /// [`Gnfs::new`], with the polynomial search shared out by `par`.
+    pub fn new_with(n: &Uint<LIMBS>, params: &Params, par: &impl Parallel) -> Self {
+        Self::with_poly(n, params, Poly::select_with(n, par))
     }
 
     /// GNFS for `n` with the polynomials `poly`, which must have a common
