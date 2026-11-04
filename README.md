@@ -168,6 +168,24 @@ cofox --gnfs --load-relations rsa100.rels --save-relations rsa100.rels 152260502
 Relations are flushed to the file every 10 seconds, so an interruption
 loses at most the last few seconds' worth.
 
+Sieving can also be split across machines. `--poly FILE` makes every
+machine use the same polynomials: the first run to find `FILE` missing
+chooses them and writes them there, and the others read them, so copy
+the file around or keep it on a shared disk. `--special-q START:END` sieves
+only that range of special-q and saves the relations. Then one run that
+loads every machine's file solves the matrix, sieving more first if it
+needs to:
+
+```sh
+cofox --gnfs --poly n.poly --special-q 1500000:1700000 --save-relations a.rels N   # machine A
+cofox --gnfs --poly n.poly --special-q 1700000:1900000 --save-relations b.rels N   # machine B
+cofox --gnfs --poly n.poly --load-relations a.rels --load-relations b.rels N
+```
+
+The first line GNFS prints on stderr says where its special-q start, for
+this size of number; ranges from there up are the most productive, as
+smaller special-q give smaller values to factor.
+
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
 `wasm-bindgen-cli` whose version matches `wasm-bindgen` in `Cargo.lock`:

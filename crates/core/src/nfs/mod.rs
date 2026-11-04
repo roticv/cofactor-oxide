@@ -112,6 +112,10 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
         &self.poly
     }
 
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
     pub fn factor_base(&self) -> &FactorBase {
         &self.fb
     }
@@ -128,6 +132,12 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
     pub fn special_qs(&self, k: u64) -> Vec<(u64, u64)> {
         let start = self.params.qmin + k * Q_BLOCK;
         special_qs(&self.poly, start, start + Q_BLOCK)
+    }
+
+    /// The special-q ideals `(q, r)` with `q` in `[lo, hi)`, for sieving a
+    /// range of them, as one of several machines can.
+    pub fn special_qs_between(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        special_qs(&self.poly, lo, hi)
     }
 
     /// An empty collection of relations for this number, with its own copy

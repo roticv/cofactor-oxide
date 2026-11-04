@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Write};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, IsTerminal, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,13 +10,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cofox_core::arith::ParseUintError;
-use cofox_core::nfs::{Gnfs, Params, parse_poly, parse_relation, poly_text, relation_line};
+use cofox_core::nfs::{
+    Gnfs, Params, Poly, Relations, parse_poly, parse_relation, poly_text, relation_line,
+};
 use cofox_core::parallel::Parallel;
 use cofox_core::qs::{QsJob, Start};
 use cofox_core::{Config, Factor, Progress, QS_MAX_BITS, QsMode, Uint, factor_str_with};
 
 const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs]
-             [--save-relations FILE] [--load-relations FILE] <n>...
+             [--poly FILE] [--save-relations FILE] [--load-relations FILE]...
+             [--special-q START:END] <n>...
 
   --ecm DIGITS  run ECM up to the level for primes of this many digits
                 (15 to 40, default 25); each level takes about four times
@@ -37,7 +40,16 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
                 with --gnfs, start from the relations in FILE, with the
                 polynomials in FILE.poly if there is one, skipping the
                 special-q it records as done. With --save-relations to the
-                same FILE, this resumes a run";
+                same FILE, this resumes a run. Give it more than once to
+                merge relations sieved on several machines
+  --poly FILE   with --gnfs, use the polynomials in FILE, choosing them and
+                writing them there first if it doesn't exist, so that
+                machines sieving one number share them
+  --special-q START:END
+                with --gnfs and --save-relations, only sieve the special-q
+                from START to END and save the relations, as one machine's
+                share; a run with --load-relations on every share then
+                solves the matrix";
 
 /// The widest numbers the command line takes.
 type Wide = Uint<16>;
@@ -58,6 +70,7 @@ fn main() -> ExitCode {
     let mut gnfs = false;
     let mut threads = thread::available_parallelism().map_or(1, |n| n.get());
     let mut files = Files::default();
+    let mut q_range = None;
     let mut numbers = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -83,15 +96,28 @@ fn main() -> ExitCode {
             },
             "--no-qs" => qs = false,
             "--gnfs" => gnfs = true,
-            "--save-relations" | "--load-relations" => {
+            "--save-relations" | "--load-relations" | "--poly" => {
                 let Some(path) = args.next().map(PathBuf::from) else {
                     eprintln!("cofox: {arg} needs a file\n\n{USAGE}");
                     return ExitCode::FAILURE;
                 };
-                if arg == "--save-relations" {
-                    files.save = Some(path);
-                } else {
-                    files.load = Some(path);
+                match arg.as_str() {
+                    "--save-relations" => files.save = Some(path),
+                    "--load-relations" => files.load.push(path),
+                    _ => files.poly = Some(path),
+                }
+            }
+            "--special-q" => {
+                let range = args.next().and_then(|v| {
+                    let (lo, hi) = v.split_once(':')?;
+                    Some((lo.parse().ok()?, hi.parse().ok()?))
+                });
+                match range {
+                    Some((lo, hi)) if lo < hi => q_range = Some((lo, hi)),
+                    _ => {
+                        eprintln!("cofox: --special-q needs START:END with START < END\n\n{USAGE}");
+                        return ExitCode::FAILURE;
+                    }
                 }
             }
             "-h" | "--help" => {
@@ -105,11 +131,11 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     }
-    if let Some(path) = &files.load
-        && let Err(e) = File::open(path)
-    {
-        eprintln!("cofox: can't read {}: {e}", path.display());
-        return ExitCode::FAILURE;
+    for path in &files.load {
+        if let Err(e) = File::open(path) {
+            eprintln!("cofox: can't read {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
     }
     if let Some(path) = &files.save
         && let Err(e) = OpenOptions::new().create(true).append(true).open(path)
@@ -119,6 +145,22 @@ fn main() -> ExitCode {
     }
 
     let show_status = std::io::stderr().is_terminal();
+    if let Some(range) = q_range {
+        if !gnfs || files.save.is_none() || numbers.len() != 1 {
+            eprintln!(
+                "cofox: --special-q sieves for one number with --gnfs, and needs \
+                 --save-relations to keep what it finds"
+            );
+            return ExitCode::FAILURE;
+        }
+        return match gnfs_range(&numbers[0], threads, &files, range, show_status) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("cofox: invalid number {:?}: {e}", numbers[0]);
+                ExitCode::FAILURE
+            }
+        };
+    }
     let mut status = ExitCode::SUCCESS;
     let mut unsplit = false;
     for arg in &numbers {
@@ -156,7 +198,8 @@ fn main() -> ExitCode {
 #[derive(Clone, Debug, Default)]
 struct Files {
     save: Option<PathBuf>,
-    load: Option<PathBuf>,
+    load: Vec<PathBuf>,
+    poly: Option<PathBuf>,
 }
 
 /// How to factor each number on the command line.
@@ -259,9 +302,10 @@ fn qs_parallel(
 
 /// Runs the number field sieve on `threads` threads: each sieves the next
 /// block of special-q no thread has taken and sends its relations to this
-/// thread, until there are enough. Then each thread tries the next dependency until one
-/// gives a factor. Returns a proper factor of `n`, or `None` if it found
-/// none, which is what happens when `n` is a prime power.
+/// thread, until there are enough. Then the matrix is solved, and each
+/// dependency tried in turn on all threads until one gives a factor.
+/// Returns a proper factor of `n`, or `None` if it found none, which is
+/// what happens when `n` is a prime power.
 fn gnfs_parallel(
     n: &str,
     threads: usize,
@@ -269,152 +313,27 @@ fn gnfs_parallel(
     show_status: bool,
 ) -> Result<Option<String>, ParseUintError> {
     let n = n.parse::<Wide>()?;
-    let bits = n.bits();
-    let params = Params::for_bits(bits);
     let mut status = Status::new(1);
-    let loaded_poly = files.load.as_deref().and_then(|path| {
-        let path = poly_path(path);
-        let text = std::fs::read_to_string(&path).ok()?;
-        let poly = parse_poly(&n, &text, &params);
-        if poly.is_none() {
-            status.stage(&format!(
-                "GNFS: {} isn't a polynomial pair for this number; choosing one",
-                path.display()
-            ));
-        }
-        poly
-    });
-    let from_file = loaded_poly.is_some();
-    let gnfs = match loaded_poly {
-        Some(poly) => Gnfs::with_poly(&n, &params, poly),
-        None => Gnfs::new_with(&n, &params, &Threads(threads)),
+    let (gnfs, relations, done_qs) = gnfs_start(&n, threads, files, &mut status);
+    let save = files
+        .save
+        .as_deref()
+        .and_then(|path| open_save(path, &n, &gnfs, &mut status));
+    let mut collected = Collected {
+        relations,
+        done_qs,
+        save,
     };
-    let fb = gnfs.factor_base();
-    let ideals = fb.rational.len() + fb.algebraic.len();
-    status.stage(&format!(
-        "GNFS on a {bits}-bit composite: polynomial of degree {} {}, {ideals} ideals in the \
-         factor bases",
-        gnfs.poly().f.len() - 1,
-        if from_file { "read" } else { "chosen" }
-    ));
-    let mut relations = gnfs.relations();
-    let mut done_qs: HashSet<(u64, u64)> = HashSet::new();
-    if let Some(path) = &files.load {
-        let (mut read, mut rejected) = (0, 0);
-        let mut batch = Vec::new();
-        for line in BufReader::new(File::open(path).expect("checked readable")).lines() {
-            let Ok(line) = line else {
-                break;
-            };
-            let line = line.trim();
-            if let Some(q) = line.strip_prefix("# special-q ") {
-                if let Some((q, r)) = q.split_once(' ')
-                    && let (Ok(q), Ok(r)) = (q.parse(), r.parse())
-                {
-                    done_qs.insert((q, r));
-                }
-            } else if !line.is_empty() && !line.starts_with('#') {
-                match parse_relation(gnfs.poly(), line) {
-                    Some(rel) => {
-                        batch.push(rel);
-                        read += 1;
-                    }
-                    None => rejected += 1,
-                }
-                if batch.len() >= 100_000 {
-                    relations.add(batch.drain(..));
-                }
-            }
-        }
-        relations.add(batch);
-        status.stage(&format!(
-            "GNFS: loaded {read} relations from {}, {} distinct, {rejected} lines rejected, \
-             {} special-q done",
-            path.display(),
-            relations.len(),
-            done_qs.len()
-        ));
-    }
-    let mut save = files.save.as_deref().and_then(|path| {
-        let opened = std::fs::write(poly_path(path), poly_text(&n, gnfs.poly()))
-            .and_then(|()| OpenOptions::new().create(true).append(true).open(path));
-        match opened {
-            Ok(file) => Some(BufWriter::new(file)),
-            Err(e) => {
-                status.stage(&format!("GNFS: can't save to {}: {e}", path.display()));
-                None
-            }
-        }
-    });
-    let (send, receive) = mpsc::channel();
-    let (next_block, last_q) = (AtomicU64::new(0), AtomicU64::new(0));
-    let done = AtomicBool::new(false);
-    thread::scope(|scope| {
-        if relations.is_ready() {
-            return;
-        }
-        for _ in 0..threads {
-            let (send, gnfs, next_block, last_q, done, done_qs) =
-                (send.clone(), &gnfs, &next_block, &last_q, &done, &done_qs);
-            scope.spawn(move || {
-                let mut sieve = gnfs.sieve();
-                while !done.load(Ordering::Relaxed) {
-                    let k = next_block.fetch_add(1, Ordering::Relaxed);
-                    for (q, r) in gnfs.special_qs(k) {
-                        if done_qs.contains(&(q, r)) {
-                            continue;
-                        }
-                        if done.load(Ordering::Relaxed)
-                            || send.send((q, r, sieve.special_q(q, r))).is_err()
-                        {
-                            return;
-                        }
-                        last_q.fetch_max(q, Ordering::Relaxed);
-                    }
-                }
-            });
-        }
-        let mut flushed = Instant::now();
-        while !relations.is_ready() {
-            let (q, r, found) = receive.recv().expect("sieving threads stopped");
-            if let Some(out) = &mut save {
-                let mut text = String::new();
-                for rel in &found {
-                    text += &relation_line(rel);
-                    text.push('\n');
-                }
-                text += &format!("# special-q {q} {r}\n");
-                let written = out.write_all(text.as_bytes()).and_then(|()| {
-                    if flushed.elapsed() >= SAVE_FLUSH {
-                        flushed = Instant::now();
-                        out.flush()
-                    } else {
-                        Ok(())
-                    }
-                });
-                if let Err(e) = written {
-                    status.stage(&format!("GNFS: stopped saving relations: {e}"));
-                    save = None;
-                }
-            }
-            relations.add(found);
-            if show_status {
-                let q = last_q.load(Ordering::Relaxed);
-                status.update_line(&format!(
-                    "Number field sieve: {} relations for {ideals} ideals, special-q {q}, \
-                     on a {bits}-bit composite",
-                    relations.len()
-                ));
-            }
-        }
-        done.store(true, Ordering::Relaxed);
-    });
-    if let Some(mut out) = save
-        && let Err(e) = out.flush()
-    {
-        status.stage(&format!("GNFS: couldn't finish saving relations: {e}"));
-    }
-    match last_q.load(Ordering::Relaxed) {
+    let last_q = gnfs_sieve(
+        &gnfs,
+        &mut collected,
+        threads,
+        Range::UntilReady,
+        (&mut status, show_status),
+    );
+    finish_save(collected.save.take(), &mut status);
+    let relations = collected.relations;
+    match last_q {
         0 => status.stage(&format!(
             "GNFS: {} relations, enough without sieving",
             relations.len()
@@ -452,6 +371,282 @@ fn gnfs_parallel(
     }
     status.clear();
     Ok(found.map(|f| f.to_string()))
+}
+
+/// Sieves the special-q in `[lo, hi)` for `n`, saving the relations to
+/// `--save-relations`, for one machine's share of a distributed run.
+fn gnfs_range(
+    n: &str,
+    threads: usize,
+    files: &Files,
+    (lo, hi): (u64, u64),
+    show_status: bool,
+) -> Result<(), ParseUintError> {
+    let n = n.parse::<Wide>()?;
+    let mut status = Status::new(1);
+    let (gnfs, relations, done_qs) = gnfs_start(&n, threads, files, &mut status);
+    let path = files.save.as_deref().expect("checked given");
+    let save = open_save(path, &n, &gnfs, &mut status);
+    let before = relations.len();
+    let mut collected = Collected {
+        relations,
+        done_qs,
+        save,
+    };
+    gnfs_sieve(
+        &gnfs,
+        &mut collected,
+        threads,
+        Range::Between(lo, hi),
+        (&mut status, show_status),
+    );
+    finish_save(collected.save.take(), &mut status);
+    status.stage(&format!(
+        "GNFS: sieved special-q from {lo} to {hi}: {} new distinct relations saved to {}",
+        collected.relations.len() - before,
+        path.display()
+    ));
+    status.clear();
+    Ok(())
+}
+
+/// The relations of a GNFS run, the special-q done, and where new
+/// relations are saved.
+struct Collected {
+    relations: Relations<16>,
+    done_qs: HashSet<(u64, u64)>,
+    save: Option<BufWriter<File>>,
+}
+
+/// Which special-q to sieve: blocks from the first one the parameters
+/// give, until there are enough relations, or all of a range.
+#[derive(Clone, Copy, Debug)]
+enum Range {
+    UntilReady,
+    Between(u64, u64),
+}
+
+/// Special-q are handed out to the threads in blocks of this many
+/// integers, within a range.
+const Q_RANGE_BLOCK: u64 = 64;
+
+/// GNFS for `n`, with the polynomials from `--poly`, which are chosen and
+/// written there first if the file doesn't exist; or else from the first
+/// file loaded with a `.poly` beside it; or else chosen. Then the
+/// relations in each file loaded, and the special-q they record as done.
+/// Exits if `--poly` can't be used.
+fn gnfs_start(
+    n: &Wide,
+    threads: usize,
+    files: &Files,
+    status: &mut Status,
+) -> (Gnfs<16>, Relations<16>, HashSet<(u64, u64)>) {
+    let bits = n.bits();
+    let params = Params::for_bits(bits);
+    let (poly, how) = if let Some(path) = &files.poly {
+        match std::fs::read_to_string(path) {
+            Ok(text) => match parse_poly(n, &text, &params) {
+                Some(poly) => (poly, "read"),
+                None => {
+                    eprintln!("cofox: {} isn't a polynomial pair for {n}", path.display());
+                    std::process::exit(1);
+                }
+            },
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                let poly = Poly::select_with(n, &Threads(threads));
+                if let Err(e) = std::fs::write(path, poly_text(n, &poly)) {
+                    eprintln!("cofox: can't write {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+                (poly, "chosen and written")
+            }
+            Err(e) => {
+                eprintln!("cofox: can't read {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(poly) = files.load.iter().find_map(|path| {
+        let text = std::fs::read_to_string(poly_path(path)).ok()?;
+        parse_poly(n, &text, &params)
+    }) {
+        (poly, "read")
+    } else {
+        (Poly::select_with(n, &Threads(threads)), "chosen")
+    };
+    let gnfs = Gnfs::with_poly(n, &params, poly);
+    let fb = gnfs.factor_base();
+    status.stage(&format!(
+        "GNFS on a {bits}-bit composite: polynomial of degree {} {how}, {} ideals in the \
+         factor bases, special-q from {}",
+        gnfs.poly().degree(),
+        fb.rational.len() + fb.algebraic.len(),
+        gnfs.params().qmin
+    ));
+    let mut relations = gnfs.relations();
+    let mut done_qs = HashSet::new();
+    for path in &files.load {
+        let (mut read, mut rejected, before) = (0, 0, relations.len());
+        let mut batch = Vec::new();
+        for line in BufReader::new(File::open(path).expect("checked readable")).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let line = line.trim();
+            if let Some(q) = line.strip_prefix("# special-q ") {
+                if let Some((q, r)) = q.split_once(' ')
+                    && let (Ok(q), Ok(r)) = (q.parse(), r.parse())
+                {
+                    done_qs.insert((q, r));
+                }
+            } else if !line.is_empty() && !line.starts_with('#') {
+                match parse_relation(gnfs.poly(), line) {
+                    Some(rel) => {
+                        batch.push(rel);
+                        read += 1;
+                    }
+                    None => rejected += 1,
+                }
+                if batch.len() >= 100_000 {
+                    relations.add(batch.drain(..));
+                }
+            }
+        }
+        relations.add(batch);
+        status.stage(&format!(
+            "GNFS: loaded {read} relations from {}, {} new and distinct, {rejected} lines \
+             rejected; {} special-q done in all",
+            path.display(),
+            relations.len() - before,
+            done_qs.len()
+        ));
+    }
+    (gnfs, relations, done_qs)
+}
+
+/// The file at `path` to append relations to, after writing the
+/// polynomials to `path.poly`, or `None` if that fails.
+fn open_save(
+    path: &Path,
+    n: &Wide,
+    gnfs: &Gnfs<16>,
+    status: &mut Status,
+) -> Option<BufWriter<File>> {
+    let opened = std::fs::write(poly_path(path), poly_text(n, gnfs.poly()))
+        .and_then(|()| OpenOptions::new().create(true).append(true).open(path));
+    match opened {
+        Ok(file) => Some(BufWriter::new(file)),
+        Err(e) => {
+            status.stage(&format!("GNFS: can't save to {}: {e}", path.display()));
+            None
+        }
+    }
+}
+
+fn finish_save(save: Option<BufWriter<File>>, status: &mut Status) {
+    if let Some(mut out) = save
+        && let Err(e) = out.flush()
+    {
+        status.stage(&format!("GNFS: couldn't finish saving relations: {e}"));
+    }
+}
+
+/// Sieves the special-q of `range` that aren't done on `threads` threads,
+/// adding their relations to those collected and saving them, each
+/// special-q's followed by a comment line naming it. Returns the largest
+/// special-q sieved, or 0 if none was.
+fn gnfs_sieve(
+    gnfs: &Gnfs<16>,
+    collected: &mut Collected,
+    threads: usize,
+    range: Range,
+    (status, show_status): (&mut Status, bool),
+) -> u64 {
+    let Collected {
+        relations,
+        done_qs,
+        save,
+    } = collected;
+    let done_qs = &*done_qs;
+    let fb = gnfs.factor_base();
+    let ideals = fb.rational.len() + fb.algebraic.len();
+    let block = |k: u64| match range {
+        Range::UntilReady => Some(gnfs.special_qs(k)),
+        Range::Between(lo, hi) => {
+            let start = lo.checked_add(k.checked_mul(Q_RANGE_BLOCK)?)?;
+            (start < hi).then(|| gnfs.special_qs_between(start, (start + Q_RANGE_BLOCK).min(hi)))
+        }
+    };
+    let until_ready = matches!(range, Range::UntilReady);
+    let (send, receive) = mpsc::channel();
+    let (next_block, last_q) = (AtomicU64::new(0), AtomicU64::new(0));
+    let done = AtomicBool::new(false);
+    thread::scope(|scope| {
+        if until_ready && relations.is_ready() {
+            return;
+        }
+        for _ in 0..threads {
+            let (send, next_block, last_q, done, block) =
+                (send.clone(), &next_block, &last_q, &done, &block);
+            scope.spawn(move || {
+                let mut sieve = gnfs.sieve();
+                while !done.load(Ordering::Relaxed) {
+                    let Some(qs) = block(next_block.fetch_add(1, Ordering::Relaxed)) else {
+                        return;
+                    };
+                    for (q, r) in qs {
+                        if done_qs.contains(&(q, r)) {
+                            continue;
+                        }
+                        if done.load(Ordering::Relaxed)
+                            || send.send((q, r, sieve.special_q(q, r))).is_err()
+                        {
+                            return;
+                        }
+                        last_q.fetch_max(q, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+        // The threads hold the only senders left, so receiving ends when
+        // they all have.
+        drop(send);
+        let mut flushed = Instant::now();
+        while let Ok((q, r, found)) = receive.recv() {
+            if let Some(out) = save.as_mut() {
+                let mut text = String::new();
+                for rel in &found {
+                    text += &relation_line(rel);
+                    text.push('\n');
+                }
+                text += &format!("# special-q {q} {r}\n");
+                let written = out.write_all(text.as_bytes()).and_then(|()| {
+                    if flushed.elapsed() >= SAVE_FLUSH {
+                        flushed = Instant::now();
+                        out.flush()
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(e) = written {
+                    status.stage(&format!("GNFS: stopped saving relations: {e}"));
+                    *save = None;
+                }
+            }
+            relations.add(found);
+            if show_status {
+                let q = last_q.load(Ordering::Relaxed);
+                status.update_line(&format!(
+                    "Number field sieve: {} relations for {ideals} ideals, special-q {q}",
+                    relations.len()
+                ));
+            }
+            if until_ready && relations.is_ready() {
+                break;
+            }
+        }
+        done.store(true, Ordering::Relaxed);
+    });
+    last_q.load(Ordering::Relaxed)
 }
 
 /// `FILE.poly`, where the polynomials for the relations in `FILE` go.
