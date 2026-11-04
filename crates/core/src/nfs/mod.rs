@@ -18,6 +18,7 @@
 
 mod base;
 mod filter;
+mod format;
 mod kleinjung;
 mod matrix;
 pub mod modp;
@@ -33,6 +34,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 pub use base::{FactorBase, Prime};
+pub use format::{parse_poly, parse_relation, poly_text, relation_line};
 pub use params::{CHARACTERS, Params};
 pub use poly::{Poly, alpha, degree};
 pub use sieve::{Relation, Sieve, special_qs};
@@ -80,7 +82,12 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
     /// Chooses the polynomial and builds the factor bases for `n`, an odd
     /// composite that isn't a prime power.
     pub fn new(n: &Uint<LIMBS>, params: &Params) -> Self {
-        let poly = Poly::select(n);
+        Self::with_poly(n, params, Poly::select(n))
+    }
+
+    /// GNFS for `n` with the polynomials `poly`, which must have a common
+    /// root modulo `n`, as from [`parse_poly`].
+    pub fn with_poly(n: &Uint<LIMBS>, params: &Params, poly: Poly) -> Self {
         let fb = FactorBase::new(
             &poly,
             params.rational_bound,

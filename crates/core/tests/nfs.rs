@@ -327,3 +327,106 @@ fn gnfs_factors_in_pieces() {
         .expect("no factor");
     assert!(f == p || f == q, "{n} gave {f}");
 }
+
+#[test]
+fn relations_as_text() {
+    use cofox_core::nfs::{parse_relation, relation_line};
+    // 50 digits, so that l > 1.
+    let n = u("59858698299029333151760743317766029830337454377407");
+    let poly = Poly::select(&n);
+    let params = Params::for_bits(n.bits());
+    let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
+    let mut sieve = Sieve::new(&poly, &fb, &params);
+    let start = u64::from(params.algebraic_bound) + 1;
+    let rels: Vec<Relation> = special_qs(&poly, start, start + 1000)
+        .into_iter()
+        .take(10)
+        .flat_map(|(q, r)| sieve.special_q(q, r))
+        .collect();
+    assert!(rels.len() > 20, "{} relations", rels.len());
+    let sorted = |mut v: Vec<u64>| {
+        v.sort_unstable();
+        v
+    };
+    for rel in &rels {
+        let line = relation_line(rel);
+        // Read back, and with the primes below 1000 left out.
+        let small = |list: &str| {
+            list.split(',')
+                .filter(|p| u64::from_str_radix(p, 16).unwrap() >= 1000)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let parts: Vec<&str> = line.split(':').collect();
+        let short = format!("{}:{}:{}", parts[0], small(parts[1]), small(parts[2]));
+        for text in [&line, &short] {
+            let back = parse_relation(&poly, text).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(
+                (back.a, back.b, back.negative),
+                (rel.a, rel.b, rel.negative)
+            );
+            assert_eq!(
+                sorted(back.rational),
+                sorted(rel.rational.clone()),
+                "{text}"
+            );
+            assert_eq!(
+                sorted(back.algebraic),
+                sorted(rel.algebraic.clone()),
+                "{text}"
+            );
+        }
+        // Another b, or a prime too many or missing, isn't a relation.
+        let wrong_b = format!("{},{}:{}:{}", rel.a, rel.b + 1, parts[1], parts[2]);
+        assert!(parse_relation(&poly, &wrong_b).is_none(), "{wrong_b}");
+        let extra = format!("{line},3fd");
+        assert!(parse_relation(&poly, &extra).is_none(), "{extra}");
+        // The relation with its largest algebraic prime dropped.
+        let mut algebraic = rel.algebraic.clone();
+        algebraic.sort_unstable();
+        if algebraic.pop().is_some_and(|p| p >= 1000) {
+            let missing = relation_line(&Relation {
+                algebraic,
+                ..rel.clone()
+            });
+            assert!(parse_relation(&poly, &missing).is_none(), "{missing}");
+        }
+    }
+    assert!(parse_relation(&poly, "garbage").is_none());
+    assert!(parse_relation(&poly, "1,0::").is_none());
+}
+
+#[test]
+fn polynomials_as_text() {
+    use cofox_core::nfs::{parse_poly, poly_text};
+    let n = u("59858698299029333151760743317766029830337454377407");
+    let params = Params::for_bits(n.bits());
+    let poly = Poly::select(&n);
+    let text = poly_text(&n, &poly);
+    let back = parse_poly(&n, &text, &params).expect(&text);
+    assert_eq!((&back.f, back.m, back.l), (&poly.f, poly.m, poly.l));
+    assert!(
+        (back.e - poly.e).abs() <= 1e-9 * poly.e,
+        "{} vs {}",
+        back.e,
+        poly.e
+    );
+    // msieve's .fb keys.
+    let mut fb = format!("N {n}\nSKEW {}\nR0 -{}\nR1 {}\n", poly.skew, poly.m, poly.l);
+    for (i, c) in poly.f.iter().enumerate() {
+        fb += &format!("A{i} {c}\n");
+    }
+    let back = parse_poly(&n, &fb, &params).expect(&fb);
+    assert_eq!((&back.f, back.m, back.l), (&poly.f, poly.m, poly.l));
+    // Another number, or a g without the common root.
+    assert!(
+        parse_poly(
+            &u("1176217249472123917871099760550263221639"),
+            &text,
+            &params
+        )
+        .is_none()
+    );
+    let shifted = text.replace(&format!("Y0: -{}", poly.m), &format!("Y0: -{}", poly.m + 1));
+    assert!(parse_poly(&n, &shifted, &params).is_none());
+}

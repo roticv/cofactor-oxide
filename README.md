@@ -13,7 +13,8 @@ short, which is also the name of the command-line tool.
 > factors up to about 25 digits by default (more with `--ecm`), and the
 > quadratic sieve splits what is left up to 120 digits. Both run on every
 > core, natively and in the browser. GNFS works end to end in the CLI with
-> `--gnfs`, but is still far slower than the quadratic sieve.
+> `--gnfs`: it factored RSA-100 in 29 minutes on six threads, where the
+> quadratic sieve takes about 20 on ten.
 
 ## Goals
 
@@ -140,10 +141,26 @@ splits it.
 
 `--ecm 30` (or 35, 40) searches for larger factors, at about four times the
 cost per level, `--threads N` sets the number of threads, `--no-qs` skips
-the quadratic sieve, and `--gnfs` uses the experimental number field sieve
-in its place, for composites of 40 digits or more. A factor in parentheses is composite, but the
-algorithms that ran couldn't split it. While ECM or the sieve runs, a status
-line on stderr shows how far it has got.
+the quadratic sieve, and `--gnfs` uses the number field sieve in its place,
+for composites of 40 digits or more. A factor in parentheses is composite,
+but the algorithms that ran couldn't split it. While ECM or the sieve runs,
+a status line on stderr shows how far it has got, and GNFS prints a line
+with the time at each stage.
+
+`--save-relations FILE` appends GNFS's relations to `FILE`, in the format
+msieve, GGNFS and CADO-NFS share, and writes the polynomials to
+`FILE.poly`. `--load-relations FILE` starts from the relations in `FILE`,
+with the polynomials in `FILE.poly`, and skips the special-q it records as
+done, so that giving both with the same file resumes an interrupted run:
+
+```sh
+cofox --gnfs --save-relations rsa100.rels 1522605027922533360535618378132637429718068114961380688657908494580122963258952897654000350692006139
+# interrupted; later:
+cofox --gnfs --load-relations rsa100.rels --save-relations rsa100.rels 1522605027922533360535618378132637429718068114961380688657908494580122963258952897654000350692006139
+```
+
+Relations are flushed to the file every 10 seconds, so an interruption
+loses at most the last few seconds' worth.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a

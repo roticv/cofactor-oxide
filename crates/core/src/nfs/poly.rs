@@ -175,6 +175,14 @@ impl Poly {
         }
     }
 
+    /// The pair `f`, `l·x − m`, with its skew, size, α and Murphy's E for
+    /// `params`.
+    pub(crate) fn rated(f: Vec<i128>, m: u128, l: u128, params: &Params) -> Self {
+        let mut poly = Self::new(f, m, l);
+        poly.rate(&Murphy::new(params));
+        poly
+    }
+
     /// Fills in α and Murphy's E.
     fn rate(&mut self, murphy: &Murphy) {
         self.alpha = alpha(&self.f);

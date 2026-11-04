@@ -1,7 +1,8 @@
 //! The square roots of a dependency on both sides, and the factor they
 //! give. This is the only module that needs integers larger than `Uint`:
 //! the algebraic square root has coefficients of hundreds of thousands of
-//! bits. It uses `num-bigint`, which stays inside this module.
+//! bits. It uses `num-bigint`, which stays inside this module, also used
+//! to check that a polynomial read from a file has a root modulo `N`.
 //!
 //! With `c` the leading coefficient of `f`, `θ = c·α` is a root of the
 //! monic `F(x) = c^(d−1)·f(x/c)`, so `ℤ[θ]` is in the ring of integers.
@@ -302,6 +303,16 @@ pub fn factor<const LIMBS: usize>(
     }
     let g = num_integer_gcd(modulo(&(x - y), &nb), nb.clone());
     (g > BigInt::one() && g < nb).then(|| g.to_string().parse().ok())?
+}
+
+/// Whether `m/l` is a root of `f` modulo `n`: `F(m, l) ≡ 0 (mod n)`.
+pub(crate) fn has_common_root<const LIMBS: usize>(n: &Uint<LIMBS>, poly: &Poly) -> bool {
+    let Ok(nb) = n.to_string().parse::<BigInt>() else {
+        return false;
+    };
+    let f: Vec<BigInt> = poly.f.iter().map(|&c| BigInt::from(c)).collect();
+    let (m, l) = (BigInt::from(poly.m), BigInt::from(poly.l));
+    eval_mod(&f, &m, &l, &nb).is_zero()
 }
 
 fn num_integer_gcd(mut a: BigInt, mut b: BigInt) -> BigInt {
