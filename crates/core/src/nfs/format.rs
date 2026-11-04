@@ -16,9 +16,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use num_bigint::BigInt;
+use num_traits::{Signed, Zero};
+
 use super::params::Params;
 use super::poly::Poly;
-use super::sieve::{Relation, Wide, norm};
+use super::sieve::{Relation, Wide, norm, rational, to_wide};
 use super::sqrt::has_common_root;
 use crate::arith::{Limb, Uint};
 use crate::primes::Primes;
@@ -26,6 +29,12 @@ use crate::primes::Primes;
 /// Primes below this may be missing from a relation read, and are found
 /// by trial division.
 const LEFT_OUT: u64 = 1000;
+
+/// Polynomials read have coefficients below `2^COEFF_BITS`, so that the
+/// sieve's norms fit, and degree up to `MAX_DEGREE`, for the square root.
+/// RSA-768's had degree 6 and coefficients of up to 137 bits.
+const COEFF_BITS: u64 = 256;
+const MAX_DEGREE: usize = 6;
 
 /// `rel` as a line, without a newline.
 pub fn relation_line(rel: &Relation) -> String {
@@ -59,21 +68,17 @@ pub fn parse_relation(poly: &Poly, line: &str) -> Option<Relation> {
     if b == 0 || gcd(a.unsigned_abs(), b) != 1 {
         return None;
     }
-    // l·a − m·b.
-    let la = i128::try_from(poly.l).ok()?.checked_mul(a.into())?;
-    let mb = i128::try_from(poly.m).ok()?.checked_mul(b.into())?;
-    let g = la.checked_sub(mb)?;
-    let mut rational = parse_primes(rat)?;
-    let mut algebraic = parse_primes(alg)?;
-    let g_wide = Wide::from_u64(g.unsigned_abs() as u64)
-        .wrapping_add(&(Wide::from_u64((g.unsigned_abs() >> 64) as u64) << 64));
-    if !factors(g_wide, &mut rational) || !factors(norm(&poly.f, a, b), &mut algebraic) {
+    let g = (to_wide(&poly.m)?.0, to_wide(&poly.l)?.0);
+    let f: Vec<(Wide, bool)> = poly.f.iter().map(to_wide).collect::<Option<_>>()?;
+    let (g_value, negative) = rational(&g, a, b)?;
+    let (mut rational, mut algebraic) = (parse_primes(rat)?, parse_primes(alg)?);
+    if !factors(g_value, &mut rational) || !factors(norm(&f, a, b), &mut algebraic) {
         return None;
     }
     Some(Relation {
         a,
         b,
-        negative: g < 0,
+        negative,
         rational,
         algebraic,
     })
@@ -140,15 +145,15 @@ pub fn poly_text<const LIMBS: usize>(n: &Uint<LIMBS>, poly: &Poly) -> String {
 }
 
 /// The polynomial pair in `.poly` or `.fb` `text`, if it is one for `n`:
-/// `f` and `g` with a common root modulo `n`, `g` of degree one. `params`
-/// rates it.
+/// `f` and `g` with a common root modulo `n`, `g` of degree one, `f` of
+/// degree 2 to 6, and coefficients below 2^256. `params` rates it.
 pub fn parse_poly<const LIMBS: usize>(
     n: &Uint<LIMBS>,
     text: &str,
     params: &Params,
 ) -> Option<Poly> {
-    let mut f: Vec<i128> = Vec::new();
-    let (mut y0, mut y1): (Option<i128>, Option<i128>) = (None, None);
+    let mut f: Vec<BigInt> = Vec::new();
+    let (mut y0, mut y1): (Option<BigInt>, Option<BigInt>) = (None, None);
     let mut skew = None;
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -173,27 +178,31 @@ pub fn parse_poly<const LIMBS: usize>(
                     .strip_prefix('c')
                     .or_else(|| key.strip_prefix('A'))
                     .and_then(|i| i.parse::<usize>().ok())
-                    .filter(|&i| i <= 8)
+                    .filter(|&i| i <= MAX_DEGREE)
                 else {
                     continue;
                 };
                 if f.len() <= i {
-                    f.resize(i + 1, 0);
+                    f.resize(i + 1, BigInt::zero());
                 }
                 f[i] = value.parse().ok()?;
             }
         }
     }
-    while f.last() == Some(&0) {
+    while f.last().is_some_and(Zero::is_zero) {
         f.pop();
     }
     // g = Y1·x + Y0 = l·x − m, with l > 0.
     let (mut y0, mut y1) = (y0?, y1?);
-    if y1 < 0 {
+    if y1.is_negative() {
         (y0, y1) = (-y0, -y1);
     }
-    let (m, l) = (u128::try_from(-y0).ok()?, u128::try_from(y1).ok()?);
-    if f.len() < 3 || m == 0 || l == 0 {
+    let (m, l) = (-y0, y1);
+    let too_wide = |c: &BigInt| c.bits() >= COEFF_BITS;
+    if f.len() < 3 || !m.is_positive() || !l.is_positive() {
+        return None;
+    }
+    if f.iter().chain([&m, &l]).any(too_wide) {
         return None;
     }
     let mut poly = Poly::rated(f, m, l, params);

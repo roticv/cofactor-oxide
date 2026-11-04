@@ -2,7 +2,9 @@
 
 use alloc::vec::Vec;
 
-use super::modp::{eval, inv, reduce, roots};
+use num_bigint::BigInt;
+
+use super::modp::{Coeff, eval, inv, reduce, roots};
 use super::poly::Poly;
 use crate::primes::Primes;
 use crate::qs::log2;
@@ -56,16 +58,16 @@ pub struct FactorBase {
 impl FactorBase {
     pub fn new(poly: &Poly, rational_bound: u32, algebraic_bound: u32, characters: usize) -> Self {
         let f = &poly.f;
-        let lead = f[f.len() - 1];
+        let lead = &f[f.len() - 1];
         // g(x) = l·x − m has the root m/l mod p, or one at infinity if p | l.
-        let (m, l) = (poly.m, poly.l);
+        let (m, l) = (&poly.m, &poly.l);
         let rational = Primes::new(2, rational_bound.into())
             .map(|p| {
-                let lp = (l % u128::from(p)) as u64;
+                let lp = l.mod_p(p);
                 let r = if lp == 0 {
                     p
                 } else {
-                    (m % u128::from(p)) as u64 * inv(lp, p) % p
+                    m.mod_p(p) * inv(lp, p) % p
                 };
                 Prime::new(p, r)
             })
@@ -73,22 +75,22 @@ impl FactorBase {
         let mut algebraic = Vec::new();
         for p in Primes::new(2, algebraic_bound.into()) {
             algebraic.extend(roots(f, p).into_iter().map(|r| Prime::new(p, r)));
-            if lead.rem_euclid(i128::from(p)) == 0 {
+            if lead.mod_p(p) == 0 {
                 algebraic.push(Prime::new(p, p));
             }
         }
-        let derivative: Vec<i128> = f
+        let derivative: Vec<BigInt> = f
             .iter()
             .enumerate()
             .skip(1)
-            .map(|(i, &c)| c * i as i128)
+            .map(|(i, c)| c * BigInt::from(i))
             .collect();
         let mut chars = Vec::with_capacity(characters);
         for q in Primes::new(CHARACTER_PRIMES, 1 << 32) {
             if chars.len() >= characters {
                 break;
             }
-            if lead.rem_euclid(i128::from(q)) == 0 {
+            if lead.mod_p(q) == 0 {
                 continue;
             }
             let df = reduce(&derivative, q);

@@ -1,8 +1,8 @@
 //! The square roots of a dependency on both sides, and the factor they
-//! give. This is the only module that needs integers larger than `Uint`:
-//! the algebraic square root has coefficients of hundreds of thousands of
-//! bits. It uses `num-bigint`, which stays inside this module, also used
-//! to check that a polynomial read from a file has a root modulo `N`.
+//! give. The algebraic square root has coefficients of hundreds of
+//! thousands of bits, in `num-bigint`'s integers, as are a [`Poly`]'s.
+//! This module also checks that a polynomial read from a file has a root
+//! modulo `N`.
 //!
 //! With `c` the leading coefficient of `f`, `θ = c·α` is a root of the
 //! monic `F(x) = c^(d−1)·f(x/c)`, so `ℤ[θ]` is in the ring of integers.
@@ -258,10 +258,10 @@ pub fn factor<const LIMBS: usize>(
 ) -> Option<Uint<LIMBS>> {
     let nb: BigInt = n.to_string().parse().ok()?;
     let d = poly.degree();
-    let lead = BigInt::from(poly.f[d]);
+    let lead = poly.f[d].clone();
     // F(x) = c^(d−1)·f(x/c), monic.
     let mut f: Vec<BigInt> = (0..d)
-        .map(|i| BigInt::from(poly.f[i]) * num_traits::pow(lead.clone(), d - 1 - i))
+        .map(|i| &poly.f[i] * num_traits::pow(lead.clone(), d - 1 - i))
         .collect();
     f.push(BigInt::one());
     let df: Vec<BigInt> = (1..=d).map(|i| &f[i] * BigInt::from(i)).collect();
@@ -282,8 +282,8 @@ pub fn factor<const LIMBS: usize>(
     // θ maps to c·m/l. Rather than invert l, both sides are multiplied by
     // l^(d−1+k/2): X = S(c·m, l)·l^(k/2) and Y = c^(k/2)·F′(c·m, l)·∏ p^(e/2),
     // with S and F′ homogenized to degree d − 1.
-    let cm = modulo(&(&lead * BigInt::from(poly.m)), &nb);
-    let l = modulo(&BigInt::from(poly.l), &nb);
+    let cm = modulo(&(&lead * &poly.m), &nb);
+    let l = modulo(&poly.l, &nb);
     let half = BigInt::from(deps.len() / 2);
     let x = modulo(&(eval_mod(&s, &cm, &l, &nb) * l.modpow(&half, &nb)), &nb);
     let mut exponents: BTreeMap<u64, u32> = BTreeMap::new();
@@ -310,9 +310,7 @@ pub(crate) fn has_common_root<const LIMBS: usize>(n: &Uint<LIMBS>, poly: &Poly) 
     let Ok(nb) = n.to_string().parse::<BigInt>() else {
         return false;
     };
-    let f: Vec<BigInt> = poly.f.iter().map(|&c| BigInt::from(c)).collect();
-    let (m, l) = (BigInt::from(poly.m), BigInt::from(poly.l));
-    eval_mod(&f, &m, &l, &nb).is_zero()
+    eval_mod(&poly.f, &poly.m, &poly.l, &nb).is_zero()
 }
 
 fn num_integer_gcd(mut a: BigInt, mut b: BigInt) -> BigInt {

@@ -81,14 +81,16 @@ pub struct Gnfs<const LIMBS: usize> {
 
 impl<const LIMBS: usize> Gnfs<LIMBS> {
     /// Chooses the polynomial and builds the factor bases for `n`, an odd
-    /// composite that isn't a prime power.
-    pub fn new(n: &Uint<LIMBS>, params: &Params) -> Self {
+    /// composite that isn't a prime power. `None` past about 480 bits,
+    /// where [`Poly::select`] can't: there, [`Gnfs::with_poly`] takes
+    /// polynomials from elsewhere.
+    pub fn new(n: &Uint<LIMBS>, params: &Params) -> Option<Self> {
         Self::new_with(n, params, &Serial)
     }
 
     /// [`Gnfs::new`], with the polynomial search shared out by `par`.
-    pub fn new_with(n: &Uint<LIMBS>, params: &Params, par: &impl Parallel) -> Self {
-        Self::with_poly(n, params, Poly::select_with(n, par))
+    pub fn new_with(n: &Uint<LIMBS>, params: &Params, par: &impl Parallel) -> Option<Self> {
+        Some(Self::with_poly(n, params, Poly::select_with(n, par)?))
     }
 
     /// GNFS for `n` with the polynomials `poly`, which must have a common
@@ -271,7 +273,8 @@ impl<const LIMBS: usize> Relations<LIMBS> {
 }
 
 /// Factors `n`, an odd composite that isn't a prime power, with GNFS on
-/// one thread. Returns a proper factor, or `None` if none was found.
+/// one thread. Returns a proper factor, or `None` if none was found or
+/// `n` is too large to choose polynomials for.
 pub fn gnfs<const LIMBS: usize>(n: &Uint<LIMBS>) -> Option<Uint<LIMBS>> {
     let params = Params::for_bits(n.bits());
     gnfs_with(n, &params, |_, _| ControlFlow::Continue(())).unwrap_or(None)
@@ -284,7 +287,9 @@ pub fn gnfs_with<const LIMBS: usize>(
     params: &Params,
     mut progress: impl FnMut(u64, usize) -> ControlFlow<()>,
 ) -> Result<Option<Uint<LIMBS>>, Stopped> {
-    let gnfs = Gnfs::new(n, params);
+    let Some(gnfs) = Gnfs::new(n, params) else {
+        return Ok(None);
+    };
     let mut sieve = gnfs.sieve();
     let mut relations = gnfs.relations();
     'sieve: for k in 0.. {

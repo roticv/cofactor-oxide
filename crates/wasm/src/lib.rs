@@ -226,7 +226,8 @@ impl GnfsCollector {
     #[wasm_bindgen(constructor)]
     pub fn new(n: &str) -> Result<GnfsCollector, JsError> {
         let n: Wide = n.trim().parse()?;
-        let gnfs = Gnfs::new(&n, &Params::for_bits(n.bits()));
+        let gnfs = Gnfs::new(&n, &Params::for_bits(n.bits()))
+            .ok_or_else(|| JsError::new("too large to choose polynomials for"))?;
         let fb = gnfs.factor_base();
         Ok(GnfsCollector {
             poly: poly_text(&n, gnfs.poly()),

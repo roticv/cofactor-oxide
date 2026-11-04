@@ -4,6 +4,7 @@
 
 use alloc::vec::Vec;
 
+use super::modp::Coeff;
 use super::params::Params;
 use super::poly::exp2;
 use crate::qs::log2;
@@ -41,8 +42,8 @@ fn log_l2(f: &[f64], ls: f64) -> f64 {
 
 /// The skew that minimizes the L² norm of `f`'s values, and `log₂` of that
 /// norm.
-pub fn lognorm(f: &[i128]) -> (f64, f64) {
-    let f: Vec<f64> = f.iter().map(|&c| c as f64).collect();
+pub fn lognorm<C: Coeff>(f: &[C]) -> (f64, f64) {
+    let f: Vec<f64> = f.iter().map(Coeff::to_f64).collect();
     // Golden-section search on log₂ s.
     let phi = 0.618_033_988_749_895;
     let (mut lo, mut hi) = (-8.0f64, 80.0f64);
@@ -121,8 +122,15 @@ impl Murphy {
 
     /// Murphy's E for `f` and `g = l·x − m`, given as `(m, l)`, at skew
     /// `skew`, with each one's α.
-    pub fn e(&self, f: &[i128], (m, l): (f64, f64), skew: f64, alpha_f: f64, alpha_g: f64) -> f64 {
-        let f: Vec<f64> = f.iter().map(|&c| c as f64).collect();
+    pub fn e<C: Coeff>(
+        &self,
+        f: &[C],
+        (m, l): (f64, f64),
+        skew: f64,
+        alpha_f: f64,
+        alpha_g: f64,
+    ) -> f64 {
+        let f: Vec<f64> = f.iter().map(Coeff::to_f64).collect();
         let ls = log2(skew);
         let (rx, ry) = (
             exp2((self.log_area + ls) / 2.0),

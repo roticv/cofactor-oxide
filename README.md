@@ -186,6 +186,13 @@ The first line GNFS prints on stderr says where its special-q start, for
 this size of number; ranges from there up are the most productive, as
 smaller special-q give smaller values to factor.
 
+cofox chooses polynomials for numbers up to about 480 bits (145 digits).
+Past that, give it ones chosen by CADO-NFS or msieve with `--poly`, in
+either's format, of degree up to 6 with coefficients of any size below
+2^256. The sieve's parameters are tuned up to 600 bits (180 digits); larger
+numbers, such as RSA-270, would need three large primes a side, which the
+siever doesn't do yet.
+
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
 `wasm-bindgen-cli` whose version matches `wasm-bindgen` in `Cargo.lock`:

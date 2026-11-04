@@ -17,7 +17,7 @@ impl Rng {
     }
 }
 
-fn eval_mod(f: &[i128], r: u64, p: u64) -> u64 {
+fn eval_mod<C: modp::Coeff>(f: &[C], r: u64, p: u64) -> u64 {
     modp::eval(&modp::reduce(f, p), r, p)
 }
 
@@ -86,15 +86,15 @@ fn selected_polynomials_have_root_m() {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     for s in numbers {
         let n = u(s);
-        let poly = Poly::select_with(&n, &Threads(threads));
+        let poly = Poly::select_with(&n, &Threads(threads)).unwrap();
         assert_eq!(poly.degree(), degree(n.bits()));
         // Translation and rotation keep F(m, l) = N exactly.
-        let (m, l) = (BigInt::from(poly.m), BigInt::from(poly.l));
+        let (m, l) = (&poly.m, &poly.l);
         let value: BigInt = poly
             .f
             .iter()
             .enumerate()
-            .map(|(i, &c)| BigInt::from(c) * m.pow(i as u32) * l.pow((poly.degree() - i) as u32))
+            .map(|(i, c)| c * m.pow(i as u32) * l.pow((poly.degree() - i) as u32))
             .sum();
         assert_eq!(
             value,
@@ -128,23 +128,24 @@ fn factor_base_primes_divide() {
     let n = u(
         "250782620106046385035853403635783676572083888259628917477091391671746381406504458761424731",
     );
-    let poly = Poly::select(&n);
+    let poly = Poly::select(&n).unwrap();
     let fb = FactorBase::new(&poly, 100_000, 200_000, 40);
     assert_eq!(fb.rational.len(), Primes::new(2, 100_000).count());
     for q in &fb.rational {
-        let p = u128::from(q.p);
+        let p = BigInt::from(q.p);
         if q.projective() {
-            assert_eq!(poly.l % p, 0);
+            assert_eq!(&poly.l % &p, BigInt::ZERO);
         } else {
-            assert_eq!((poly.l * u128::from(q.r) + p - poly.m % p) % p, 0, "{q:?}");
+            let g = (&poly.l * BigInt::from(q.r) - &poly.m) % &p;
+            assert_eq!(g, BigInt::ZERO, "{q:?}");
         }
     }
-    let lead = poly.f[poly.degree()];
+    let lead = &poly.f[poly.degree()];
     for q in &fb.algebraic {
         let p = u64::from(q.p);
         assert!(p <= 200_000);
         if q.projective() {
-            assert_eq!(lead.rem_euclid(i128::from(q.p)), 0);
+            assert_eq!(lead % BigInt::from(q.p), BigInt::ZERO);
         } else {
             assert_eq!(eval_mod(&poly.f, q.r.into(), p), 0, "{q:?}");
         }
@@ -166,7 +167,7 @@ fn factor_base_primes_divide() {
 /// infinity.
 fn check_relation(poly: &Poly, fb: &FactorBase, q: u64, rel: &Relation) {
     let (a, b) = (BigInt::from(rel.a), BigInt::from(rel.b));
-    let rational = BigInt::from(poly.l) * &a - &b * BigInt::from(poly.m);
+    let rational = &poly.l * &a - &b * &poly.m;
     assert_eq!(rational < BigInt::from(0), rel.negative, "{rel:?}");
     let product = |ps: &[u64]| {
         ps.iter()
@@ -182,7 +183,7 @@ fn check_relation(poly: &Poly, fb: &FactorBase, q: u64, rel: &Relation) {
         .f
         .iter()
         .enumerate()
-        .map(|(i, &c)| BigInt::from(c) * a.pow(i as u32) * b.pow((d - i) as u32))
+        .map(|(i, c)| c * a.pow(i as u32) * b.pow((d - i) as u32))
         .sum();
     assert_eq!(
         product(&rel.algebraic),
@@ -223,7 +224,7 @@ fn modp_inv(a: u64, p: u64) -> u64 {
 /// found.
 fn sieve_special_qs(n: &str, count: usize) -> usize {
     let n = u(n);
-    let poly = Poly::select(&n);
+    let poly = Poly::select(&n).unwrap();
     let params = Params::for_bits(n.bits());
     let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
     let mut sieve = Sieve::new(&poly, &fb, &params);
@@ -282,7 +283,7 @@ fn gnfs_factors() {
     ];
     for (n, p, q, kleinjung) in cases {
         let (n, p, q) = (u(n), u(p), u(q));
-        assert_eq!(Poly::select(&n).l > 1, kleinjung);
+        assert_eq!(Poly::select(&n).unwrap().l > BigInt::from(1), kleinjung);
         let t = std::time::Instant::now();
         let f = cofox_core::nfs::gnfs(&n).expect("no factor");
         println!("{} bits: {f} in {:.2?}", n.bits(), t.elapsed());
@@ -331,7 +332,7 @@ fn gnfs_factors_in_pieces() {
         u("98936812917358800691"),
         u("11888570237800257629"),
     );
-    let gnfs = cofox_core::nfs::Gnfs::new(&n, &Params::for_bits(n.bits()));
+    let gnfs = cofox_core::nfs::Gnfs::new(&n, &Params::for_bits(n.bits())).unwrap();
     let mut sieve = gnfs.sieve();
     let mut relations = gnfs.relations();
     for k in 0.. {
@@ -355,7 +356,7 @@ fn relations_as_text() {
     use cofox_core::nfs::{parse_relation, relation_line};
     // 50 digits, so that l > 1.
     let n = u("59858698299029333151760743317766029830337454377407");
-    let poly = Poly::select(&n);
+    let poly = Poly::select(&n).unwrap();
     let params = Params::for_bits(n.bits());
     let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
     let mut sieve = Sieve::new(&poly, &fb, &params);
@@ -423,10 +424,10 @@ fn polynomials_as_text() {
     use cofox_core::nfs::{parse_poly, poly_text};
     let n = u("59858698299029333151760743317766029830337454377407");
     let params = Params::for_bits(n.bits());
-    let poly = Poly::select(&n);
+    let poly = Poly::select(&n).unwrap();
     let text = poly_text(&n, &poly);
     let back = parse_poly(&n, &text, &params).expect(&text);
-    assert_eq!((&back.f, back.m, back.l), (&poly.f, poly.m, poly.l));
+    assert_eq!((&back.f, &back.m, &back.l), (&poly.f, &poly.m, &poly.l));
     assert!(
         (back.e - poly.e).abs() <= 1e-9 * poly.e,
         "{} vs {}",
@@ -439,7 +440,7 @@ fn polynomials_as_text() {
         fb += &format!("A{i} {c}\n");
     }
     let back = parse_poly(&n, &fb, &params).expect(&fb);
-    assert_eq!((&back.f, back.m, back.l), (&poly.f, poly.m, poly.l));
+    assert_eq!((&back.f, &back.m, &back.l), (&poly.f, &poly.m, &poly.l));
     // Another number, or a g without the common root.
     assert!(
         parse_poly(
@@ -449,6 +450,88 @@ fn polynomials_as_text() {
         )
         .is_none()
     );
-    let shifted = text.replace(&format!("Y0: -{}", poly.m), &format!("Y0: -{}", poly.m + 1));
+    let shifted = text.replace(
+        &format!("Y0: -{}", poly.m),
+        &format!("Y0: -{}", &poly.m + 1),
+    );
     assert!(parse_poly(&n, &shifted, &params).is_none());
+}
+
+/// Polynomials with coefficients past 128 bits, as for numbers past
+/// about 480 bits: `f = (K + 1) + K·x − K·x² − K·x³ + 3·x⁴ + x⁵` and
+/// `g = (K + 3)·x − (K − 3)` for `K = 3^89`, about 2^141, with `N = F(m, l)`.
+/// They make `F(1, 1) = 5`, `G(1, 1) = 6`, `F(−1, 1) = 3` and
+/// `G(−1, 1) = −2·3^89`, so relations there are known.
+#[test]
+fn wide_polynomials() {
+    use cofox_core::nfs::{parse_poly, parse_relation, poly_text};
+    let k = BigInt::from(3).pow(89);
+    let f: [BigInt; 6] = [&k + 1, k.clone(), -&k, -&k, 3.into(), 1.into()];
+    let (m, l): (BigInt, BigInt) = (&k - 3, &k + 3);
+    let n: BigInt = f
+        .iter()
+        .enumerate()
+        .map(|(i, c)| c * m.pow(i as u32) * l.pow(5 - i as u32))
+        .sum();
+    // Past 512 bits, which Uint<16> holds with 32-bit limbs.
+    let n: Uint<32> = n.magnitude().to_string().parse().unwrap();
+    let mut text = format!("n: {n}\nY0: -{m}\nY1: {l}\n");
+    for (i, c) in f.iter().enumerate() {
+        text += &format!("c{i}: {c}\n");
+    }
+    let params = Params::for_bits(n.bits());
+    let poly = parse_poly(&n, &text, &params).expect(&text);
+    assert_eq!((&poly.f[..], &poly.m, &poly.l), (&f[..], &m, &l));
+    let back = parse_poly(&n, &poly_text(&n, &poly), &params).unwrap();
+    assert_eq!((&back.f, &back.m, &back.l), (&poly.f, &poly.m, &poly.l));
+
+    // The primes below 1000 left out are found again.
+    let rel = parse_relation(&poly, "1,1:2,3:5").unwrap();
+    assert_eq!(
+        (rel.negative, rel.rational, rel.algebraic),
+        (false, vec![2, 3], vec![5])
+    );
+    let rel = parse_relation(&poly, "-1,1::").unwrap();
+    let mut rational = vec![2];
+    rational.extend([3; 89]);
+    assert_eq!(
+        (rel.negative, rel.rational, rel.algebraic),
+        (true, rational, vec![3])
+    );
+    assert!(parse_relation(&poly, "1,1:2,3:7").is_none());
+
+    // The factor bases' roots, reduced from the wide coefficients.
+    let fb = FactorBase::new(&poly, 2_000, 2_000, 8);
+    let value = |c: &[BigInt], r: u64| -> BigInt {
+        c.iter()
+            .enumerate()
+            .map(|(i, c)| c * BigInt::from(r).pow(i as u32))
+            .sum()
+    };
+    for q in &fb.rational {
+        let p = BigInt::from(q.p);
+        let g = if q.projective() {
+            l.clone()
+        } else {
+            &l * q.r - &m
+        };
+        assert_eq!(g % &p, BigInt::ZERO, "{q:?}");
+    }
+    for q in fb.algebraic.iter().chain(&fb.characters) {
+        let p = BigInt::from(q.p);
+        let v = if q.projective() {
+            f[5].clone()
+        } else {
+            value(&f, q.r.into())
+        };
+        assert_eq!(v % &p, BigInt::ZERO, "{q:?}");
+    }
+
+    // Sieving with them runs, and whatever it finds holds.
+    let mut sieve = Sieve::new(&poly, &fb, &params);
+    for (q, r) in special_qs(&poly, 3000, 3100) {
+        for rel in sieve.special_q(q, r) {
+            check_relation(&poly, &fb, q, &rel);
+        }
+    }
 }

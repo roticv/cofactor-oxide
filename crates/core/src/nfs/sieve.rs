@@ -22,8 +22,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use num_bigint::{BigInt, Sign};
+
 use super::base::{FactorBase, Prime};
-use super::modp::roots;
+use super::modp::{Coeff, roots};
 use super::params::Params;
 use super::poly::Poly;
 use crate::arith::{Limb, Uint};
@@ -57,7 +59,8 @@ const LANES: usize = 4;
 /// powers of primes the sieve counts once.
 const FUDGE: f64 = 4.0;
 
-/// Wide enough for `F(a, b)` and `a − b·m` up to 400-bit `N`.
+/// Wide enough for `F(a, b)` and `l·a − m·b`: about 300 bits at most for
+/// RSA-270-class polynomials.
 pub(crate) type Wide = Uint<{ 512 / Limb::BITS as usize }>;
 
 /// A pair `(a, b)` with `G(a, b) = l·a − m·b` and `F(a, b)` smooth.
@@ -424,11 +427,25 @@ pub struct Sieve {
     log_j: u32,
     rational: Side,
     algebraic: Side,
+    /// `f`'s coefficients, and `g`'s as `(m, l)`, as `f64` for the
+    /// thresholds.
     f: Vec<f64>,
+    g: (f64, f64),
+    /// `f`'s coefficients, and `g`'s as `(m, l)`, exactly, for checking
+    /// candidates: `g`'s also in 128 bits when they fit, as they do below
+    /// about 480 bits, for speed.
+    f_wide: Vec<(Wide, bool)>,
+    g_wide: (Wide, Wide),
+    g_small: Option<(u128, i128)>,
     marked: Vec<bool>,
 }
 
+const TOO_WIDE: &str = "polynomial coefficients too large";
+
 impl Sieve {
+    /// A sieve for `poly`, whose coefficients must be below 2^256 so that
+    /// the norms fit in 512 bits, as [`parse_poly`](super::parse_poly)
+    /// checks.
     pub fn new(poly: &Poly, fb: &FactorBase, params: &Params) -> Self {
         let log_i = params.log_i;
         let log_j = log_i - 1;
@@ -447,7 +464,16 @@ impl Sieve {
                 (params.algebraic_lpb, params.algebraic_mfb),
                 slab,
             ),
-            f: poly.f.iter().map(|&c| c as f64).collect(),
+            f: poly.f.iter().map(Coeff::to_f64).collect(),
+            g: (poly.m.to_f64(), poly.l.to_f64()),
+            f_wide: poly.f.iter().map(|c| to_wide(c).expect(TOO_WIDE)).collect(),
+            g_wide: (
+                to_wide(&poly.m).expect(TOO_WIDE).0,
+                to_wide(&poly.l).expect(TOO_WIDE).0,
+            ),
+            g_small: u128::try_from(&poly.m)
+                .ok()
+                .zip(i128::try_from(&poly.l).ok()),
             marked: vec![false; slab],
         }
     }
@@ -481,7 +507,7 @@ impl Sieve {
         (r_slack, a_slack): (f64, f64),
     ) -> (u8, u8) {
         let half = (1i64 << self.log_i) / 2;
-        let (m, l) = (self.poly.m as f64, self.poly.l as f64);
+        let (m, l) = self.g;
         let ends = [x as i64 - half, (x + len) as i64 - half].map(|i| {
             let a = i as f64 * u.0 as f64 + j as f64 * v.0 as f64;
             let b = i as f64 * u.1 as f64 + j as f64 * v.1 as f64;
@@ -621,10 +647,14 @@ impl Sieve {
             return None;
         }
         // Rational side: l·a − b·m.
-        let bm = i128::try_from(u128::from(b).checked_mul(self.poly.m)?).ok()?;
-        let la = i128::try_from(self.poly.l).ok()?.checked_mul(a.into())?;
-        let negative = la < bm;
-        let mut v = wide(la.checked_sub(bm)?.unsigned_abs());
+        let (mut v, negative) = match self.g_small {
+            Some((m, l)) => {
+                let bm = i128::try_from(u128::from(b).checked_mul(m)?).ok()?;
+                let la = l.checked_mul(a.into())?;
+                (wide(la.checked_sub(bm)?.unsigned_abs()), la < bm)
+            }
+            None => rational(&self.g_wide, a, b)?,
+        };
         let mut rational = Vec::new();
         self.rational.divide(a, b, x, r_hits, &mut v, &mut rational);
         if !self.rational.cofactor(&v, &mut rational) {
@@ -632,7 +662,7 @@ impl Sieve {
         }
 
         // Algebraic side: F(a, b), which q divides.
-        let mut v = norm(&self.poly.f, a, b);
+        let mut v = norm(&self.f_wide, a, b);
         let mut algebraic = Vec::new();
         divide_out(&mut v, q as u32, &mut algebraic);
         self.algebraic
@@ -823,25 +853,42 @@ fn div_small(v: &Wide, p: u32) -> (Wide, u64) {
     (Wide::from_limbs(quotient), rem)
 }
 
-/// `|F(a, b)| = |Σ cᵢ·aⁱ·b^(d−i)|`, exactly.
-pub(crate) fn norm(f: &[i128], a: i64, b: u64) -> Wide {
+/// `|l·a − m·b|` for `g = (m, l)`, and whether it's negative, or `None` if
+/// it doesn't fit.
+pub(crate) fn rational((m, l): &(Wide, Wide), a: i64, b: u64) -> Option<(Wide, bool)> {
+    let (la, high_la) = l.widening_mul(&Wide::from_u64(a.unsigned_abs()));
+    let (mb, high_mb) = m.widening_mul(&Wide::from_u64(b));
+    if !high_la.is_zero() || !high_mb.is_zero() {
+        return None;
+    }
+    Some(if a < 0 {
+        (la.checked_add(&mb)?, true)
+    } else if la >= mb {
+        (la.wrapping_sub(&mb), false)
+    } else {
+        (mb.wrapping_sub(&la), true)
+    })
+}
+
+/// `|F(a, b)| = |Σ cᵢ·aⁱ·b^(d−i)|`, exactly, for `f`'s coefficients
+/// `(|cᵢ|, cᵢ < 0)`.
+pub(crate) fn norm(f: &[(Wide, bool)], a: i64, b: u64) -> Wide {
     let d = f.len() - 1;
     let (mut pos, mut neg) = (Wide::ZERO, Wide::ZERO);
     let wa = Wide::from_u64(a.unsigned_abs());
     let wb = Wide::from_u64(b);
-    for (i, &c) in f.iter().enumerate() {
-        if c == 0 {
+    for (i, &(c, negative)) in f.iter().enumerate() {
+        if c.is_zero() {
             continue;
         }
-        let ca = c.unsigned_abs();
-        let mut t = wide(ca);
+        let mut t = c;
         for _ in 0..i {
             t = t.widening_mul(&wa).0;
         }
         for _ in i..d {
             t = t.widening_mul(&wb).0;
         }
-        if (c < 0) != (a < 0 && i % 2 == 1) {
+        if negative != (a < 0 && i % 2 == 1) {
             neg = neg.wrapping_add(&t);
         } else {
             pos = pos.wrapping_add(&t);
@@ -852,6 +899,17 @@ pub(crate) fn norm(f: &[i128], a: i64, b: u64) -> Wide {
     } else {
         neg.wrapping_sub(&pos)
     }
+}
+
+/// `(|c|, c < 0)`, if `|c|` fits in a [`Wide`].
+pub(crate) fn to_wide(c: &BigInt) -> Option<(Wide, bool)> {
+    if c.bits() >= 512 {
+        return None;
+    }
+    let w = c.iter_u64_digits().rev().fold(Wide::ZERO, |w, d| {
+        (w << 64).wrapping_add(&Wide::from_u64(d))
+    });
+    Some((w, c.sign() == Sign::Minus))
 }
 
 fn wide(x: u128) -> Wide {

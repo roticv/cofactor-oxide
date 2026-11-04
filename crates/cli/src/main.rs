@@ -44,7 +44,8 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
                 merge relations sieved on several machines
   --poly FILE   with --gnfs, use the polynomials in FILE, choosing them and
                 writing them there first if it doesn't exist, so that
-                machines sieving one number share them
+                machines sieving one number share them; past about 480
+                bits, FILE must hold ones from CADO-NFS or msieve
   --special-q START:END
                 with --gnfs and --save-relations, only sieve the special-q
                 from START to END and save the relations, as one machine's
@@ -430,6 +431,17 @@ enum Range {
 /// integers, within a range.
 const Q_RANGE_BLOCK: u64 = 64;
 
+/// Chooses polynomials for `n`, or exits if it's too large to.
+fn select(n: &Wide, threads: usize) -> Poly {
+    Poly::select_with(n, &Threads(threads)).unwrap_or_else(|| {
+        eprintln!(
+            "cofox: GNFS can't choose polynomials past about 480 bits; give it ones from \
+             CADO-NFS or msieve with --poly"
+        );
+        std::process::exit(1);
+    })
+}
+
 /// GNFS for `n`, with the polynomials from `--poly`, which are chosen and
 /// written there first if the file doesn't exist; or else from the first
 /// file loaded with a `.poly` beside it; or else chosen. Then the
@@ -453,7 +465,7 @@ fn gnfs_start(
                 }
             },
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                let poly = Poly::select_with(n, &Threads(threads));
+                let poly = select(n, threads);
                 if let Err(e) = std::fs::write(path, poly_text(n, &poly)) {
                     eprintln!("cofox: can't write {}: {e}", path.display());
                     std::process::exit(1);
@@ -471,7 +483,7 @@ fn gnfs_start(
     }) {
         (poly, "read")
     } else {
-        (Poly::select_with(n, &Threads(threads)), "chosen")
+        (select(n, threads), "chosen")
     };
     let gnfs = Gnfs::with_poly(n, &params, poly);
     let fb = gnfs.factor_base();

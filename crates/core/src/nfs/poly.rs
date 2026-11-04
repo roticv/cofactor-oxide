@@ -17,8 +17,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use num_bigint::BigInt;
+
 use super::kleinjung;
-use super::modp::{eval, inv, reduce};
+use super::modp::{Coeff, eval, inv, reduce};
 use super::params::Params;
 use super::score::{Murphy, lognorm};
 use crate::arith::{Limb, Uint};
@@ -87,14 +89,18 @@ const ALPHA_PRIMES: u64 = 200;
 
 /// Two polynomials for GNFS: `f` of degree `d` and `g(x) = l·x − m`, with
 /// `F(m, l) = l^d·f(m/l) = N`, so that `m/l` is a common root modulo `N`.
+///
+/// The coefficients are of any size: those [`Poly::select`] chooses fit
+/// in 128 bits, but past about 480 bits polynomials come from other
+/// programs, through [`parse_poly`](super::parse_poly).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Poly {
     /// The coefficients of `f`, lowest degree first.
-    pub f: Vec<i128>,
-    /// `g`'s constant term, negated.
-    pub m: u128,
-    /// `g`'s leading coefficient: 1 for base-m.
-    pub l: u128,
+    pub f: Vec<BigInt>,
+    /// `g`'s constant term, negated: positive.
+    pub m: BigInt,
+    /// `g`'s leading coefficient: 1 for base-m, and positive.
+    pub l: BigInt,
     /// How much wider the sieve region should be in `a` than in `b`: the
     /// `s` that makes `f`'s values smallest.
     pub skew: f64,
@@ -108,6 +114,23 @@ pub struct Poly {
     /// Murphy's E: how often values of both polynomials are smooth at once,
     /// for the parameters of this size of `N`. Larger is better.
     pub e: f64,
+}
+
+/// A candidate during selection, whose coefficients all fit in machine
+/// integers, which keeps the search fast.
+#[derive(Clone)]
+struct Small {
+    f: Vec<i128>,
+    m: u128,
+    l: u128,
+    size: f64,
+}
+
+impl Small {
+    fn new(f: Vec<i128>, m: u128, l: u128) -> Self {
+        let size = lognorm(&f).1;
+        Self { f, m, l, size }
+    }
 }
 
 /// The degree of `f` for a composite of `bits` bits.
@@ -125,29 +148,30 @@ impl Poly {
     /// others are `n`'s digits in base `m`, centered on 0. The smallest are
     /// size-optimized and root-optimized, and the best by Murphy's E wins.
     ///
-    /// # Panics
-    ///
-    /// Panics if `m` doesn't fit in 96 bits, which happens only past
-    /// about 480 bits at degree 5.
-    pub fn select<const LIMBS: usize>(n: &Uint<LIMBS>) -> Self {
+    /// `None` if `m` doesn't fit in 96 bits, which happens past about 480
+    /// bits: numbers that large need polynomials from elsewhere.
+    pub fn select<const LIMBS: usize>(n: &Uint<LIMBS>) -> Option<Self> {
         Self::select_with(n, &Serial)
     }
 
     /// [`Poly::select`], with Kleinjung's search, size optimization and
     /// root optimization shared out by `par`.
-    pub fn select_with<const LIMBS: usize>(n: &Uint<LIMBS>, par: &impl Parallel) -> Self {
+    pub fn select_with<const LIMBS: usize>(n: &Uint<LIMBS>, par: &impl Parallel) -> Option<Self> {
         let d = degree(n.bits());
         let murphy = Murphy::new(&Params::for_bits(n.bits()));
-        let mut candidates: Vec<Self> = Vec::new();
+        let mut candidates: Vec<Small> = Vec::new();
         for a in 1..=LEADS {
             let (q, _) = n.div_rem(&Uint::from_u64(a));
             let top = root(&q, d as u32);
             for k in 0..OFFSETS {
                 let m = top.wrapping_sub(&Uint::from_u64(k));
-                if let Some(poly) = Self::base_m(n, &m, d) {
+                if let Some(poly) = base_m(n, &m, d) {
                     candidates.push(poly);
                 }
             }
+        }
+        if candidates.is_empty() {
+            return None;
         }
         candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
         candidates.truncate(FINALISTS);
@@ -163,13 +187,13 @@ impl Poly {
                 .into_iter()
                 .flatten()
                 .take(KJ_MAX)
-                .map(|(f, m, l)| Self::new(f, m, l)),
+                .map(|(f, m, l)| Small::new(f, m, l)),
         );
         // Size-optimize them all; nearby m often optimize to the same one.
         let mut sized = map_dynamic(par, candidates.len(), |i| {
             let c = &candidates[i];
             let (f, m) = size_optimize(&c.f, c.m, c.l, true);
-            Self::new(f, m, c.l)
+            Small::new(f, m, c.l)
         });
         sized.sort_by(|x, y| x.size.total_cmp(&y.size));
         sized.dedup_by(|x, y| x.f == y.f && x.m == y.m);
@@ -179,7 +203,7 @@ impl Poly {
             root_optimize(&c.f, c.m, c.l, effort)
                 .into_iter()
                 .map(|(f, m)| {
-                    let mut poly = Self::new(f, m, c.l);
+                    let mut poly = Self::from_small(&f, m, c.l);
                     poly.rate(&murphy);
                     poly
                 })
@@ -189,11 +213,10 @@ impl Poly {
             .into_iter()
             .flatten()
             .reduce(|best, poly| if poly.e > best.e { poly } else { best })
-            .expect("no polynomial")
     }
 
     /// The pair `f`, `l·x − m`, with its skew and size.
-    fn new(f: Vec<i128>, m: u128, l: u128) -> Self {
+    fn new(f: Vec<BigInt>, m: BigInt, l: BigInt) -> Self {
         let (skew, size) = lognorm(&f);
         Self {
             f,
@@ -208,17 +231,21 @@ impl Poly {
 
     /// The pair `f`, `l·x − m`, with its skew, size, α and Murphy's E for
     /// `params`.
-    pub(crate) fn rated(f: Vec<i128>, m: u128, l: u128, params: &Params) -> Self {
+    pub(crate) fn rated(f: Vec<BigInt>, m: BigInt, l: BigInt, params: &Params) -> Self {
         let mut poly = Self::new(f, m, l);
         poly.rate(&Murphy::new(params));
         poly
     }
 
+    fn from_small(f: &[i128], m: u128, l: u128) -> Self {
+        Self::new(f.iter().map(|&c| c.into()).collect(), m.into(), l.into())
+    }
+
     /// Fills in α and Murphy's E.
     fn rate(&mut self, murphy: &Murphy) {
         self.alpha = alpha(&self.f);
-        let alpha_g = alpha(&[-(self.m as i128), self.l as i128]);
-        let g = (self.m as f64, self.l as f64);
+        let alpha_g = alpha(&[-&self.m, self.l.clone()]);
+        let g = (self.m.to_f64(), self.l.to_f64());
         self.e = murphy.e(&self.f, g, self.skew, self.alpha, alpha_g);
     }
 
@@ -230,27 +257,10 @@ impl Poly {
     }
 
     /// `n`'s digits in base `m`, centered on 0, as a polynomial of degree
-    /// `d`, or `None` if the leading digit is 0 or anything overflows.
+    /// `d`, or `None` if the leading digit is 0, or it or `m` is 2^96 or
+    /// more.
     pub fn base_m<const LIMBS: usize>(n: &Uint<LIMBS>, m: &Uint<LIMBS>, d: usize) -> Option<Self> {
-        let m128 = to_u128(m).filter(|&m| m < 1 << 96 && m > 1)?;
-        let mut digits = Vec::with_capacity(d + 1);
-        let mut rest = *n;
-        for _ in 0..d {
-            let (q, r) = rest.div_rem(m);
-            digits.push(to_u128(&r)? as i128);
-            rest = q;
-        }
-        let lead = to_u128(&rest).filter(|&c| c > 0 && c < 1 << 96)?;
-        digits.push(lead as i128);
-        // Center the digits: c − m with a carry keeps f(m) the same.
-        let m = m128 as i128;
-        for i in 0..d {
-            if digits[i] > m / 2 {
-                digits[i] -= m;
-                digits[i + 1] += 1;
-            }
-        }
-        Some(Self::new(digits, m128, 1))
+        base_m(n, m, d).map(|c| Self::from_small(&c.f, c.m, c.l))
     }
 
     /// The degree of `f`.
@@ -259,9 +269,32 @@ impl Poly {
     }
 }
 
+/// [`Poly::base_m`], as a candidate for selection.
+fn base_m<const LIMBS: usize>(n: &Uint<LIMBS>, m: &Uint<LIMBS>, d: usize) -> Option<Small> {
+    let m128 = to_u128(m).filter(|&m| m < 1 << 96 && m > 1)?;
+    let mut digits = Vec::with_capacity(d + 1);
+    let mut rest = *n;
+    for _ in 0..d {
+        let (q, r) = rest.div_rem(m);
+        digits.push(to_u128(&r)? as i128);
+        rest = q;
+    }
+    let lead = to_u128(&rest).filter(|&c| c > 0 && c < 1 << 96)?;
+    digits.push(lead as i128);
+    // Center the digits: c − m with a carry keeps f(m) the same.
+    let m = m128 as i128;
+    for i in 0..d {
+        if digits[i] > m / 2 {
+            digits[i] -= m;
+            digits[i + 1] += 1;
+        }
+    }
+    Some(Small::new(digits, m128, 1))
+}
+
 /// The size of the primes `ℓ` in Kleinjung's `l = q·ℓ₁·ℓ₂`: about
 /// `m^(1/6)`, for a base-m candidate's `m`.
-fn kleinjung_prime(base: &Poly) -> u64 {
+fn kleinjung_prime(base: &Small) -> u64 {
     let bits = 128 - base.m.leading_zeros();
     1u64 << ((bits + 3) / 6 + 1).clamp(6, 15)
 }
@@ -418,12 +451,12 @@ fn root_optimize(f: &[i128], m: u128, l: u128, effort: Effort) -> Vec<(Vec<i128>
 /// `p`, counting a root at infinity when `p` divides the leading
 /// coefficient. A random integer has `1/(p − 1)` factors of `p` on
 /// average, and a value of `f` about `q_p·p/(p² − 1)`.
-pub fn alpha(f: &[i128]) -> f64 {
-    let lead = f[f.len() - 1];
+pub fn alpha<C: Coeff>(f: &[C]) -> f64 {
+    let lead = &f[f.len() - 1];
     Primes::new(2, ALPHA_PRIMES)
         .map(|p| {
             let mut q = super::modp::roots(f, p).len() as f64;
-            if lead.rem_euclid(i128::from(p)) == 0 {
+            if lead.mod_p(p) == 0 {
                 q += 1.0;
             }
             let p = p as f64;

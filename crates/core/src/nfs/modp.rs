@@ -6,15 +6,53 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
+
 /// Primes up to this have their roots found by trying every residue.
 const BRUTE_FORCE: u64 = 64;
 
+/// An integer coefficient of a polynomial: an `i128` while selecting
+/// polynomials, which is fast, and a [`BigInt`] in a [`Poly`](super::Poly),
+/// which holds any size.
+pub trait Coeff {
+    /// The coefficient modulo `p`, in `[0, p)`.
+    fn mod_p(&self, p: u64) -> u64;
+    /// The nearest `f64`.
+    fn to_f64(&self) -> f64;
+}
+
+impl Coeff for i128 {
+    fn mod_p(&self, p: u64) -> u64 {
+        self.rem_euclid(i128::from(p)) as u64
+    }
+
+    fn to_f64(&self) -> f64 {
+        *self as f64
+    }
+}
+
+impl Coeff for BigInt {
+    fn mod_p(&self, p: u64) -> u64 {
+        // The magnitude's digits from the top, as with long division.
+        let r = self.iter_u64_digits().rev().fold(0, |r: u64, d| {
+            (((u128::from(r) << 64) | u128::from(d)) % u128::from(p)) as u64
+        });
+        if self.sign() == Sign::Minus && r != 0 {
+            p - r
+        } else {
+            r
+        }
+    }
+
+    fn to_f64(&self) -> f64 {
+        ToPrimitive::to_f64(self).unwrap_or(f64::INFINITY)
+    }
+}
+
 /// `f(x) mod p` for integer coefficients, trimmed of leading zeros.
-pub fn reduce(f: &[i128], p: u64) -> Vec<u64> {
-    let mut g: Vec<u64> = f
-        .iter()
-        .map(|&c| c.rem_euclid(i128::from(p)) as u64)
-        .collect();
+pub fn reduce<C: Coeff>(f: &[C], p: u64) -> Vec<u64> {
+    let mut g: Vec<u64> = f.iter().map(|c| c.mod_p(p)).collect();
     trim(&mut g);
     g
 }
@@ -120,7 +158,7 @@ fn div_exact(a: &[u64], b: &[u64], p: u64) -> Vec<u64> {
 
 /// The distinct roots in `[0, p)` of `f`, an integer polynomial, modulo the
 /// prime `p < 2^32`, in increasing order. Empty if `f ≡ 0`.
-pub fn roots(f: &[i128], p: u64) -> Vec<u64> {
+pub fn roots<C: Coeff>(f: &[C], p: u64) -> Vec<u64> {
     let mut g = reduce(f, p);
     if g.len() <= 1 {
         return Vec::new();

@@ -16,8 +16,14 @@
 /// with the line siever this replaced, bounds of 300,000 to 800,000 with
 /// large primes 10 or 30 times larger all took 93 to 107 s; 60,000 never
 /// finished. The rows past 330 bits are guesses.
+///
+/// The large-prime bound stops at 2^31, below the quadratic characters'
+/// primes, and `I` at 2^13, where the buckets of the largest primes' hits
+/// take a few hundred megabytes for each thread. Past 600 bits the last
+/// row holds, though numbers that large need three large primes a side,
+/// which this siever doesn't find, to be practical.
 #[allow(clippy::type_complexity)]
-const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 7] = [
+const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 9] = [
     (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250),
     (160, [60_000, 60_000], [21, 21], [21, 21], 10, 15_000),
     (200, [500_000, 500_000], [23, 23], [23, 23], 11, 125_000),
@@ -45,6 +51,22 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 7] = [
         [29, 29],
         13,
         10_000_000,
+    ),
+    (
+        530,
+        [80_000_000, 80_000_000],
+        [30, 30],
+        [30, 30],
+        13,
+        20_000_000,
+    ),
+    (
+        600,
+        [150_000_000, 150_000_000],
+        [31, 31],
+        [31, 31],
+        13,
+        40_000_000,
     ),
 ];
 
