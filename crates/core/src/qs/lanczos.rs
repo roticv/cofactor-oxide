@@ -16,9 +16,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::parallel::{Parallel, split};
+use crate::parallel::{Parallel, map_dynamic, split};
 
 /// Work is split into this many pieces per thread, which take the next
 /// piece left as they finish, so that faster cores do more of them.
@@ -168,24 +167,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
     /// `f` over the pieces `bounds` of `0..n`, shared out among the
     /// threads as they become free, giving each piece's results.
     fn pieces<T: Send>(&self, bounds: &[usize], f: impl Fn(Range<usize>) -> T + Sync) -> Vec<T> {
-        let next = AtomicUsize::new(0);
-        let mut done: Vec<(usize, T)> = self
-            .par
-            .map(|_| {
-                let mut done = Vec::new();
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i + 1 >= bounds.len() {
-                        return done;
-                    }
-                    done.push((i, f(bounds[i]..bounds[i + 1])));
-                }
-            })
-            .into_iter()
-            .flatten()
-            .collect();
-        done.sort_unstable_by_key(|&(i, _)| i);
-        done.into_iter().map(|(_, t)| t).collect()
+        map_dynamic(self.par, bounds.len() - 1, |i| f(bounds[i]..bounds[i + 1]))
     }
 
     /// `f` over the pieces `bounds` of `0..n`, each giving the words of

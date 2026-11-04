@@ -25,6 +25,7 @@ use super::modp::{irreducible, mul_mod};
 use super::poly::Poly;
 use super::sieve::Relation;
 use crate::arith::Uint;
+use crate::parallel::{Parallel, Serial, map_dynamic};
 use crate::primes::Primes;
 
 /// The inert prime is searched for in `[2^19, 2^20)`, small enough that
@@ -43,17 +44,18 @@ fn modulo(x: &BigInt, m: &BigInt) -> BigInt {
     if r.is_negative() { r + m } else { r }
 }
 
-/// `a·b mod F` for the monic `F`, with coefficients lowest first.
-fn mul(a: &[BigInt], b: &[BigInt], f: &[BigInt]) -> Vec<BigInt> {
+/// `a·b mod F` for the monic `F`, with coefficients lowest first, the
+/// products of coefficients shared out by `par`.
+fn mul(a: &[BigInt], b: &[BigInt], f: &[BigInt], par: &impl Parallel) -> Vec<BigInt> {
     let d = f.len() - 1;
+    let pairs: Vec<(usize, usize)> = (0..a.len())
+        .flat_map(|i| (0..b.len()).map(move |j| (i, j)))
+        .filter(|&(i, j)| !a[i].is_zero() && !b[j].is_zero())
+        .collect();
+    let products = map_dynamic(par, pairs.len(), |k| &a[pairs[k].0] * &b[pairs[k].1]);
     let mut c = vec![BigInt::zero(); 2 * d - 1];
-    for (i, x) in a.iter().enumerate() {
-        if x.is_zero() {
-            continue;
-        }
-        for (j, y) in b.iter().enumerate() {
-            c[i + j] += x * y;
-        }
+    for (&(i, j), p) in pairs.iter().zip(products) {
+        c[i + j] += p;
     }
     for k in (d..2 * d - 1).rev() {
         let t = core::mem::take(&mut c[k]);
@@ -67,23 +69,41 @@ fn mul(a: &[BigInt], b: &[BigInt], f: &[BigInt]) -> Vec<BigInt> {
     c
 }
 
+/// `c mod m` for each coefficient, shared out by `par`.
+fn modulo_all(c: &[BigInt], m: &BigInt, par: &impl Parallel) -> Vec<BigInt> {
+    map_dynamic(par, c.len(), |i| modulo(&c[i], m))
+}
+
 /// `a·b mod (F, m)`.
-fn mul_mod_m(a: &[BigInt], b: &[BigInt], f: &[BigInt], m: &BigInt) -> Vec<BigInt> {
-    mul(a, b, f).iter().map(|c| modulo(c, m)).collect()
+fn mul_mod_m(
+    a: &[BigInt],
+    b: &[BigInt],
+    f: &[BigInt],
+    m: &BigInt,
+    par: &impl Parallel,
+) -> Vec<BigInt> {
+    modulo_all(&mul(a, b, f, par), m, par)
 }
 
 /// The product of `elems` mod `F`, multiplying in pairs so that the
-/// operands stay balanced.
-fn product(mut elems: Vec<Vec<BigInt>>, f: &[BigInt]) -> Vec<BigInt> {
+/// operands stay balanced. While there are more pairs than threads, the
+/// pairs are shared out; after that, the products within each.
+fn product(mut elems: Vec<Vec<BigInt>>, f: &[BigInt], par: &impl Parallel) -> Vec<BigInt> {
     while elems.len() > 1 {
-        elems = elems
-            .chunks(2)
-            .map(|pair| match pair {
-                [x, y] => mul(x, y, f),
-                [x] => x.clone(),
-                _ => unreachable!(),
+        let pairs = elems.len() / 2;
+        let mut next: Vec<Vec<BigInt>> = if pairs >= par.threads() {
+            map_dynamic(par, pairs, |k| {
+                mul(&elems[2 * k], &elems[2 * k + 1], f, &Serial)
             })
-            .collect();
+        } else {
+            (0..pairs)
+                .map(|k| mul(&elems[2 * k], &elems[2 * k + 1], f, par))
+                .collect()
+        };
+        if elems.len() % 2 == 1 {
+            next.push(elems.pop().unwrap());
+        }
+        elems = next;
     }
     elems.pop().unwrap()
 }
@@ -158,7 +178,12 @@ fn max_bits(c: &[BigInt]) -> u64 {
 }
 
 /// The square root of `δ` in `ℤ[θ]/(F)`, if it is a square there.
-fn algebraic_sqrt(delta: &[BigInt], f: &[BigInt], lead: &BigInt) -> Option<Vec<BigInt>> {
+fn algebraic_sqrt(
+    delta: &[BigInt],
+    f: &[BigInt],
+    lead: &BigInt,
+    par: &impl Parallel,
+) -> Option<Vec<BigInt>> {
     let d = f.len() - 1;
     // A prime that stays prime: F irreducible mod p.
     let (p, fp) = Primes::new(INERT_PRIMES.0, INERT_PRIMES.1).find_map(|p| {
@@ -187,15 +212,15 @@ fn algebraic_sqrt(delta: &[BigInt], f: &[BigInt], lead: &BigInt) -> Option<Vec<B
     for _ in 0..=RETRIES {
         while modulus.bits() < bound + 1 {
             modulus = &modulus * &modulus;
-            let dm: Vec<BigInt> = delta.iter().map(|c| modulo(c, &modulus)).collect();
-            let r2 = mul_mod_m(&r, &r, f, &modulus);
-            let mut e = mul_mod_m(&dm, &r2, f, &modulus);
+            let dm = modulo_all(delta, &modulus, par);
+            let r2 = mul_mod_m(&r, &r, f, &modulus, par);
+            let mut e = mul_mod_m(&dm, &r2, f, &modulus, par);
             for c in &mut e {
                 *c = -&*c;
             }
             e[0] += 1;
             let half = (&modulus + 1u32) >> 1u32;
-            let step = mul_mod_m(&r, &e, f, &modulus);
+            let step = mul_mod_m(&r, &e, f, &modulus, par);
             r = r
                 .iter()
                 .zip(&step)
@@ -203,13 +228,13 @@ fn algebraic_sqrt(delta: &[BigInt], f: &[BigInt], lead: &BigInt) -> Option<Vec<B
                 .collect();
         }
         // S = δ/√δ, with coefficients centered on 0.
-        let dm: Vec<BigInt> = delta.iter().map(|c| modulo(c, &modulus)).collect();
+        let dm = modulo_all(delta, &modulus, par);
         let half = &modulus >> 1u32;
-        let s: Vec<BigInt> = mul_mod_m(&dm, &r, f, &modulus)
+        let s: Vec<BigInt> = mul_mod_m(&dm, &r, f, &modulus, par)
             .into_iter()
             .map(|c| if c > half { c - &modulus } else { c })
             .collect();
-        if mul(&s, &s, f) == delta {
+        if mul(&s, &s, f, par) == delta {
             return Some(s);
         }
         bound *= 2;
@@ -222,11 +247,13 @@ fn to_u64(x: &BigInt) -> u64 {
 }
 
 /// Tries the dependency `deps` for a factor of `n`: returns
-/// `gcd(X − Y, n)` if it is proper.
+/// `gcd(X − Y, n)` if it is proper. The large products are shared out by
+/// `par`.
 pub fn factor<const LIMBS: usize>(
     n: &Uint<LIMBS>,
     poly: &Poly,
     deps: &[&Relation],
+    par: &impl Parallel,
 ) -> Option<Uint<LIMBS>> {
     let nb: BigInt = n.to_string().parse().ok()?;
     let d = poly.degree();
@@ -247,9 +274,9 @@ pub fn factor<const LIMBS: usize>(
             e
         })
         .collect();
-    let gamma = product(elems, &f);
-    let delta = mul(&mul(&gamma, &df, &f), &df, &f);
-    let s = algebraic_sqrt(&delta, &f, &lead)?;
+    let gamma = product(elems, &f, par);
+    let delta = mul(&mul(&gamma, &df, &f, par), &df, &f, par);
+    let s = algebraic_sqrt(&delta, &f, &lead, par)?;
 
     // θ maps to c·m/l. Rather than invert l, both sides are multiplied by
     // l^(d−1+k/2): X = S(c·m, l)·l^(k/2) and Y = c^(k/2)·F′(c·m, l)·∏ p^(e/2),

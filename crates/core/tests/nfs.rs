@@ -287,3 +287,43 @@ fn gnfs_factors() {
         assert!(f == p || f == q, "{n} gave {f}");
     }
 }
+
+/// Work split as for this many threads, run on this one.
+struct Pieces(usize);
+
+impl cofox_core::parallel::Parallel for Pieces {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn map<T: Send>(&self, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        (0..self.0).map(f).collect()
+    }
+}
+
+#[test]
+fn gnfs_factors_in_pieces() {
+    // The matrix and the square roots, split as for three threads.
+    let (n, p, q) = (
+        u("1176217249472123917871099760550263221639"),
+        u("98936812917358800691"),
+        u("11888570237800257629"),
+    );
+    let gnfs = cofox_core::nfs::Gnfs::new(&n, &Params::for_bits(n.bits()));
+    let mut sieve = gnfs.sieve();
+    let mut relations = gnfs.relations();
+    for k in 0.. {
+        for (q, r) in gnfs.special_qs(k) {
+            relations.add(sieve.special_q(q, r));
+        }
+        if relations.is_ready() {
+            break;
+        }
+    }
+    let f = relations
+        .dependencies_with(&Pieces(3))
+        .iter()
+        .find_map(|dep| relations.try_dependency_with(dep, &Pieces(3)))
+        .expect("no factor");
+    assert!(f == p || f == q, "{n} gave {f}");
+}

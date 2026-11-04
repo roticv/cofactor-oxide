@@ -1,7 +1,7 @@
 use std::io::{IsTerminal, Write};
 use std::ops::ControlFlow;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -220,11 +220,16 @@ fn gnfs_parallel(
 ) -> Result<Option<String>, ParseUintError> {
     let n = n.parse::<Wide>()?;
     let bits = n.bits();
+    let mut status = Status::new(1);
     let gnfs = Gnfs::new(&n, &Params::for_bits(bits));
     let fb = gnfs.factor_base();
     let ideals = fb.rational.len() + fb.algebraic.len();
+    status.stage(&format!(
+        "GNFS on a {bits}-bit composite: polynomial of degree {} chosen, {ideals} ideals in \
+         the factor bases",
+        gnfs.poly().f.len() - 1
+    ));
     let mut relations = gnfs.relations();
-    let mut status = Status::new(1);
     let (send, receive) = mpsc::channel();
     let (next_block, last_q) = (AtomicU64::new(0), AtomicU64::new(0));
     let done = AtomicBool::new(false);
@@ -259,32 +264,39 @@ fn gnfs_parallel(
         }
         done.store(true, Ordering::Relaxed);
     });
+    status.stage(&format!(
+        "GNFS: sieved {} relations, special-q up to {}",
+        relations.len(),
+        last_q.load(Ordering::Relaxed)
+    ));
     if show_status {
-        status.show(&format!(
-            "Number field sieve: solving for a {bits}-bit composite"
-        ));
+        status.show("Number field sieve: filtering and solving the matrix");
     }
     let deps = relations.dependencies_with(&Threads(threads));
-    let (next_dep, found) = (AtomicUsize::new(0), Mutex::new(None));
-    thread::scope(|scope| {
-        for _ in 0..threads.min(deps.len()) {
-            let (relations, deps, next_dep, found) = (&relations, &deps, &next_dep, &found);
-            scope.spawn(move || {
-                while found.lock().unwrap().is_none() {
-                    let Some(dep) = deps.get(next_dep.fetch_add(1, Ordering::Relaxed)) else {
-                        break;
-                    };
-                    if let Some(f) = relations.try_dependency(dep) {
-                        *found.lock().unwrap() = Some(f);
-                    }
-                }
-            });
-        }
-    });
+    status.stage(&format!("GNFS: {} dependencies", deps.len()));
     if show_status {
-        status.clear();
+        status.show("Number field sieve: square roots");
     }
-    Ok(found.into_inner().unwrap().map(|f| f.to_string()))
+    // One dependency at a time on all threads: each gives a factor with
+    // probability about ½, so few are needed.
+    let mut found = None;
+    for (i, dep) in deps.iter().enumerate() {
+        found = relations.try_dependency_with(dep, &Threads(threads));
+        let outcome = if found.is_some() {
+            "a factor"
+        } else {
+            "no factor"
+        };
+        status.stage(&format!(
+            "GNFS: dependency {i}, of {} relations, gave {outcome}",
+            dep.len()
+        ));
+        if found.is_some() {
+            break;
+        }
+    }
+    status.clear();
+    Ok(found.map(|f| f.to_string()))
 }
 
 /// Splits work across this many scoped threads.
@@ -407,6 +419,16 @@ impl Status {
         if self.drawn.is_some() {
             eprint!("\r\x1b[K");
         }
+    }
+
+    /// Prints `line` on a line of its own, with the time so far, whether or
+    /// not stderr is a terminal: the stages of long runs. A status line
+    /// being drawn is cleared first, to be redrawn later.
+    fn stage(&mut self, line: &str) {
+        self.clear();
+        self.drawn = None;
+        let secs = self.start.elapsed().as_secs_f64();
+        eprintln!("[{secs:8.1} s] {line}");
     }
 }
 

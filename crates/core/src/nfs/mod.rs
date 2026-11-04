@@ -38,7 +38,7 @@ pub use poly::{Poly, alpha, degree};
 pub use sieve::{Relation, Sieve, special_qs};
 
 use crate::arith::Uint;
-use crate::parallel::{Parallel, Serial};
+use crate::parallel::{Parallel, Serial, split};
 use crate::qs::dependencies_with;
 use matrix::{Matrix, characters};
 
@@ -180,10 +180,15 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
         let fb = &self.gnfs.fb;
         let (kept, rows, cols) = self.matrix.pruned();
         let filtered = filter::filter(rows, cols, fb.characters.len() + EXTRA);
-        let chars: Vec<u64> = kept
-            .iter()
-            .map(|&r| characters(fb, &self.relations[r]))
-            .collect();
+        let pieces = split(kept.iter().map(|_| 1), par.threads());
+        let chars: Vec<u64> = par
+            .map(|i| {
+                kept[pieces[i]..pieces[i + 1]]
+                    .iter()
+                    .map(|&r| characters(fb, &self.relations[r]))
+                    .collect::<Vec<_>>()
+            })
+            .concat();
         let rows: Vec<Vec<usize>> = filtered
             .rows
             .iter()
@@ -197,27 +202,38 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
                     .collect()
             })
             .collect();
-        dependencies_with(&rows, cols + fb.characters.len(), par)
-            .into_iter()
-            .map(|dep| {
-                // The relations in an odd number of the dependency's rows.
-                let mut odd = vec![false; kept.len()];
-                for &i in dep.iter().flat_map(|&row| &filtered.sets[row]) {
-                    odd[i as usize] ^= true;
-                }
-                (0..kept.len())
-                    .filter(|&i| odd[i])
-                    .map(|i| kept[i])
-                    .collect()
-            })
-            .collect()
+        let deps = dependencies_with(&rows, cols + fb.characters.len(), par);
+        // Each dependency's relations: those in an odd number of its rows.
+        let pieces = split(deps.iter().map(|_| 1), par.threads());
+        par.map(|i| {
+            deps[pieces[i]..pieces[i + 1]]
+                .iter()
+                .map(|dep| {
+                    let mut odd = vec![false; kept.len()];
+                    for &i in dep.iter().flat_map(|&row| &filtered.sets[row]) {
+                        odd[i as usize] ^= true;
+                    }
+                    (0..kept.len())
+                        .filter(|&i| odd[i])
+                        .map(|i| kept[i])
+                        .collect()
+                })
+                .collect::<Vec<Vec<usize>>>()
+        })
+        .concat()
     }
 
     /// Takes the square roots for the dependency `dep`, returning a proper
     /// factor of `n` if it gives one.
     pub fn try_dependency(&self, dep: &[usize]) -> Option<Uint<LIMBS>> {
+        self.try_dependency_with(dep, &Serial)
+    }
+
+    /// [`Relations::try_dependency`], with the large products split by
+    /// `par`.
+    pub fn try_dependency_with(&self, dep: &[usize], par: &impl Parallel) -> Option<Uint<LIMBS>> {
         let dep: Vec<&Relation> = dep.iter().map(|&i| &self.relations[i]).collect();
-        sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &dep)
+        sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &dep, par)
     }
 }
 
