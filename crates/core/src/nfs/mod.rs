@@ -17,6 +17,7 @@
 //! sieve at every size so far.
 
 mod base;
+mod cofactor;
 mod filter;
 mod format;
 mod kleinjung;

@@ -25,9 +25,10 @@ use alloc::vec::Vec;
 use num_bigint::{BigInt, Sign};
 
 use super::base::{FactorBase, Prime};
+use super::cofactor::{Cofactor, Splitter};
 use super::modp::{Coeff, roots};
 use super::params::Params;
-use super::poly::Poly;
+use super::poly::{Poly, to_u128};
 use crate::arith::{Limb, Uint};
 use crate::primes::Primes;
 use crate::qs::cofactor::split;
@@ -71,10 +72,10 @@ pub struct Relation {
     /// Whether `G(a, b)` is negative.
     pub negative: bool,
     /// The primes of `|G(a, b)|`, with repetition: factor-base primes and
-    /// up to two larger ones, below `2^`[`Params::rational_lpb`].
+    /// up to three larger ones, below `2^`[`Params::rational_lpb`].
     pub rational: Vec<u64>,
     /// The primes of `|F(a, b)|`, with repetition: factor-base primes, the
-    /// special-q and up to two other larger ones, below
+    /// special-q and up to three other larger ones, below
     /// `2^`[`Params::algebraic_lpb`]. Each
     /// stands for the prime ideal `(p, a/b mod p)`, or the one at infinity
     /// if `p | b`.
@@ -139,12 +140,14 @@ struct Side {
     large_bound: u64,
     /// `log₂` of the largest cofactor kept, and the cofactor itself.
     mfb: u32,
-    cofactor_bound: u64,
-    /// The largest factor-base prime squared: any cofactor below it is
-    /// prime.
+    cofactor_bound: u128,
+    /// The largest factor-base prime, and its square: any cofactor below
+    /// that is prime.
+    largest: u64,
     prime_below: u64,
     /// Expected `log₂` from the primes that aren't sieved.
     skipped: f64,
+    splitter: Splitter,
     small: Vec<Small>,
     /// Walked primes smaller than a slab, walked slab by slab.
     walks: Vec<Walk>,
@@ -173,9 +176,11 @@ impl Side {
             primes: primes.to_vec(),
             large_bound: 1 << lpb,
             mfb,
-            cofactor_bound: 1 << mfb.min(63),
+            cofactor_bound: 1 << mfb.min(127),
+            largest: largest.into(),
             prime_below: u64::from(largest) * u64::from(largest),
             skipped,
+            splitter: Splitter::new(),
             small: Vec::new(),
             walks: Vec::new(),
             rows: Vec::new(),
@@ -687,36 +692,56 @@ impl Side {
         f64::from(self.mfb) + self.skipped + FUDGE
     }
 
-    /// Whether `v`, what trial division left, is 1, a prime below the
-    /// large-prime bound, or no larger than the cofactor bound and the
-    /// product of two such primes, which are added to `factors`. The
-    /// large-prime bound must be below the square of the largest
-    /// factor-base prime, so that a cofactor below it is prime.
+    /// Whether `v`, what trial division left, is 1, or no larger than the
+    /// cofactor bound and a product of primes below the large-prime bound,
+    /// which are added to `factors`.
     fn cofactor(&self, v: &Wide, factors: &mut Vec<u64>) -> bool {
-        let Some(c) = v.to_u64() else {
+        match to_u128(v) {
+            None | Some(0) => false,
+            Some(1) => true,
+            Some(c) if c > self.cofactor_bound => false,
+            Some(c) => self.large_primes(c, factors),
+        }
+    }
+
+    /// Whether `c > 1`, which no factor-base prime divides, is a product of
+    /// primes below the large-prime bound, which are added to `factors`.
+    /// The large-prime bound, `L`, must be below `B²`, for `B` the largest
+    /// factor-base prime, so that any `c` below it is prime, and at most
+    /// 2^31.
+    fn large_primes(&self, c: u128, factors: &mut Vec<u64>) -> bool {
+        let large = u128::from(self.large_bound);
+        if c < large {
+            factors.push(c as u64);
+            return true;
+        }
+        // A prime too large.
+        if c < self.prime_below.into() {
             return false;
-        };
-        match c {
-            0 => false,
-            1 => true,
-            c if c > self.cofactor_bound => false,
-            c if c < self.large_bound => {
-                factors.push(c);
-                true
-            }
-            // A prime too large, or two primes of which one is.
-            c if c < self.prime_below
-                || u128::from(c) >= u128::from(self.large_bound) * u128::from(self.large_bound) =>
-            {
-                false
-            }
-            c => match split(c) {
+        }
+        // Two primes, which fit in 62 bits if both are below L.
+        if c < large * large {
+            return match split(c as u64) {
                 Some([p, q]) if q < self.large_bound => {
                     factors.extend([p, q]);
                     true
                 }
                 _ => false,
-            },
+            };
+        }
+        // Below B³ there are at most two primes, of which one is then too
+        // large; above, three or more, or a prime.
+        let b = u128::from(self.largest);
+        if c < b * b * b || c.is_multiple_of(2) {
+            return false;
+        }
+        let n = Cofactor::from_u64(c as u64)
+            .wrapping_add(&(Cofactor::from_u64((c >> 64) as u64) << 64));
+        match self.splitter.factor(&n).and_then(|g| to_u128(&g)) {
+            Some(g) if g > 1 && g < c => {
+                self.large_primes(g, factors) && self.large_primes(c / g, factors)
+            }
+            _ => false,
         }
     }
 

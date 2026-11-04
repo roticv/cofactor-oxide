@@ -535,3 +535,63 @@ fn wide_polynomials() {
         }
     }
 }
+
+/// With a small factor base and a cofactor bound of three large primes,
+/// some relations have three primes past the factor base on the algebraic
+/// side, besides the special-q, and they all hold.
+#[test]
+fn three_large_primes() {
+    let n = u("336824692466468372742240828730960315277872725533762205050251");
+    let poly = Poly::select(&n).unwrap();
+    let params = Params {
+        rational_bound: 20_000,
+        algebraic_bound: 20_000,
+        rational_lpb: 24,
+        algebraic_lpb: 24,
+        rational_mfb: 48,
+        algebraic_mfb: 72,
+        log_i: 9,
+        ..Params::for_bits(n.bits())
+    };
+    let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
+    let mut sieve = Sieve::new(&poly, &fb, &params);
+    let (mut found, mut three) = (0, 0);
+    let t = std::time::Instant::now();
+    for (q, r) in special_qs(&poly, 30_000, 30_100).into_iter().take(3) {
+        for rel in sieve.special_q(q, r) {
+            check_relation(&poly, &fb, q, &rel);
+            found += 1;
+            let large = rel.algebraic.iter().filter(|&&p| p > 20_000).count();
+            if large > 3 {
+                three += 1;
+            }
+        }
+    }
+    println!(
+        "{found} relations, {three} with three large primes, in {:.2?}",
+        t.elapsed()
+    );
+    assert!(three > 0);
+}
+
+/// Factoring with up to three large primes on the algebraic side.
+#[test]
+fn gnfs_factors_with_three_large_primes() {
+    use cofox_core::nfs::gnfs_with;
+    let n = u("1176217249472123917871099760550263221639");
+    let params = Params {
+        rational_bound: 3_000,
+        algebraic_bound: 3_000,
+        rational_lpb: 15,
+        algebraic_lpb: 15,
+        rational_mfb: 15,
+        algebraic_mfb: 45,
+        ..Params::for_bits(n.bits())
+    };
+    let t = std::time::Instant::now();
+    let f = gnfs_with(&n, &params, |_, _| std::ops::ControlFlow::Continue(()))
+        .unwrap()
+        .expect("no factor");
+    println!("{f} in {:.2?}", t.elapsed());
+    assert!(f == u("98936812917358800691") || f == u("11888570237800257629"));
+}

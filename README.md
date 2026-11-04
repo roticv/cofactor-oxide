@@ -189,9 +189,11 @@ smaller special-q give smaller values to factor.
 cofox chooses polynomials for numbers up to about 480 bits (145 digits).
 Past that, give it ones chosen by CADO-NFS or msieve with `--poly`, in
 either's format, of degree up to 6 with coefficients of any size below
-2^256. The sieve's parameters are tuned up to 600 bits (180 digits); larger
-numbers, such as RSA-270, would need three large primes a side, which the
-siever doesn't do yet.
+2^256. The sieve's parameters are tuned up to 600 bits (180 digits). The
+siever can keep up to three large primes a side, splitting cofactors of up
+to 93 bits with P−1 and ECM, which numbers such as RSA-270 need, but no
+size in the parameter table uses them yet: up to 600 bits they cost more
+than they gain.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a

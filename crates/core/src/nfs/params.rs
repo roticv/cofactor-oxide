@@ -86,7 +86,9 @@ pub struct Params {
     pub algebraic_lpb: u32,
     /// `log₂` of the largest cofactor, what the factor base leaves of a
     /// value, kept on each side: one large prime below the large-prime
-    /// bound, or two, found by splitting it.
+    /// bound, or two or three, found by splitting it. Three need a
+    /// cofactor bound past twice the large-prime bound's bits, which here
+    /// is at most 31.
     pub rational_mfb: u32,
     pub algebraic_mfb: u32,
     /// Each special-q sieves `i` in `[−I/2, I/2)` and `j` in `[1, I/2)`,
