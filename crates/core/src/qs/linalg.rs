@@ -25,12 +25,24 @@ pub fn dependencies(rows: &[Vec<usize>], cols: usize) -> Vec<Vec<usize>> {
 
 /// [`dependencies`], with block Lanczos's products split by `par`.
 pub fn dependencies_with(rows: &[Vec<usize>], cols: usize, par: &impl Parallel) -> Vec<Vec<usize>> {
+    dependencies_post(rows, cols, 0, par)
+}
+
+/// [`dependencies_with`], leaving the `post` densest columns out of block
+/// Lanczos's iterations, to be satisfied at the end. `rows` should have at
+/// least `post + 64` more rows than columns after pruning.
+pub(crate) fn dependencies_post(
+    rows: &[Vec<usize>],
+    cols: usize,
+    post: usize,
+    par: &impl Parallel,
+) -> Vec<Vec<usize>> {
     if rows.len() <= DENSE_ROWS {
         return dense(rows, cols);
     }
     let (kept, pruned, cols) = prune(rows, cols);
     (0..LANCZOS_TRIES)
-        .map(|seed| null_space(&pruned, cols, seed, par))
+        .map(|seed| null_space(&pruned, cols, seed, post, par))
         .find(|deps| !deps.is_empty())
         .unwrap_or_default()
         .into_iter()

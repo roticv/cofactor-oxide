@@ -39,11 +39,16 @@ pub use sieve::{Relation, Sieve, special_qs};
 
 use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, split};
-use crate::qs::dependencies_with;
+use crate::qs::dependencies_post;
 use matrix::{Matrix, characters};
 
 /// Rows beyond the columns, after pruning, before solving.
 const EXTRA: usize = 64;
+
+/// The densest columns, the quadratic characters among them, are left out
+/// of block Lanczos's iterations and satisfied at the end, which takes
+/// this many more rows than columns besides [`EXTRA`].
+const POST_ROWS: usize = 48;
 
 /// Special-q primes are handed out in blocks of this many integers.
 const Q_BLOCK: u64 = 64;
@@ -164,7 +169,7 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
     pub fn is_ready(&mut self) -> bool {
         if !self.ready && self.relations.len() >= self.next_check {
             self.next_check = self.relations.len() + self.relations.len() / 10;
-            self.ready = self.matrix.ready(CHARACTERS, EXTRA);
+            self.ready = self.matrix.ready(CHARACTERS + POST_ROWS, EXTRA);
         }
         self.ready
     }
@@ -179,7 +184,7 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
     pub fn dependencies_with(&self, par: &impl Parallel) -> Vec<Vec<usize>> {
         let fb = &self.gnfs.fb;
         let (kept, rows, cols) = self.matrix.pruned();
-        let filtered = filter::filter(rows, cols, fb.characters.len() + EXTRA);
+        let filtered = filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
         let pieces = split(kept.iter().map(|_| 1), par.threads());
         let chars: Vec<u64> = par
             .map(|i| {
@@ -202,7 +207,7 @@ impl<const LIMBS: usize> Relations<'_, LIMBS> {
                     .collect()
             })
             .collect();
-        let deps = dependencies_with(&rows, cols + fb.characters.len(), par);
+        let deps = dependencies_post(&rows, cols + fb.characters.len(), POST_ROWS, par);
         // Each dependency's relations: those in an odd number of its rows.
         let pieces = split(deps.iter().map(|_| 1), par.threads());
         par.map(|i| {

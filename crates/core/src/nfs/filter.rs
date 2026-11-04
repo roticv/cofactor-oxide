@@ -20,6 +20,10 @@ const CLIQUE_PASSES: usize = 20;
 /// Merging stops once the rows average this many columns.
 const DENSITY: usize = 70;
 
+/// Columns in up to this many rows are merged along a minimum spanning
+/// tree; past that, the k² sums it weighs cost too much.
+const MST_ROWS: usize = 10;
+
 /// Columns in more rows than this are never merged.
 const MAX_MERGE: u32 = 30;
 
@@ -198,42 +202,85 @@ impl State {
         }
     }
 
-    /// Adds the lightest row with column `c` to its other rows, and drops
-    /// it.
+    /// Eliminates column `c`: of its rows, all but one are replaced by
+    /// their sums with a neighbour in a tree joining them, and the last is
+    /// dropped. Up to [`MST_ROWS`] rows, the tree is the one whose sums
+    /// are lightest, as in msieve; beyond, every row is added to the
+    /// lightest.
     fn merge_col(&mut self, c: u32) {
         let rs = self.rows_of(c);
-        let pivot = *rs
-            .iter()
-            .min_by_key(|&&r| self.rows[r as usize].len())
+        let k = rs.len();
+        let root = (0..k)
+            .min_by_key(|&i| self.rows[rs[i] as usize].len())
             .expect("a column being merged has rows");
-        let prow = core::mem::take(&mut self.rows[pivot as usize]);
-        let pset = core::mem::take(&mut self.sets[pivot as usize]);
-        for &r in rs.iter().filter(|&&r| r != pivot) {
-            let row = core::mem::take(&mut self.rows[r as usize]);
-            self.total -= row.len();
-            let sum = sym_diff(&row, &prow);
-            // Columns of the pivot row that r lacked are new to it; the
-            // others cancel.
-            for &k in &prow {
-                if row.binary_search(&k).is_ok() {
-                    self.weight[k as usize] -= 1;
-                    if self.weight[k as usize] == 0 {
+        // parent[i]: the row that rs[i] is added to; root has none.
+        let mut parent = vec![root; k];
+        if k <= MST_ROWS {
+            // Prim's algorithm from the root, on the weights of the sums.
+            let weight = |i: usize, j: usize| {
+                sym_diff_len(&self.rows[rs[i] as usize], &self.rows[rs[j] as usize])
+            };
+            let mut in_tree = vec![false; k];
+            in_tree[root] = true;
+            let mut best: Vec<usize> = (0..k).map(|i| weight(i, root)).collect();
+            for _ in 1..k {
+                let i = (0..k)
+                    .filter(|&i| !in_tree[i])
+                    .min_by_key(|&i| best[i])
+                    .unwrap();
+                in_tree[i] = true;
+                for j in (0..k).filter(|&j| !in_tree[j]) {
+                    let w = weight(i, j);
+                    if w < best[j] {
+                        (best[j], parent[j]) = (w, i);
+                    }
+                }
+            }
+        }
+        let sums: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
+            .map(|i| {
+                if i == root {
+                    return (Vec::new(), Vec::new());
+                }
+                let (r, p) = (rs[i] as usize, rs[parent[i]] as usize);
+                (
+                    sym_diff(&self.rows[r], &self.rows[p]),
+                    sym_diff(&self.sets[r], &self.sets[p]),
+                )
+            })
+            .collect();
+        let mut pending = Vec::with_capacity(k);
+        for (i, (row, set)) in sums.into_iter().enumerate() {
+            if i == root {
+                continue;
+            }
+            let (r, p) = (rs[i], rs[parent[i]] as usize);
+            // The parent's columns that r had cancel; the others are new
+            // to it.
+            for &col in &self.rows[p] {
+                let w = &mut self.weight[col as usize];
+                if self.rows[r as usize].binary_search(&col).is_ok() {
+                    *w -= 1;
+                    if *w == 0 {
                         self.live_cols -= 1;
                     }
                 } else {
-                    self.weight[k as usize] += 1;
-                    self.by_col[k as usize].push(r);
+                    *w += 1;
+                    if *w == 1 {
+                        self.live_cols += 1;
+                    }
+                    self.by_col[col as usize].push(r);
                 }
             }
-            self.total += sum.len();
-            self.rows[r as usize] = sum;
-            let set = core::mem::take(&mut self.sets[r as usize]);
-            self.sets[r as usize] = sym_diff(&set, &pset);
+            self.total = self.total - self.rows[r as usize].len() + row.len();
+            pending.push((r, row, set));
         }
-        self.rows[pivot as usize] = prow;
-        self.sets[pivot as usize] = pset;
+        for (r, row, set) in pending {
+            self.rows[r as usize] = row;
+            self.sets[r as usize] = set;
+        }
         let mut singles = Vec::new();
-        self.kill(pivot, &mut singles);
+        self.kill(rs[root], &mut singles);
     }
 }
 
@@ -260,4 +307,21 @@ fn sym_diff(a: &[u32], b: &[u32]) -> Vec<u32> {
     out.extend_from_slice(&a[i..]);
     out.extend_from_slice(&b[j..]);
     out
+}
+
+/// The number of entries in exactly one of the sorted lists `a` and `b`.
+fn sym_diff_len(a: &[u32], b: &[u32]) -> usize {
+    let (mut i, mut j, mut common) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            core::cmp::Ordering::Less => i += 1,
+            core::cmp::Ordering::Greater => j += 1,
+            core::cmp::Ordering::Equal => {
+                common += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    a.len() + b.len() - 2 * common
 }

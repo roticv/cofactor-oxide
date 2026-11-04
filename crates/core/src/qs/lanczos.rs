@@ -19,6 +19,11 @@ use core::ops::Range;
 
 use crate::parallel::{Parallel, map_dynamic, split};
 
+/// The sparse part of `B` is stored in blocks this many rows and columns
+/// on a side, so that a block's slices of the vectors read and written
+/// stay in the L1 cache. Measured at 90 digits, 2048 beat 1024 and 4096.
+const BLOCK: usize = 2048;
+
 /// Work is split into this many pieces per thread, which take the next
 /// piece left as they finish, so that faster cores do more of them.
 const PIECES_PER_THREAD: usize = 8;
@@ -105,61 +110,82 @@ fn inner(v: &[u64], w: &[u64]) -> Small {
 /// rest sparse, by columns (relations) and by rows, so that both `Bv` and
 /// `Bᵀw` gather. Each is split into pieces of about equal weight.
 struct Sparse<'a, P> {
-    /// Each column's sparse rows.
-    cols: Vec<Vec<u32>>,
-    /// Each sparse row's columns; empty for the dense rows.
-    by_row: Vec<Vec<u32>>,
+    rows: usize,
+    cols: usize,
+    /// The sparse entries in blocks of [`BLOCK`] rows by [`BLOCK`]
+    /// columns, block row by block row, each entry its row and column
+    /// within its block as `row << 16 | column`. Each product reads and
+    /// writes within one block's range at a time, which stays in cache.
+    entries: Vec<u32>,
+    /// Where each block's entries start, and where the last ends.
+    starts: Vec<usize>,
     /// The dense rows, by bit.
     dense: Vec<usize>,
     /// Each column's bits in the dense rows.
     masks: Vec<u64>,
-    col_pieces: Vec<usize>,
-    row_pieces: Vec<usize>,
+    /// The rows left out of `A` until the end, by bit, and each column's
+    /// bits in them.
+    post: Vec<usize>,
+    post_masks: Vec<u64>,
     /// Equal pieces of a block vector, one word per column.
     vec_pieces: Vec<usize>,
     par: &'a P,
 }
 
 impl<'a, P: Parallel> Sparse<'a, P> {
-    fn new(cols: &[Vec<usize>], rows: usize, par: &'a P) -> Self {
+    fn new(cols: &[Vec<usize>], rows: usize, post: usize, par: &'a P) -> Self {
         let mut weight = vec![0usize; rows];
         for &r in cols.iter().flatten() {
             weight[r] += 1;
         }
-        let mut dense: Vec<usize> = (0..rows).collect();
-        dense.sort_unstable_by_key(|&r| core::cmp::Reverse(weight[r]));
-        dense.truncate(64);
+        let mut order: Vec<usize> = (0..rows).collect();
+        order.sort_unstable_by_key(|&r| core::cmp::Reverse(weight[r]));
+        order.truncate(post + 64);
+        let dense = order.split_off(post.min(order.len()));
+        let post = order;
+        // Bits 0–63 for the dense rows, and 64 on for the post rows.
         let mut bit = vec![u8::MAX; rows];
-        for (i, &r) in dense.iter().enumerate() {
+        for (i, &r) in dense.iter().chain(&post).enumerate() {
             bit[r] = i as u8;
         }
-        let mut masks = vec![0u64; cols.len()];
-        let mut by_row = vec![Vec::new(); rows];
-        let cols: Vec<Vec<u32>> = cols
-            .iter()
-            .enumerate()
-            .map(|(c, col)| {
-                let mut sparse = Vec::with_capacity(col.len());
-                for &r in col {
-                    if bit[r] == u8::MAX {
-                        sparse.push(r as u32);
-                        by_row[r].push(c as u32);
-                    } else {
-                        masks[c] |= 1 << bit[r];
-                    }
+        let n = cols.len();
+        let mut masks = vec![0u64; n];
+        let mut post_masks = vec![0u64; n];
+        let (row_blocks, col_blocks) = (rows.div_ceil(BLOCK), n.div_ceil(BLOCK));
+        let block = |r: usize, c: usize| r / BLOCK * col_blocks + c / BLOCK;
+        let mut starts = vec![0usize; row_blocks * col_blocks + 1];
+        for (c, col) in cols.iter().enumerate() {
+            for &r in col {
+                match bit[r] {
+                    u8::MAX => starts[block(r, c) + 1] += 1,
+                    b @ 0..64 => masks[c] |= 1 << b,
+                    b => post_masks[c] |= 1 << (b - 64),
                 }
-                sparse
-            })
-            .collect();
+            }
+        }
+        for i in 1..starts.len() {
+            starts[i] += starts[i - 1];
+        }
+        let mut fill = starts.clone();
+        let mut entries = vec![0u32; starts[starts.len() - 1]];
+        for (c, col) in cols.iter().enumerate() {
+            for &r in col.iter().filter(|&&r| bit[r] == u8::MAX) {
+                let k = block(r, c);
+                entries[fill[k]] = (((r % BLOCK) << 16) | (c % BLOCK)) as u32;
+                fill[k] += 1;
+            }
+        }
         let pieces = PIECES_PER_THREAD * par.threads();
         Self {
-            col_pieces: split(cols.iter().map(|c| c.len() + 4), pieces),
-            row_pieces: split(by_row.iter().map(|r| r.len() + 1), pieces),
+            rows,
+            cols: n,
+            entries,
+            starts,
             vec_pieces: split(cols.iter().map(|_| 1), pieces),
-            by_row,
-            cols,
             dense,
             masks,
+            post,
+            post_masks,
             par,
         }
     }
@@ -188,16 +214,38 @@ impl<'a, P: Parallel> Sparse<'a, P> {
             .fold([0; 64], |acc, x| add(&acc, x))
     }
 
-    /// `Bv`, with one word per row of `B`.
+    /// The entries of the block at block row `i`, block column `j`.
+    fn block(&self, i: usize, j: usize) -> &[u32] {
+        let k = i * self.cols.div_ceil(BLOCK) + j;
+        &self.entries[self.starts[k]..self.starts[k + 1]]
+    }
+
+    /// `Bv`, with one word per row of `B`: each block row's words from its
+    /// blocks in turn.
     fn mul(&self, v: &[u64]) -> Vec<u64> {
-        let mut out = self.gather(&self.row_pieces, |range| {
-            self.by_row[range]
-                .iter()
-                .map(|row| row.iter().fold(0, |acc, &c| acc ^ v[c as usize]))
-                .collect()
-        });
+        let col_blocks = self.cols.div_ceil(BLOCK);
+        let mut out = map_dynamic(self.par, self.rows.div_ceil(BLOCK), |i| {
+            let mut out = vec![0u64; BLOCK.min(self.rows - i * BLOCK)];
+            for j in 0..col_blocks {
+                let v = &v[j * BLOCK..];
+                for &e in self.block(i, j) {
+                    out[(e >> 16) as usize] ^= v[(e & 0xffff) as usize];
+                }
+            }
+            out
+        })
+        .concat();
         // Dense row i's word is the sum of v over the columns with bit i.
         for (&r, w) in self.dense.iter().zip(self.inner(&self.masks, v)) {
+            out[r] = w;
+        }
+        out
+    }
+
+    /// `Bv` with the post rows too: the whole of `B`.
+    fn mul_full(&self, v: &[u64]) -> Vec<u64> {
+        let mut out = self.mul(v);
+        for (&r, w) in self.post.iter().zip(self.inner(&self.post_masks, v)) {
             out[r] = w;
         }
         out
@@ -210,16 +258,19 @@ impl<'a, P: Parallel> Sparse<'a, P> {
             rows[i] = w[r];
         }
         let t = tables(&rows);
-        self.gather(&self.col_pieces, |range| {
-            let (cols, masks) = (&self.cols[range.clone()], &self.masks[range]);
-            cols.iter()
-                .zip(masks)
-                .map(|(col, &m)| {
-                    col.iter()
-                        .fold(mul_word(&t, m), |acc, &r| acc ^ w[r as usize])
-                })
-                .collect()
+        let row_blocks = self.rows.div_ceil(BLOCK);
+        map_dynamic(self.par, self.cols.div_ceil(BLOCK), |j| {
+            let range = j * BLOCK..self.cols.min((j + 1) * BLOCK);
+            let mut out: Vec<u64> = self.masks[range].iter().map(|&m| mul_word(&t, m)).collect();
+            for i in 0..row_blocks {
+                let w = &w[i * BLOCK..];
+                for &e in self.block(i, j) {
+                    out[(e & 0xffff) as usize] ^= w[(e >> 16) as usize];
+                }
+            }
+            out
         })
+        .concat()
     }
 
     /// `Av = BᵀBv`.
@@ -288,14 +339,20 @@ fn choose(t: &Small, prev: u64) -> (Small, u64) {
 /// `B` with `rows` rows and the given columns, using `par` for the
 /// matrix and vector products. Returns nothing if this `seed` fails, which
 /// another seed is unlikely to repeat.
+///
+/// The `post` densest rows of `B` are left out of the iterations, which
+/// makes each cheaper, and the vectors found are combined at the end to
+/// satisfy them as well, as in msieve. That leaves fewer dependencies, so
+/// `B` should have at least `post + 64` more columns than rows.
 pub fn null_space(
     cols: &[Vec<usize>],
     rows: usize,
     seed: u64,
+    post: usize,
     par: &impl Parallel,
 ) -> Vec<Vec<usize>> {
     let n = cols.len();
-    let b = Sparse::new(cols, rows, par);
+    let b = Sparse::new(cols, rows, post, par);
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let y: Vec<u64> = (0..n)
         .map(|_| {
@@ -362,7 +419,7 @@ pub fn null_space(
     for (xi, yi) in x.iter_mut().zip(&y) {
         *xi ^= yi;
     }
-    let (bx, bv) = (b.mul(&x), b.mul(&v));
+    let (bx, bv) = (b.mul_full(&x), b.mul_full(&v));
     let words = rows.div_ceil(64);
     // Each of the 128 images as a bit string over the rows of B, reduced
     // against the earlier ones, with the combination it stands for.
@@ -408,7 +465,7 @@ pub fn null_space(
             })
         })
         .collect();
-    debug_assert!(b.mul(&deps).iter().all(|&w| w == 0), "Bx ≠ 0");
+    debug_assert!(b.mul_full(&deps).iter().all(|&w| w == 0), "Bx ≠ 0");
     let mut found: Vec<Vec<usize>> = (0..combos.len())
         .map(|q| {
             (0..n)
