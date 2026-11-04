@@ -97,7 +97,7 @@ impl Murphy {
             };
             rho.push(r.max(0.0));
         }
-        let q = f64::from(params.algebraic_bound) / 2.0;
+        let q = params.qmin as f64;
         Self {
             rho,
             log_bf: log2(f64::from(params.algebraic_bound)),

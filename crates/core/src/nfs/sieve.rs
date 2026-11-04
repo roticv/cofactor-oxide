@@ -68,10 +68,11 @@ pub struct Relation {
     /// Whether `G(a, b)` is negative.
     pub negative: bool,
     /// The primes of `|G(a, b)|`, with repetition: factor-base primes and
-    /// up to [`Params::large_primes`] larger ones.
+    /// up to two larger ones, below `2^`[`Params::rational_lpb`].
     pub rational: Vec<u64>,
     /// The primes of `|F(a, b)|`, with repetition: factor-base primes, the
-    /// special-q and up to [`Params::large_primes`] other larger ones. Each
+    /// special-q and up to two other larger ones, below
+    /// `2^`[`Params::algebraic_lpb`]. Each
     /// stands for the prime ideal `(p, a/b mod p)`, or the one at infinity
     /// if `p | b`.
     pub algebraic: Vec<u64>,
@@ -131,10 +132,11 @@ impl Walk {
 /// One side's factor base and its sieve for the current special-q.
 struct Side {
     primes: Vec<Prime>,
+    /// Primes outside the factor base must be below this.
     large_bound: u64,
-    /// How many primes past the factor base, below `large_bound`, a value
-    /// may have.
-    large_primes: u32,
+    /// `log₂` of the largest cofactor kept, and the cofactor itself.
+    mfb: u32,
+    cofactor_bound: u64,
     /// The largest factor-base prime squared: any cofactor below it is
     /// prime.
     prime_below: u64,
@@ -154,7 +156,9 @@ struct Side {
 }
 
 impl Side {
-    fn new(primes: &[Prime], params: &Params, slab: usize) -> Self {
+    /// The side with factor base `primes`, large primes below `2^lpb` and
+    /// cofactors up to `2^mfb`.
+    fn new(primes: &[Prime], (lpb, mfb): (u32, u32), slab: usize) -> Self {
         let largest = primes.last().map_or(2, |p| p.p);
         let skipped = primes
             .iter()
@@ -164,8 +168,9 @@ impl Side {
             .sum();
         Self {
             primes: primes.to_vec(),
-            large_bound: u64::from(largest) * u64::from(params.large_mult),
-            large_primes: params.large_primes,
+            large_bound: 1 << lpb,
+            mfb,
+            cofactor_bound: 1 << mfb.min(63),
             prime_below: u64::from(largest) * u64::from(largest),
             skipped,
             small: Vec::new(),
@@ -432,8 +437,16 @@ impl Sieve {
             poly: poly.clone(),
             log_i,
             log_j,
-            rational: Side::new(&fb.rational, params, slab),
-            algebraic: Side::new(&fb.algebraic, params, slab),
+            rational: Side::new(
+                &fb.rational,
+                (params.rational_lpb, params.rational_mfb),
+                slab,
+            ),
+            algebraic: Side::new(
+                &fb.algebraic,
+                (params.algebraic_lpb, params.algebraic_mfb),
+                slab,
+            ),
             f: poly.f.iter().map(|&c| c as f64).collect(),
             marked: vec![false; slab],
         }
@@ -639,35 +652,36 @@ impl Sieve {
 
 impl Side {
     /// Bits a value's sieved logs may fall short of its size: room for the
-    /// large primes, the primes not sieved, and rounding.
+    /// cofactor, the primes not sieved, and rounding.
     fn slack(&self) -> f64 {
-        f64::from(self.large_primes) * log2(self.large_bound as f64) + self.skipped + FUDGE
+        f64::from(self.mfb) + self.skipped + FUDGE
     }
 
-    /// Whether `v`, what trial division left, is 1 or splits into at most
-    /// `large_primes` primes below `large_bound`, which are added to
-    /// `factors`. The large-prime bound must be below the square of the
-    /// largest factor-base prime, so that anything that small is prime.
+    /// Whether `v`, what trial division left, is 1, a prime below the
+    /// large-prime bound, or no larger than the cofactor bound and the
+    /// product of two such primes, which are added to `factors`. The
+    /// large-prime bound must be below the square of the largest
+    /// factor-base prime, so that a cofactor below it is prime.
     fn cofactor(&self, v: &Wide, factors: &mut Vec<u64>) -> bool {
         let Some(c) = v.to_u64() else {
             return false;
         };
-        let bound = self.large_bound;
         match c {
             0 => false,
             1 => true,
-            c if c < bound => {
+            c if c > self.cofactor_bound => false,
+            c if c < self.large_bound => {
                 factors.push(c);
                 true
             }
-            c if self.large_primes < 2
-                || c < self.prime_below
-                || u128::from(c) >= u128::from(bound) * u128::from(bound) =>
+            // A prime too large, or two primes of which one is.
+            c if c < self.prime_below
+                || u128::from(c) >= u128::from(self.large_bound) * u128::from(self.large_bound) =>
             {
                 false
             }
             c => match split(c) {
-                Some([p, q]) if q < bound => {
+                Some([p, q]) if q < self.large_bound => {
                     factors.extend([p, q]);
                     true
                 }
@@ -772,18 +786,41 @@ fn divides(a: i64, b: u64, q: &Prime) -> bool {
 }
 
 /// Divides every factor of `p` out of `v`, recording each.
-// Limb is u32 or u64, so the casts are needed on one target and redundant
-// on the other.
-#[allow(clippy::unnecessary_cast)]
 fn divide_out(v: &mut Wide, p: u32, factors: &mut Vec<u64>) {
-    loop {
-        let (q, r) = v.div_rem_limb(p as Limb);
-        if r != 0 || v.is_zero() {
+    while let (q, 0) = div_small(v, p) {
+        if v.is_zero() {
             return;
         }
         *v = q;
         factors.push(p.into());
     }
+}
+
+/// `v/p` and `v mod p`, in 32-bit pieces from the highest nonzero limb, so
+/// that each step is a 64-bit division: on 64-bit limbs, dividing limb by
+/// limb would take 128-bit ones, which are done in software.
+// Limb is u32 or u64, so the casts are needed on one target and redundant
+// on the other.
+#[allow(clippy::unnecessary_cast)]
+fn div_small(v: &Wide, p: u32) -> (Wide, u64) {
+    const PIECES: u32 = Limb::BITS / 32;
+    let limbs = v.as_limbs();
+    let Some(top) = limbs.iter().rposition(|&l| l != 0) else {
+        return (Wide::ZERO, 0);
+    };
+    let p = u64::from(p);
+    let mut quotient = [0 as Limb; 512 / Limb::BITS as usize];
+    let mut rem = 0u64;
+    for i in (0..=top).rev() {
+        let mut q = 0u64;
+        for k in (0..PIECES).rev() {
+            let t = (rem << 32) | ((limbs[i] as u64 >> (32 * k)) & 0xffff_ffff);
+            q |= (t / p) << (32 * k);
+            rem = t % p;
+        }
+        quotient[i] = q as Limb;
+    }
+    (Wide::from_limbs(quotient), rem)
 }
 
 /// `|F(a, b)| = |Σ cᵢ·aⁱ·b^(d−i)|`, exactly.

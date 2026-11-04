@@ -23,7 +23,8 @@ impl Mod64 {
         Self {
             n,
             neg_inv: inv.wrapping_neg(),
-            one: ((1u128 << 64) % u128::from(n)) as u64,
+            // 2^64 mod n, as (2^64 − 1) mod n + 1, without 128-bit division.
+            one: (u64::MAX % n + 1) % n,
         }
     }
 
