@@ -191,8 +191,11 @@ Past that, give it ones chosen by CADO-NFS or msieve with `--poly`, in
 either's format, of degree up to 6 with coefficients of any size below
 2^256. The sieve's parameters are tuned up to 600 bits (180 digits). The
 siever can keep up to three large primes a side, each below 2^40, and
-special-q up to 2^40 too, splitting cofactors of up to 127 bits with P−1
-and ECM, as numbers such as RSA-270 need. No size in the parameter table
+special-q up to 2^40 too, as numbers such as RSA-270 need. Cofactors
+below 2^62 are split by ECM and rho, and larger ones, of up to 127 bits,
+by a quick P−1 alone: at 90 digits with 34-bit large primes, ECM curves
+there cost far more than the relations they added, and dropping them
+gave 3 to 4 times as many relations a second. No size in the parameter table
 uses more than one large prime a side yet: at 90 digits, two on the
 algebraic side took 10–15% longer, and two on both sides 2.5 times as
 long, as more relations were needed and the matrix grew.

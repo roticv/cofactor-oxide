@@ -1,8 +1,9 @@
 //! Finding a factor of a cofactor that may be two large primes past 2^62
-//! or three, below 2^128, which has to be fast: most such cofactors that split turn out to
-//! have a prime too large, so the sieve splits many for each relation.
+//! or three, below 2^128, which has to be fast: most such cofactors that
+//! split turn out to have a prime too large, so the sieve splits many for
+//! each relation.
 //!
-//! P−1 runs first, then a few ECM curves, all with small bounds fixed in
+//! P−1 runs first, then any ECM curves, all with small bounds fixed in
 //! advance: the prime powers of stage 1 and the pairs of stage 2 are
 //! worked out once, and each stage takes one GCD at its end.
 
@@ -19,9 +20,18 @@ const LIMBS: usize = 128 / Limb::BITS as usize;
 pub(crate) type Cofactor = Uint<LIMBS>;
 
 /// P−1's bounds, then ECM's, for up to `ECM_CURVES` curves.
-const PM1_BOUNDS: (u64, u64) = (300, 3_000);
+///
+/// At 90 digits, with large primes below 2^34, the cheapest search gave
+/// the most relations a second. With two a side, P−1 to (60, 500) and no
+/// curves gave 4,570 a second; to (300, 3000) 3,890; with one curve
+/// after, 2,720; with eight, 1,370, though that found 12% more relations.
+/// With three on the algebraic side it was 1,100 a second against 290
+/// with eight curves, which found 58% more. Where sieving each special-q
+/// costs more, as with larger numbers, more relations from each could
+/// make some curves pay.
+const PM1_BOUNDS: (u64, u64) = (60, 500);
 const ECM_BOUNDS: (u64, u64) = (150, 3_000);
-const ECM_CURVES: u64 = 8;
+const ECM_CURVES: u64 = 0;
 
 /// The first ECM curve's sigma: smaller ones give degenerate curves.
 const FIRST_SIGMA: u64 = 6;
