@@ -16,8 +16,9 @@
 //! thresholds are candidates. Primes larger than a slab are walked once
 //! over the whole region, their hits dropped into a bucket per slab, so
 //! that a slab doesn't visit the many that miss it. The primes that hit
-//! candidates are found by sieving again, or recorded during the walk or
-//! in the buckets, and divided out; primes below 2^8 are tried directly.
+//! candidates are found from their rows' first hits, or recorded during
+//! the walk or in the buckets, and divided out; primes below 2^8 are tried
+//! directly.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -40,8 +41,10 @@ const SLAB_BITS: u32 = 19;
 /// Primes below this aren't sieved, only tried on candidates.
 const SMALL_PRIMES: u32 = 30;
 
-/// Primes from this up are sieved again over a slab with candidates, to
-/// find which candidates they divide; smaller ones are tried directly.
+/// Primes from this up that are sieved row by row are found on a
+/// candidate by its distance from the row's first hit, which with few
+/// candidates a row costs less than sieving the row again; smaller ones
+/// are tried directly.
 const RESIEVE: u32 = 256;
 
 /// The most positions along a row that share a threshold.
@@ -324,41 +327,43 @@ impl Side {
     }
 
     /// Records `(offset, p)` for each prime from [`RESIEVE`] up that hits
-    /// one of the marked offsets of the slab at row `j0`.
+    /// one of the `candidates`, in order, of the slab at row `j0`, which
+    /// are the offsets set in `marked`.
     fn resieve(
         &self,
         j0: u64,
-        rows: usize,
         log_i: u32,
-        marked: &[bool],
+        candidates: &[u32],
+        marked: &[u64],
         out: &mut Vec<(u32, u32)>,
     ) {
-        let width = 1usize << log_i;
-        let half = width as u64 / 2;
-        for r in 0..rows {
-            let j = j0 + r as u64;
-            let row = &marked[r * width..(r + 1) * width];
-            if !row.contains(&true) {
-                continue;
-            }
+        let width = 1u64 << log_i;
+        let half = width / 2;
+        let mut rest = candidates;
+        while let Some(&first) = rest.first() {
+            let r = first >> log_i;
+            let n = rest.partition_point(|&x| x >> log_i == r);
+            let (row, next) = rest.split_at(n);
+            rest = next;
+            let j = j0 + u64::from(r);
+            let base = r << log_i;
             for s in self.small.iter().filter(|s| s.p >= RESIEVE) {
                 let p = u64::from(s.p);
-                let mut x = ((u64::from(s.rho) * (j % p) + half) % p) as usize;
-                while x < width {
-                    if row[x] {
-                        out.push(((r * width + x) as u32, s.p));
+                let x0 = ((u64::from(s.rho) * (j % p) + half) % p) as u32;
+                for &x in row {
+                    if (x - base) % s.p == x0 {
+                        out.push((x, s.p));
                     }
-                    x += s.p as usize;
                 }
             }
         }
-        out.extend(self.hits.iter().filter(|h| marked[h.0 as usize]));
+        out.extend(self.hits.iter().filter(|h| is_marked(marked, h.0)));
         let slab = ((j0 << log_i) >> self.block.len().trailing_zeros()) as usize;
         out.extend(
             self.buckets[slab]
                 .iter()
                 .map(|&(tagged, p)| (tagged & 0xff_ffff, p))
-                .filter(|h| marked[h.0 as usize]),
+                .filter(|h| is_marked(marked, h.0)),
         );
     }
 }
@@ -446,7 +451,7 @@ pub struct Sieve {
     f_wide: Vec<(Wide, bool)>,
     g_wide: (Wide, Wide),
     g_small: Option<(u128, i128)>,
-    marked: Vec<bool>,
+    marked: Vec<u64>,
 }
 
 const TOO_WIDE: &str = "polynomial coefficients too large";
@@ -483,7 +488,7 @@ impl Sieve {
             g_small: u128::try_from(&poly.m)
                 .ok()
                 .zip(i128::try_from(&poly.l).ok()),
-            marked: vec![false; slab],
+            marked: vec![0; slab / 64],
         }
     }
 
@@ -554,7 +559,7 @@ impl Sieve {
         let r_slack = self.rational.slack();
         let a_slack = self.algebraic.slack() + log2(q as f64);
         let segment = SEGMENT.min(width);
-        let rows_per_slab = self.marked.len() >> log_i;
+        let rows_per_slab = (self.marked.len() * 64) >> log_i;
         let mut relations = Vec::new();
         let mut candidates = Vec::new();
         let mut hits = Vec::new();
@@ -608,16 +613,16 @@ impl Sieve {
                 continue;
             }
             for &x in &candidates {
-                self.marked[x as usize] = true;
+                self.marked[x as usize / 64] |= 1 << (x % 64);
             }
             hits.clear();
             self.rational
-                .resieve(j0, rows_per_slab, log_i, &self.marked, &mut hits);
+                .resieve(j0, log_i, &candidates, &self.marked, &mut hits);
             let split = hits.len();
             self.algebraic
-                .resieve(j0, rows_per_slab, log_i, &self.marked, &mut hits);
+                .resieve(j0, log_i, &candidates, &self.marked, &mut hits);
             for &x in &candidates {
-                self.marked[x as usize] = false;
+                self.marked[x as usize / 64] = 0;
             }
             let (r_hits, a_hits) = hits.split_at_mut(split);
             r_hits.sort_unstable();
@@ -971,4 +976,9 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
         (a, b) = (b, a % b);
     }
     a
+}
+
+/// Whether bit `x` of `marked` is set.
+fn is_marked(marked: &[u64], x: u32) -> bool {
+    marked[x as usize / 64] >> (x % 64) & 1 != 0
 }
