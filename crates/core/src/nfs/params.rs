@@ -7,15 +7,26 @@
 /// region sieved for each special-q, and the first special-q. Between
 /// rows, values are interpolated.
 ///
-/// These are large factor bases with one large prime a side, of about 10
-/// to 30 times the bound, rounded up to a power of 2. CADO-NFS
-/// instead uses factor bases 5 to 10 times smaller with two large primes a
-/// side; at 90 digits its parameters took 532 s to collect enough
+/// Up to 330 bits these are large factor bases with one large prime a
+/// side, of about 10 to 30 times the bound, rounded up to a power of 2.
+/// CADO-NFS instead uses factor bases 5 to 10 times smaller with two large
+/// primes a side; at 90 digits its parameters took 532 s to collect enough
 /// relations here, two large primes on the algebraic side 491 s, and these
-/// 474 s, since this siever spends more on each candidate. At 60 digits,
-/// with the line siever this replaced, bounds of 300,000 to 800,000 with
-/// large primes 10 or 30 times larger all took 93 to 107 s; 60,000 never
-/// finished. The rows past 330 bits are guesses.
+/// 474 s, since this siever spends more on each candidate. End to end at
+/// 90 digits, two large primes a side took 2.5 times as long. At 60
+/// digits, with the line siever this replaced, bounds of 300,000 to
+/// 800,000 with large primes 10 or 30 times larger all took 93 to 107 s;
+/// 60,000 never finished.
+///
+/// From 364 bits the rows switch to the CADO-NFS pattern. RSA-110 with
+/// the large factor bases, 10.4 million and one 27-bit large prime a side,
+/// took 4 h 56 min on 6 threads; with factor bases of 5 million and two
+/// 27-bit large primes a side, 3 h 19 min. It needed 10.1 million
+/// relations rather than 6.3 million, but each special-q gave over twice
+/// as many, and the larger matrix cost minutes against hours of sieving.
+/// Between 330 and 364 bits the cofactor bound is interpolated, so sizes
+/// there keep a large prime and a half on average. The rows past 364 bits
+/// are guesses.
 ///
 /// `I` stops at 2^13, where the buckets of the largest primes' hits take
 /// a few hundred megabytes for each thread. Past 600 bits the last row
@@ -23,7 +34,7 @@
 /// of them a side, to be practical. The siever takes large-prime bounds up
 /// to 2^40, below the quadratic characters' primes.
 #[allow(clippy::type_complexity)]
-const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 9] = [
+const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 10] = [
     (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250),
     (160, [60_000, 60_000], [21, 21], [21, 21], 10, 15_000),
     (200, [500_000, 500_000], [23, 23], [23, 23], 11, 125_000),
@@ -37,36 +48,44 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 9] = [
         1_500_000,
     ),
     (
+        364,
+        [5_000_000, 5_000_000],
+        [27, 27],
+        [54, 54],
+        12,
+        1_250_000,
+    ),
+    (
         400,
-        [15_000_000, 15_000_000],
+        [8_000_000, 8_000_000],
         [28, 28],
-        [28, 28],
+        [56, 56],
         13,
-        3_750_000,
+        2_000_000,
     ),
     (
         465,
+        [20_000_000, 20_000_000],
+        [29, 29],
+        [58, 58],
+        13,
+        5_000_000,
+    ),
+    (
+        530,
         [40_000_000, 40_000_000],
-        [29, 29],
-        [29, 29],
+        [30, 30],
+        [60, 60],
         13,
         10_000_000,
     ),
     (
-        530,
-        [80_000_000, 80_000_000],
-        [30, 30],
-        [30, 30],
+        600,
+        [75_000_000, 75_000_000],
+        [31, 31],
+        [62, 62],
         13,
         20_000_000,
-    ),
-    (
-        600,
-        [150_000_000, 150_000_000],
-        [31, 31],
-        [31, 31],
-        13,
-        40_000_000,
     ),
 ];
 

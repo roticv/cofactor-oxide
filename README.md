@@ -195,10 +195,10 @@ special-q up to 2^40 too, as numbers such as RSA-270 need. Cofactors
 below 2^62 are split by ECM and rho, and larger ones, of up to 127 bits,
 by a quick P−1 alone: at 90 digits with 34-bit large primes, ECM curves
 there cost far more than the relations they added, and dropping them
-gave 3 to 4 times as many relations a second. No size in the parameter table
-uses more than one large prime a side yet: at 90 digits, two on the
-algebraic side took 10–15% longer, and two on both sides 2.5 times as
-long, as more relations were needed and the matrix grew.
+gave 3 to 4 times as many relations a second. Up to 330 bits the parameter table keeps
+one large prime a side, as at 90 digits two a side took 2.5 times as
+long; from 364 bits it uses smaller factor bases with two a side, which
+factored RSA-110 in 3 h 19 min on 6 threads against 4 h 56 min.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
