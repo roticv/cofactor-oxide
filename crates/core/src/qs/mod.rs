@@ -15,7 +15,7 @@
 //! ones.
 
 mod base;
-pub(crate) mod cofactor;
+pub mod cofactor;
 mod cycles;
 mod job;
 mod lanczos;

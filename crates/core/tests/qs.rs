@@ -612,3 +612,26 @@ fn rsa100() {
     let q = "40094690950920881030683735292761468389214899724061";
     assert!(f == p || f == q, "RSA-100 gave {f}");
 }
+
+#[test]
+fn cofactors_split() {
+    use cofox_core::prime::is_prime;
+    use cofox_core::qs::cofactor::split;
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut prime = |bits: u32| loop {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let x = (state >> (64 - bits)) | 1 | (1 << (bits - 1));
+        if is_prime(&Uint::<2>::from_u64(x)) {
+            break x;
+        }
+    };
+    for (pb, qb) in [(18, 22), (24, 26), (28, 30), (31, 31), (22, 36)] {
+        for _ in 0..200 {
+            let (p, q) = (prime(pb), prime(qb));
+            assert_eq!(split(p * q), Some([p.min(q), p.max(q)]), "{p} · {q}");
+        }
+        assert_eq!(split(prime(pb + qb)), None);
+    }
+}
