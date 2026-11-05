@@ -17,11 +17,11 @@
 /// large primes 10 or 30 times larger all took 93 to 107 s; 60,000 never
 /// finished. The rows past 330 bits are guesses.
 ///
-/// The large-prime bound stops at 2^31, below the quadratic characters'
-/// primes, and `I` at 2^13, where the buckets of the largest primes' hits
-/// take a few hundred megabytes for each thread. Past 600 bits the last
-/// row holds, though numbers that large need three large primes a side,
-/// which this siever doesn't find, to be practical.
+/// `I` stops at 2^13, where the buckets of the largest primes' hits take
+/// a few hundred megabytes for each thread. Past 600 bits the last row
+/// holds, though numbers that large need larger large primes, two or three
+/// of them a side, to be practical. The siever takes large-prime bounds up
+/// to 2^40, below the quadratic characters' primes.
 #[allow(clippy::type_complexity)]
 const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 9] = [
     (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250),
@@ -87,8 +87,8 @@ pub struct Params {
     /// `log₂` of the largest cofactor, what the factor base leaves of a
     /// value, kept on each side: one large prime below the large-prime
     /// bound, or two or three, found by splitting it. Three need a
-    /// cofactor bound past twice the large-prime bound's bits, which here
-    /// is at most 31.
+    /// cofactor bound past twice the large-prime bound's bits, which is at
+    /// most 40; the cofactor bound is at most 127.
     pub rational_mfb: u32,
     pub algebraic_mfb: u32,
     /// Each special-q sieves `i` in `[−I/2, I/2)` and `j` in `[1, I/2)`,

@@ -1,5 +1,8 @@
 use cofox_core::Uint;
-use cofox_core::nfs::{FactorBase, Params, Poly, Relation, Sieve, alpha, degree, modp, special_qs};
+use cofox_core::nfs::{
+    CHARACTER_PRIMES, FactorBase, Params, Poly, Relation, Sieve, alpha, degree, modp, special_qs,
+};
+use cofox_core::prime::is_prime;
 use cofox_core::primes::Primes;
 use num_bigint::BigInt;
 
@@ -19,6 +22,14 @@ impl Rng {
 
 fn eval_mod<C: modp::Coeff>(f: &[C], r: u64, p: u64) -> u64 {
     modp::eval(&modp::reduce(f, p), r, p)
+}
+
+fn derivative(f: &[BigInt]) -> Vec<BigInt> {
+    f.iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, c)| c * BigInt::from(i))
+        .collect()
 }
 
 #[test]
@@ -156,8 +167,10 @@ fn factor_base_primes_divide() {
     assert!((0.8..1.2).contains(&ratio), "{ratio}");
     assert_eq!(fb.characters.len(), 40);
     for c in &fb.characters {
-        assert!(c.p > 200_000);
-        assert_eq!(eval_mod(&poly.f, c.r.into(), c.p.into()), 0);
+        assert!(c.q >= CHARACTER_PRIMES);
+        assert_eq!(eval_mod(&poly.f, c.s, c.q), 0);
+        // A simple root.
+        assert_ne!(eval_mod(&derivative(&poly.f), c.s, c.q), 0);
     }
 }
 
@@ -517,7 +530,7 @@ fn wide_polynomials() {
         };
         assert_eq!(g % &p, BigInt::ZERO, "{q:?}");
     }
-    for q in fb.algebraic.iter().chain(&fb.characters) {
+    for q in &fb.algebraic {
         let p = BigInt::from(q.p);
         let v = if q.projective() {
             f[5].clone()
@@ -525,6 +538,9 @@ fn wide_polynomials() {
             value(&f, q.r.into())
         };
         assert_eq!(v % &p, BigInt::ZERO, "{q:?}");
+    }
+    for c in &fb.characters {
+        assert_eq!(value(&f, c.s) % BigInt::from(c.q), BigInt::ZERO, "{c:?}");
     }
 
     // Sieving with them runs, and whatever it finds holds.
@@ -586,6 +602,73 @@ fn gnfs_factors_with_three_large_primes() {
         algebraic_lpb: 15,
         rational_mfb: 15,
         algebraic_mfb: 45,
+        ..Params::for_bits(n.bits())
+    };
+    let t = std::time::Instant::now();
+    let f = gnfs_with(&n, &params, |_, _| std::ops::ControlFlow::Continue(()))
+        .unwrap()
+        .expect("no factor");
+    println!("{f} in {:.2?}", t.elapsed());
+    assert!(f == u("98936812917358800691") || f == u("11888570237800257629"));
+}
+
+/// With large primes past 2^32, and special-q past 2^32 too, relations
+/// hold and their primes past the factor base are prime and below the
+/// bound.
+#[test]
+fn large_primes_past_32_bits() {
+    let n = u("336824692466468372742240828730960315277872725533762205050251");
+    let poly = Poly::select(&n).unwrap();
+    let params = Params {
+        rational_bound: 100_000,
+        algebraic_bound: 100_000,
+        rational_lpb: 33,
+        algebraic_lpb: 33,
+        rational_mfb: 66,
+        algebraic_mfb: 99,
+        log_i: 9,
+        ..Params::for_bits(n.bits())
+    };
+    let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
+    let mut sieve = Sieve::new(&poly, &fb, &params);
+    let (mut found, mut wide) = (0, 0);
+    let t = std::time::Instant::now();
+    for start in [1 << 20, 1 << 32] {
+        for (q, r) in special_qs(&poly, start, start + 1000).into_iter().take(1) {
+            for rel in sieve.special_q(q, r) {
+                check_relation(&poly, &fb, q, &rel);
+                found += 1;
+                let others = rel.rational.iter().chain(&rel.algebraic);
+                for &p in others.filter(|&&p| p > 100_000 && p != q) {
+                    assert!(p < 1 << 33, "{p} in {rel:?}");
+                    assert!(is_prime(&Uint::<2>::from_u64(p)), "{p} in {rel:?}");
+                    wide += usize::from(p >> 32 != 0);
+                }
+            }
+        }
+    }
+    println!(
+        "{found} relations, {wide} primes past 2^32, in {:.2?}",
+        t.elapsed()
+    );
+    assert!(wide > 0);
+}
+
+/// Factoring from special-q past 2^32, so that every relation has a
+/// prime that wide, to be stored, put in the matrix and taken the square
+/// root of.
+#[test]
+fn gnfs_factors_with_special_q_past_32_bits() {
+    use cofox_core::nfs::gnfs_with;
+    let n = u("1176217249472123917871099760550263221639");
+    let params = Params {
+        rational_bound: 3_000,
+        algebraic_bound: 3_000,
+        rational_lpb: 16,
+        algebraic_lpb: 16,
+        rational_mfb: 32,
+        algebraic_mfb: 32,
+        qmin: 1 << 32,
         ..Params::for_bits(n.bits())
     };
     let t = std::time::Instant::now();

@@ -34,7 +34,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-pub use base::{FactorBase, Prime};
+pub use base::{CHARACTER_PRIMES, Character, FactorBase, Prime};
 pub use format::{parse_poly, parse_relation, poly_text, relation_line};
 pub use params::{CHARACTERS, Params};
 pub use poly::{Poly, alpha, degree};

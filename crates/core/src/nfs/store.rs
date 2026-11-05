@@ -11,7 +11,9 @@ use alloc::vec::Vec;
 use super::sieve::Relation;
 
 /// Relations, each as words: `a` and `b`, low word first; a word with the
-/// rational and algebraic prime counts and the sign; then the primes.
+/// rational and algebraic prime counts, the sign, and whether the primes
+/// are wide; then the primes, a word each, or two, low first, if any of
+/// the relation's is 2^32 or more.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     words: Vec<u32>,
@@ -22,8 +24,9 @@ pub struct Store {
 /// The words before a relation's primes.
 const HEADER: usize = 5;
 
-/// The sign bit of the counts word.
+/// The sign bit of the counts word, and the one for wide primes.
 const NEGATIVE: u32 = 1 << 31;
+const WIDE: u32 = 1 << 30;
 
 impl Store {
     pub fn new() -> Self {
@@ -37,21 +40,19 @@ impl Store {
         self.starts.len() - 1
     }
 
-    /// Adds `rel`, unless one of its primes or prime counts doesn't fit:
-    /// primes must be below 2^32, as every large-prime bound here is, and
-    /// counts below 2^15.
+    /// Adds `rel`, unless its prime counts don't fit, below 2^15.
     pub fn push(&mut self, rel: &Relation) -> bool {
         let (r, a) = (rel.rational.len(), rel.algebraic.len());
-        let fits = |p: &u64| u32::try_from(*p).is_ok();
-        if r >= 1 << 15
-            || a >= 1 << 15
-            || !rel.rational.iter().all(fits)
-            || !rel.algebraic.iter().all(fits)
-        {
+        if r >= 1 << 15 || a >= 1 << 15 {
             return false;
         }
+        let primes = rel.rational.iter().chain(&rel.algebraic);
+        let wide = primes.clone().any(|&p| p >> 32 != 0);
         let (ua, b) = (rel.a as u64, rel.b);
-        let counts = r as u32 | (a as u32) << 15 | if rel.negative { NEGATIVE } else { 0 };
+        let counts = r as u32
+            | (a as u32) << 15
+            | if wide { WIDE } else { 0 }
+            | if rel.negative { NEGATIVE } else { 0 };
         self.words.extend([
             ua as u32,
             (ua >> 32) as u32,
@@ -59,8 +60,12 @@ impl Store {
             (b >> 32) as u32,
             counts,
         ]);
-        self.words
-            .extend(rel.rational.iter().chain(&rel.algebraic).map(|&p| p as u32));
+        if wide {
+            self.words
+                .extend(primes.flat_map(|&p| [p as u32, (p >> 32) as u32]));
+        } else {
+            self.words.extend(primes.map(|&p| p as u32));
+        }
         self.starts.push(self.words.len());
         true
     }
@@ -81,13 +86,20 @@ impl Store {
         let w = self.words(i);
         let (a, b) = self.ab(i);
         let r = (w[4] & 0x7fff) as usize;
-        let primes = &w[HEADER..];
+        let primes: Vec<u64> = if w[4] & WIDE != 0 {
+            w[HEADER..]
+                .chunks(2)
+                .map(|p| u64::from(p[0]) | u64::from(p[1]) << 32)
+                .collect()
+        } else {
+            w[HEADER..].iter().map(|&p| p.into()).collect()
+        };
         Relation {
             a,
             b,
             negative: w[4] & NEGATIVE != 0,
-            rational: primes[..r].iter().map(|&p| p.into()).collect(),
-            algebraic: primes[r..].iter().map(|&p| p.into()).collect(),
+            rational: primes[..r].to_vec(),
+            algebraic: primes[r..].to_vec(),
         }
     }
 }

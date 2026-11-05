@@ -190,10 +190,12 @@ cofox chooses polynomials for numbers up to about 480 bits (145 digits).
 Past that, give it ones chosen by CADO-NFS or msieve with `--poly`, in
 either's format, of degree up to 6 with coefficients of any size below
 2^256. The sieve's parameters are tuned up to 600 bits (180 digits). The
-siever can keep up to three large primes a side, splitting cofactors of up
-to 93 bits with P−1 and ECM, which numbers such as RSA-270 need, but no
-size in the parameter table uses them yet: up to 600 bits they cost more
-than they gain.
+siever can keep up to three large primes a side, each below 2^40, and
+special-q up to 2^40 too, splitting cofactors of up to 127 bits with P−1
+and ECM, as numbers such as RSA-270 need. No size in the parameter table
+uses more than one large prime a side yet: at 90 digits, two on the
+algebraic side took 10–15% longer, and two on both sides 2.5 times as
+long, as more relations were needed and the matrix grew.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a

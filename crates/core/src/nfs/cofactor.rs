@@ -1,5 +1,5 @@
-//! Finding a factor of a cofactor that may be three large primes, up to
-//! 2^93, which has to be fast: most such cofactors that split turn out to
+//! Finding a factor of a cofactor that may be two large primes past 2^62
+//! or three, below 2^128, which has to be fast: most such cofactors that split turn out to
 //! have a prime too large, so the sieve splits many for each relation.
 //!
 //! P−1 runs first, then a few ECM curves, all with small bounds fixed in
@@ -14,7 +14,7 @@ use crate::curve::{Curve, Point};
 use crate::prime::miller_rabin;
 use crate::primes::Primes;
 
-/// Wide enough for a cofactor of three large primes, each below 2^31.
+/// Wide enough for a cofactor of three large primes, each below 2^40.
 const LIMBS: usize = 128 / Limb::BITS as usize;
 pub(crate) type Cofactor = Uint<LIMBS>;
 

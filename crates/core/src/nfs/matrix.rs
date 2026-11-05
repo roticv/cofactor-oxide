@@ -5,8 +5,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::base::{FactorBase, Prime};
+use super::modp::{inv, jacobi, mul_add};
 use super::sieve::Relation;
-use crate::qs::modp::pow_mod;
 
 /// Columns before the factor bases': one set in every row, so that each
 /// dependency has an even number of relations, and the rational sign.
@@ -18,8 +18,12 @@ pub fn root_of(rel: &Relation, p: u64) -> u64 {
     if rel.b.is_multiple_of(p) {
         p
     } else {
-        let b_inv = pow_mod(rel.b % p, p - 2, p);
-        (rel.a.rem_euclid(p as i64) as u64 % p) * b_inv % p
+        mul_add(
+            0,
+            rel.a.rem_euclid(p as i64) as u64 % p,
+            inv(rel.b % p, p),
+            p,
+        )
     }
 }
 
@@ -176,9 +180,9 @@ impl Matrix {
 /// `fb`'s that is −1: the Legendre symbol of `a − b·s` mod `q`.
 pub fn characters(fb: &FactorBase, (a, b): (i64, u64)) -> u64 {
     fb.characters.iter().enumerate().fold(0, |mask, (i, c)| {
-        let q = u64::from(c.p);
-        let bs = i128::from(b % q) * i128::from(c.r);
+        let (q, s) = (c.q, c.s);
+        let bs = i128::from(b % q) * i128::from(s);
         let v = (i128::from(a) - bs).rem_euclid(q.into()) as u64;
-        mask | u64::from(pow_mod(v, (q - 1) / 2, q) == q - 1) << i
+        mask | u64::from(jacobi(v, q) == -1) << i
     })
 }

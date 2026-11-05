@@ -1,7 +1,8 @@
 //! Polynomials over 𝔽ₚ for a word-sized prime `p`, and their roots.
 //!
-//! Coefficients are `u64` below `p < 2^32`, lowest degree first, so
-//! products fit in a word before reduction.
+//! Coefficients are `u64` below `p`, lowest degree first. Below 2^32,
+//! products fit in a word before reduction; larger `p`, such as the
+//! quadratic characters', take 128-bit products.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -59,7 +60,7 @@ pub fn reduce<C: Coeff>(f: &[C], p: u64) -> Vec<u64> {
 
 /// `f(r) mod p`, by Horner's rule.
 pub fn eval(f: &[u64], r: u64, p: u64) -> u64 {
-    f.iter().rev().fold(0, |acc, &c| (acc * r + c) % p)
+    f.iter().rev().fold(0, |acc, &c| mul_add(c, acc, r, p))
 }
 
 fn trim(f: &mut Vec<u64>) {
@@ -68,8 +69,46 @@ fn trim(f: &mut Vec<u64>) {
     }
 }
 
+/// `acc + x·y mod p`, for `acc`, `x` and `y` below `p`.
+pub(crate) fn mul_add(acc: u64, x: u64, y: u64, p: u64) -> u64 {
+    if p <= 1 << 32 {
+        (acc + x * y) % p
+    } else {
+        ((u128::from(acc) + u128::from(x) * u128::from(y)) % u128::from(p)) as u64
+    }
+}
+
+/// `a⁻¹ mod p`, by Euclid's algorithm, for `a` coprime to `p`.
 pub(crate) fn inv(a: u64, p: u64) -> u64 {
-    crate::qs::modp::pow_mod(a, p - 2, p)
+    let (mut r0, mut r1) = (i128::from(p), i128::from(a % p));
+    let (mut t0, mut t1) = (0i128, 1i128);
+    while r1 != 0 {
+        let k = r0 / r1;
+        (r0, r1) = (r1, r0 - k * r1);
+        (t0, t1) = (t1, t0 - k * t1);
+    }
+    t0.rem_euclid(i128::from(p)) as u64
+}
+
+/// The Jacobi symbol `(a/n)` for odd `n`: the Legendre symbol, `−1`, `0`
+/// or `1`, when `n` is prime. By reciprocity, with no products, so that
+/// it is quick for any `n`.
+pub(crate) fn jacobi(a: u64, n: u64) -> i32 {
+    let (mut a, mut n) = (a % n, n);
+    let mut sign = 1;
+    while a != 0 {
+        let twos = a.trailing_zeros();
+        a >>= twos;
+        // (2/n) = −1 for n ≡ ±3 (mod 8).
+        if twos % 2 == 1 && matches!(n % 8, 3 | 5) {
+            sign = -sign;
+        }
+        if a % 4 == 3 && n % 4 == 3 {
+            sign = -sign;
+        }
+        (a, n) = (n % a, a);
+    }
+    if n == 1 { sign } else { 0 }
 }
 
 /// `f` divided by its leading coefficient.
@@ -77,7 +116,7 @@ fn monic(f: &mut [u64], p: u64) {
     if let Some(&lead) = f.last() {
         let i = inv(lead, p);
         for c in f.iter_mut() {
-            *c = *c * i % p;
+            *c = mul_add(0, *c, i, p);
         }
     }
 }
@@ -90,7 +129,7 @@ fn rem(a: &mut Vec<u64>, b: &[u64], p: u64) {
         if lead != 0 {
             let shift = a.len() - d;
             for (j, &c) in b[..d].iter().enumerate() {
-                a[shift + j] = (a[shift + j] + (p - lead) * c) % p;
+                a[shift + j] = mul_add(a[shift + j], p - lead, c, p);
             }
         }
     }
@@ -105,7 +144,7 @@ pub(crate) fn mul_mod(a: &[u64], b: &[u64], m: &[u64], p: u64) -> Vec<u64> {
     let mut r = vec![0; a.len() + b.len() - 1];
     for (i, &x) in a.iter().enumerate() {
         for (j, &y) in b.iter().enumerate() {
-            r[i + j] = (r[i + j] + x * y) % p;
+            r[i + j] = mul_add(r[i + j], x, y, p);
         }
     }
     rem(&mut r, m, p);
@@ -150,14 +189,14 @@ fn div_exact(a: &[u64], b: &[u64], p: u64) -> Vec<u64> {
         let lead = r[i + d];
         q[i] = lead;
         for (j, &c) in b.iter().enumerate() {
-            r[i + j] = (r[i + j] + (p - lead) * c) % p;
+            r[i + j] = mul_add(r[i + j], p - lead, c, p);
         }
     }
     q
 }
 
 /// The distinct roots in `[0, p)` of `f`, an integer polynomial, modulo the
-/// prime `p < 2^32`, in increasing order. Empty if `f ≡ 0`.
+/// prime `p`, in increasing order. Empty if `f ≡ 0`.
 pub fn roots<C: Coeff>(f: &[C], p: u64) -> Vec<u64> {
     let mut g = reduce(f, p);
     if g.len() <= 1 {

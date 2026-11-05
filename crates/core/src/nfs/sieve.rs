@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use num_bigint::{BigInt, Sign};
 
-use super::base::{FactorBase, Prime};
+use super::base::{CHARACTER_PRIMES, FactorBase, Prime};
 use super::cofactor::{Cofactor, Splitter};
 use super::modp::{Coeff, roots};
 use super::params::Params;
@@ -165,6 +165,10 @@ impl Side {
     /// The side with factor base `primes`, large primes below `2^lpb` and
     /// cofactors up to `2^mfb`.
     fn new(primes: &[Prime], (lpb, mfb): (u32, u32), slab: usize) -> Self {
+        assert!(
+            1 << lpb <= CHARACTER_PRIMES,
+            "large primes must be below the quadratic characters'"
+        );
         let largest = primes.last().map_or(2, |p| p.p);
         let skipped = primes
             .iter()
@@ -538,7 +542,7 @@ impl Sieve {
     }
 
     /// The relations from the special-q `(q, r)`, for `q` from 2^8 up and
-    /// below 2^31. A `q` within the factor base is skipped by the sieve,
+    /// below [`CHARACTER_PRIMES`]. A `q` within the factor base is skipped by the sieve,
     /// whose lattice it divides, and divided out directly.
     pub fn special_q(&mut self, q: u64, r: u64) -> Vec<Relation> {
         let (log_i, log_j) = (self.log_i, self.log_j);
@@ -669,7 +673,10 @@ impl Sieve {
         // Algebraic side: F(a, b), which q divides.
         let mut v = norm(&self.f_wide, a, b);
         let mut algebraic = Vec::new();
-        divide_out(&mut v, q as u32, &mut algebraic);
+        match u32::try_from(q) {
+            Ok(q) => divide_out(&mut v, q, &mut algebraic),
+            Err(_) => divide_out_wide(&mut v, q, &mut algebraic),
+        }
         self.algebraic
             .divide(a, b, x, a_hits, &mut v, &mut algebraic);
         if !self.algebraic.cofactor(&v, &mut algebraic) {
@@ -707,8 +714,7 @@ impl Side {
     /// Whether `c > 1`, which no factor-base prime divides, is a product of
     /// primes below the large-prime bound, which are added to `factors`.
     /// The large-prime bound, `L`, must be below `B²`, for `B` the largest
-    /// factor-base prime, so that any `c` below it is prime, and at most
-    /// 2^31.
+    /// factor-base prime, so that any `c` below it is prime.
     fn large_primes(&self, c: u128, factors: &mut Vec<u64>) -> bool {
         let large = u128::from(self.large_bound);
         if c < large {
@@ -719,20 +725,25 @@ impl Side {
         if c < self.prime_below.into() {
             return false;
         }
-        // Two primes, which fit in 62 bits if both are below L.
-        if c < large * large {
-            return match split(c as u64) {
-                Some([p, q]) if q < self.large_bound => {
-                    factors.extend([p, q]);
-                    true
-                }
-                _ => false,
-            };
-        }
-        // Below B³ there are at most two primes, of which one is then too
-        // large; above, three or more, or a prime.
+        // Below B³ there are at most two primes, both below L only if c
+        // is below L², and then a 64-bit split is quickest if it fits.
         let b = u128::from(self.largest);
-        if c < b * b * b || c.is_multiple_of(2) {
+        if c < b * b * b {
+            if c >= large * large {
+                return false;
+            }
+            if c < 1 << 62 {
+                return match split(c as u64) {
+                    Some([p, q]) if q < self.large_bound => {
+                        factors.extend([p, q]);
+                        true
+                    }
+                    _ => false,
+                };
+            }
+        }
+        // Otherwise two primes past 2^62, three or more, or a prime.
+        if c.is_multiple_of(2) {
             return false;
         }
         let n = Cofactor::from_u64(c as u64)
@@ -848,6 +859,20 @@ fn divide_out(v: &mut Wide, p: u32, factors: &mut Vec<u64>) {
         }
         *v = q;
         factors.push(p.into());
+    }
+}
+
+/// [`divide_out`] for a special-q past 2^32, by slower long division,
+/// once a relation.
+fn divide_out_wide(v: &mut Wide, p: u64, factors: &mut Vec<u64>) {
+    let p_wide = Wide::from_u64(p);
+    while !v.is_zero() {
+        let (q, r) = v.div_rem(&p_wide);
+        if !r.is_zero() {
+            return;
+        }
+        *v = q;
+        factors.push(p);
     }
 }
 

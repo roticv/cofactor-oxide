@@ -9,10 +9,11 @@ use super::poly::Poly;
 use crate::primes::Primes;
 use crate::qs::log2;
 
-/// The quadratic characters' primes start here, past every prime a
-/// relation has: a character `(q, s)` says nothing about a relation with
-/// `q | a − b·s`, as one from the special-q `(q, s)` would be.
-pub const CHARACTER_PRIMES: u64 = 1 << 31;
+/// The quadratic characters' primes start here, past every large prime
+/// and special-q, which must be below it: a character `(q, s)` says
+/// nothing about a relation with `q | a − b·s`, as one from the special-q
+/// `(q, s)` would be.
+pub const CHARACTER_PRIMES: u64 = 1 << 40;
 
 /// A prime of a factor base with a root: `p` divides `a − b·r` (rational
 /// side) or `F(a, b)` (algebraic side) exactly when `a ≡ b·r (mod p)`. On
@@ -50,9 +51,17 @@ pub struct FactorBase {
     pub rational: Vec<Prime>,
     /// Every root of `f` modulo each prime up to the algebraic bound.
     pub algebraic: Vec<Prime>,
-    /// Pairs `(q, s)` from `CHARACTER_PRIMES` up with `s` a simple root
-    /// of `f` mod `q`, `q` not dividing the leading coefficient.
-    pub characters: Vec<Prime>,
+    /// The quadratic characters.
+    pub characters: Vec<Character>,
+}
+
+/// A prime `q` from [`CHARACTER_PRIMES`] up, not dividing the leading
+/// coefficient, with `s` a simple root of `f` mod `q`: the character is
+/// the Legendre symbol of `a − b·s` mod `q`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Character {
+    pub q: u64,
+    pub s: u64,
 }
 
 impl FactorBase {
@@ -86,7 +95,7 @@ impl FactorBase {
             .map(|(i, c)| c * BigInt::from(i))
             .collect();
         let mut chars = Vec::with_capacity(characters);
-        for q in Primes::new(CHARACTER_PRIMES, 1 << 32) {
+        for q in Primes::new(CHARACTER_PRIMES, 2 * CHARACTER_PRIMES) {
             if chars.len() >= characters {
                 break;
             }
@@ -96,7 +105,7 @@ impl FactorBase {
             let df = reduce(&derivative, q);
             for s in roots(f, q) {
                 if eval(&df, s, q) != 0 && chars.len() < characters {
-                    chars.push(Prime::new(q, s));
+                    chars.push(Character { q, s });
                 }
             }
         }
