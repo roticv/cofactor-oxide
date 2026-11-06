@@ -297,6 +297,9 @@
         <p style="margin-top: 14px">
           WebAssembly lacks a 64×64→128-bit multiply, so the browser build runs
           about 3× slower than the native <code>cofox</code> command-line tool.
+          Browsers with the wide-arithmetic proposal, such as Firefox 155, get a
+          second build that uses its multiply, which runs ECM about 2.8× as fast
+          and the number field sieve's sieving about 1.3× as fast.
         </p>
       </section>
     </main>
@@ -308,7 +311,8 @@
   </div>
 
   <script type="module">
-    // The Wasm build uses 16 limbs of 32 bits.
+    // The Wasm build uses 16 limbs of 32 bits. The wide-arithmetic build's
+    // 64-bit limbs could take 1024 bits, but both keep the same limit.
     const MAX_BITS = 512;
     // Keeps `2^huge` from locking up the tab before the size check.
     const MAX_EXPONENT = 4096n;
