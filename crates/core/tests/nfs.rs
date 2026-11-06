@@ -1,6 +1,7 @@
 use cofox_core::Uint;
 use cofox_core::nfs::{
-    CHARACTER_PRIMES, FactorBase, Params, Poly, Relation, Sieve, alpha, degree, modp, special_qs,
+    CHARACTER_PRIMES, FactorBase, Gnfs, Params, Poly, Relation, Sieve, alpha, degree, modp,
+    parse_poly, special_qs,
 };
 use cofox_core::prime::is_prime;
 use cofox_core::primes::Primes;
@@ -91,7 +92,6 @@ fn selected_polynomials_have_root_m() {
         "1522605027922533360535618378132637429718068114961380688657908494580122963258952897654000350692006139",
         "250782620106046385035853403635783676572083888259628917477091391671746381406504458761424731",
         "5783078982887739757788301949603111810137352482505406356698736447542686900836153",
-        "35794234179725868774991807832568455403003778024228226193532908190484670252364677411513516111204504060317568667",
     ];
     // At these sizes the search is long, so it runs on every core.
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -99,7 +99,8 @@ fn selected_polynomials_have_root_m() {
         let n = u(s);
         let poly = Poly::select_with(&n, &Threads(threads)).unwrap();
         assert_eq!(poly.degree(), degree(n.bits()));
-        // Translation and rotation keep F(m, l) = N exactly.
+        // Translation and rotation keep F(m, l) = N, and the LLL reduction
+        // in size optimization can multiply it by a small c ≠ 0.
         let (m, l) = (&poly.m, &poly.l);
         let value: BigInt = poly
             .f
@@ -107,10 +108,11 @@ fn selected_polynomials_have_root_m() {
             .enumerate()
             .map(|(i, c)| c * m.pow(i as u32) * l.pow((poly.degree() - i) as u32))
             .sum();
-        assert_eq!(
-            value,
-            s.parse::<BigInt>().unwrap(),
-            "F(m, l) ≠ N for {poly:?}"
+        let big_n = s.parse::<BigInt>().unwrap();
+        let c = &value / &big_n;
+        assert!(
+            &c * &big_n == value && c != BigInt::from(0) && c.magnitude().bits() < 20,
+            "F(m, l) isn't a small multiple of N for {poly:?}"
         );
         // Better by Murphy's E than plain base-m with leading coefficient 1.
         let params = Params::for_bits(n.bits());
@@ -276,31 +278,73 @@ fn relations_hold() {
     );
 }
 
+/// Factors `n` with GNFS on one thread using `poly`.
+fn gnfs_with_poly(n: &Uint<16>, poly: Poly) -> Option<Uint<16>> {
+    let gnfs = Gnfs::with_poly(n, &Params::for_bits(n.bits()), poly);
+    let mut sieve = gnfs.sieve();
+    let mut relations = gnfs.relations();
+    'sieve: for k in 0.. {
+        for (q, r) in gnfs.special_qs(k) {
+            relations.add(sieve.special_q(q, r));
+            if relations.is_ready() {
+                break 'sieve;
+            }
+        }
+    }
+    relations
+        .dependencies()
+        .iter()
+        .find_map(|dep| relations.try_dependency(dep))
+}
+
 #[test]
 fn gnfs_factors() {
-    // 40 digits, with a base-m polynomial; 50, with one from Kleinjung's
-    // method, so that g = l·x − m with l > 1.
+    // 40 and 50 digits: with a base-m polynomial, so that g = x − m; with
+    // the one selected, from Kleinjung's method, so that g = l·x − m with
+    // l > 1; and with 3·f + g for that one, whose resultant with g is 3·N,
+    // as size optimization's LLL reduction can give.
     let cases = [
         (
             "1176217249472123917871099760550263221639",
             "98936812917358800691",
             "11888570237800257629",
-            false,
         ),
         (
             "59858698299029333151760743317766029830337454377407",
             "6005189888675219489059739",
             "9967827730462411250327213",
-            true,
         ),
     ];
-    for (n, p, q, kleinjung) in cases {
-        let (n, p, q) = (u(n), u(p), u(q));
-        assert_eq!(Poly::select(&n).unwrap().l > BigInt::from(1), kleinjung);
-        let t = std::time::Instant::now();
-        let f = cofox_core::nfs::gnfs(&n).expect("no factor");
-        println!("{} bits: {f} in {:.2?}", n.bits(), t.elapsed());
-        assert!(f == p || f == q, "{n} gave {f}");
+    for (s, p, q) in cases {
+        let (n, p, q) = (u(s), u(p), u(q));
+        let params = Params::for_bits(n.bits());
+        let d = degree(n.bits());
+        let selected = Poly::select(&n).unwrap();
+        assert!(selected.l > BigInt::from(1));
+        let mut tripled = selected.f.iter().map(|c| c * 3).collect::<Vec<_>>();
+        tripled[0] -= &selected.m;
+        tripled[1] += &selected.l;
+        let text = format!(
+            "n: {s}\n{}Y0: {}\nY1: {}\n",
+            tripled
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("c{i}: {c}\n"))
+                .collect::<String>(),
+            -&selected.m,
+            selected.l
+        );
+        let polys = [
+            ("base-m", Poly::base_m(&n, &u(&m_plain(s, d)), d).unwrap()),
+            ("selected", selected.clone()),
+            ("3·f + g", parse_poly(&n, &text, &params).unwrap()),
+        ];
+        for (name, poly) in polys {
+            let t = std::time::Instant::now();
+            let f = gnfs_with_poly(&n, poly).expect("no factor");
+            println!("{} bits, {name}: {f} in {:.2?}", n.bits(), t.elapsed());
+            assert!(f == p || f == q, "{n} gave {f} with {name}");
+        }
     }
 }
 

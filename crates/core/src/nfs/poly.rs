@@ -1,5 +1,5 @@
-//! Polynomial selection: the base-m method, then Murphy's size and root
-//! optimization.
+//! Polynomial selection: the base-m method and Kleinjung's, then size and
+//! root optimization.
 //!
 //! GNFS needs two polynomials with a common root `m` modulo `N`. Writing
 //! `N` in base `m` gives `f` with `f(m) = N`, and the other is the linear
@@ -7,12 +7,18 @@
 //! size) and many roots modulo small primes, which makes those values more
 //! often smooth (its α).
 //!
-//! Two changes keep `f(m) ≡ 0 (mod N)` while changing both: translating
-//! `x` to `x + k`, which moves the root to `m − k`, and rotating `f` by a
-//! multiple of `g`. Size optimization searches both for the smallest
-//! values; root optimization sieves over small rotations for the most
-//! roots modulo small primes. Murphy's E, which weighs both sides' sizes
-//! and α together, picks the winner.
+//! Kleinjung's method, in `kleinjung.rs`, finds better starting points than
+//! base-m: `g(x) = l·x − m` with `l` a product of chosen primes, which
+//! makes `f`'s top coefficients small.
+//!
+//! Three changes keep `f(m/l) ≡ 0 (mod N)` while changing both
+//! polynomials: translating `x` to `x + k`, which moves the root to
+//! `m/l − k`; adding a multiple of `g` to `f`, rotation; and multiplying
+//! `f` by a small integer first, which multiplies the resultant, `N`, by
+//! it too. Size optimization searches these for the smallest values, with
+//! LLL reduction as in CADO-NFS; root optimization sieves over small
+//! rotations for the most roots modulo small primes. Murphy's E, which
+//! weighs both sides' sizes and α together, picks the winner.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -39,24 +45,31 @@ const OFFSETS: u64 = 4;
 const FINALISTS: usize = 32;
 
 /// Kleinjung's candidates come from leading coefficients that are the
-/// first multiples of `KJ_STEP`, as many as [`Effort`] says, with `u` up
-/// to `KJ_SPREAD·P²`, at most `KJ_MAX` in all.
-const KJ_STEP: u64 = 12;
+/// first `KJ_LEADS` multiples of `KJ_STEP`, as in CADO-NFS, with `u` up
+/// to `KJ_SPREAD·P²`, and as many special-q roots for each as [`Effort`]
+/// says. The `SIZE_KEEP` smallest are size-optimized.
+const KJ_LEADS: usize = 100;
+const KJ_STEP: u64 = 60;
 const KJ_SPREAD: u64 = 4;
-const KJ_MAX: usize = 20000;
+const SIZE_KEEP: usize = 2000;
 
 /// Size-optimized candidates kept for root optimization.
 const ROOT_FINALISTS: usize = 32;
 
-/// How hard to search, by the size of `N`: the leading coefficients for
-/// Kleinjung's method, and the rotations `(j₁·x + j₀)·g` root optimization
-/// sieves, `|j₁| ≤ rot1` (for degree 4 and up) and `|j₀| < rot0`. The
-/// search grows with the time sieving will take, from the small settings
-/// below 210 bits to the full ones from 290; at 90 and 100 digits, the
-/// full ones made sieving a third and three fifths faster.
+/// How hard to search, by the size of `N`: the special-q roots for each of
+/// Kleinjung's leading coefficients, and the rotations `(j₁·x + j₀)·g` root
+/// optimization sieves, `|j₁| ≤ rot1` (for degree 4 and up) and
+/// `|j₀| < rot0`. The search grows with the time sieving will take.
+///
+/// The special-q roots, `KJ_LEADS·nq` in all, double every 20 bits from
+/// 100,000 at 266 bits, as in CADO-NFS's parameters: about 3 million at
+/// RSA-110, which takes a few CPU minutes. At least 64 for each leading
+/// coefficient. The rotations grow from the small settings below 210 bits
+/// to the full ones from 290; at 90 and 100 digits, the full ones made
+/// sieving a third and three fifths faster.
 #[derive(Clone, Copy, Debug)]
 struct Effort {
-    leads: u64,
+    nq: usize,
     rot1: i64,
     rot0: i64,
 }
@@ -65,8 +78,9 @@ impl Effort {
     fn for_bits(bits: u32) -> Self {
         // 0 up to 210 bits, 4 from 290.
         let step = (bits.saturating_sub(210) / 20).min(4);
+        let roots = 100_000.0 * exp2((f64::from(bits) - 266.0) / 20.0);
         Self {
-            leads: (125 << step).min(2000),
+            nq: ((roots / KJ_LEADS as f64) as usize).max(64),
             rot1: 4 << step.saturating_sub(2),
             rot0: 1 << (12 + step),
         }
@@ -84,11 +98,21 @@ const ROOT_KEEP: usize = 4;
 const SIZE_STEPS: u32 = 48;
 const SIZE_PASSES: usize = 8;
 
+/// Size optimization first scores translations `±2^(t/SCAN_DENSITY)` up to
+/// `2^SCAN_BITS`, and searches from the best `SCAN_STARTS` of them.
+const SCAN_BITS: u32 = 24;
+const SCAN_DENSITY: u32 = 2;
+const SCAN_STARTS: usize = 4;
+
+/// Steps after which LLL gives up, far more than its few dimensions need.
+const LLL_STEPS: usize = 1000;
+
 /// α counts the roots modulo primes up to this.
 const ALPHA_PRIMES: u64 = 200;
 
 /// Two polynomials for GNFS: `f` of degree `d` and `g(x) = l·x − m`, with
-/// `F(m, l) = l^d·f(m/l) = N`, so that `m/l` is a common root modulo `N`.
+/// `F(m, l) = l^d·f(m/l)` equal to `N` or a small multiple of it, so that
+/// `m/l` is a common root modulo `N`.
 ///
 /// The coefficients are of any size: those [`Poly::select`] chooses fit
 /// in 128 bits, but past about 480 bits polynomials come from other
@@ -179,17 +203,16 @@ impl Poly {
         let p0 = kleinjung_prime(&candidates[0]);
         let u_max = (KJ_SPREAD * p0 * p0) as i64;
         let effort = Effort::for_bits(n.bits());
-        let found = map_dynamic(par, effort.leads as usize, |i| {
-            kleinjung::candidates(n, d, KJ_STEP * (i as u64 + 1), p0, u_max)
-        });
-        candidates.extend(
-            found
+        let found = map_dynamic(par, KJ_LEADS, |i| {
+            kleinjung::candidates(n, d, KJ_STEP * (i as u64 + 1), p0, u_max, effort.nq)
                 .into_iter()
-                .flatten()
-                .take(KJ_MAX)
-                .map(|(f, m, l)| Small::new(f, m, l)),
-        );
-        // Size-optimize them all; nearby m often optimize to the same one.
+                .map(|(f, m, l)| Small::new(f, m, l))
+                .collect::<Vec<_>>()
+        });
+        candidates.extend(found.into_iter().flatten());
+        candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
+        candidates.truncate(SIZE_KEEP);
+        // Size-optimize them; nearby m often optimize to the same one.
         let mut sized = map_dynamic(par, candidates.len(), |i| {
             let c = &candidates[i];
             let (f, m) = size_optimize(&c.f, c.m, c.l, true);
@@ -324,13 +347,197 @@ fn rotate(f: &[i128], m: u128, l: u128, i: usize, j: i128) -> Option<Vec<i128>> 
     Some(g)
 }
 
-/// Searches translations and, if `rotations`, rotations by `xⁱ·g` for
-/// `i ≤ d − 3` for the smallest size, by steps from `2^SIZE_STEPS` down to
-/// 1 in each in turn. Translation leaves the number of roots modulo each
-/// prime, and so α, as it is.
+/// Searches translations, and if `rotations` the polynomials
+/// `c·f + r·g` with `deg r ≤ d − 2`, for the smallest size. Translation
+/// leaves the number of roots modulo each prime, and so α, as it is.
+///
+/// A translation changes every coefficient, and with them the best
+/// rotation, so stepping through one move at a time stalls far from the
+/// best pair. Instead each translation tried is scored with the best
+/// polynomial [`reduced`] finds for it: first a coarse scan, then steps
+/// from `2^SIZE_STEPS` down to 1 from the best few, then [`descend`]
+/// polishes the result. On 3,000 of CADO-NFS's raw candidates for
+/// RSA-110, sizes averaged 52.0 bits, against 51.5 from CADO-NFS and 57.3
+/// from moving one step at a time.
 fn size_optimize(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u128) {
+    if !rotations || f.len() < 4 {
+        return descend(f, m, l, rotations);
+    }
+    // Score a coarse scan of translations, each with its best rotation,
+    // then search from the best few.
+    let mut scanned: Vec<(f64, Vec<i128>, u128)> = translation_scan()
+        .filter_map(|k| {
+            let (g, gm) = translate(f, m, l, k)?;
+            let (g, s) = rotated(&g, gm, l)?;
+            Some((s, g, gm))
+        })
+        .collect();
+    scanned.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let best = scanned
+        .into_iter()
+        .take(SCAN_STARTS)
+        .map(|(s, g, gm)| translation_search(g, gm, l, s))
+        .min_by(|x, y| x.2.total_cmp(&y.2));
+    match best {
+        Some((g, gm, _)) => descend(&g, gm, l, true),
+        None => descend(f, m, l, rotations),
+    }
+}
+
+/// Translations scanned before searching: 0 and `±2^(t/SCAN_DENSITY)` up
+/// to `2^SCAN_BITS`.
+fn translation_scan() -> impl Iterator<Item = i128> {
+    let steps = SCAN_BITS * SCAN_DENSITY;
+    core::iter::once(0).chain((0..steps).flat_map(|t| {
+        let k = (exp2(f64::from(t) / f64::from(SCAN_DENSITY)) + 0.5) as i128;
+        [k, -k]
+    }))
+}
+
+/// Steps from `2^SIZE_STEPS` down to 1 through the translations of `f`,
+/// each scored with its best rotation.
+fn translation_search(
+    mut f: Vec<i128>,
+    mut m: u128,
+    l: u128,
+    mut size: f64,
+) -> (Vec<i128>, u128, f64) {
+    for e in (0..=SIZE_STEPS).rev() {
+        let step = 1i128 << e;
+        for _ in 0..SIZE_PASSES {
+            let mut improved = false;
+            for k in [step, -step] {
+                let Some((g, gm)) = translate(&f, m, l, k) else {
+                    continue;
+                };
+                let Some((g, s)) = rotated(&g, gm, l) else {
+                    continue;
+                };
+                if s < size - 1e-6 {
+                    (f, m, size) = (g, gm, s);
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+    }
+    (f, m, size)
+}
+
+/// `f` replaced by [`reduced`] at its skew, done twice since the skew moves
+/// with it, and its size; or `None` on overflow.
+fn rotated(f: &[i128], m: u128, l: u128) -> Option<(Vec<i128>, f64)> {
+    let mut g = f.to_vec();
+    for _ in 0..2 {
+        g = reduced(&g, m, l, lognorm(&g).0)?;
+    }
+    let size = lognorm(&g).1;
+    Some((g, size))
+}
+
+/// The smallest polynomial of degree `d` at skew `s` of the form
+/// `c·f + r·(l·x − m)`, with `c ≠ 0` and `deg r ≤ d − 2`, or `None` on
+/// overflow: the shortest vector of degree `d` after LLL reduction of the
+/// lattice that `f` and the `xⁱ·g` span, with the coefficient of `xʲ`
+/// weighted by `s^j`. Each still has the root `m/l` modulo `N`, and a
+/// resultant with `g` of `c·N`. This is CADO-NFS's size optimization.
+fn reduced(f: &[i128], m: u128, l: u128, s: f64) -> Option<Vec<i128>> {
     let d = f.len() - 1;
-    let moves = if rotations { d.saturating_sub(2) } else { 0 };
+    let ls = log2(s);
+    let scale: Vec<f64> = (0..=d).map(|j| exp2(ls * j as f64)).collect();
+    let mut basis = vec![f.to_vec()];
+    for i in 0..d - 1 {
+        let mut v = vec![0i128; d + 1];
+        v[i] = -i128::try_from(m).ok()?;
+        v[i + 1] = i128::try_from(l).ok()?;
+        basis.push(v);
+    }
+    lll(&mut basis, &scale)?;
+    let norm = |v: &[i128]| -> f64 {
+        v.iter()
+            .zip(&scale)
+            .map(|(&c, &x)| (c as f64 * x) * (c as f64 * x))
+            .sum()
+    };
+    basis
+        .into_iter()
+        .filter(|v| v[d] != 0)
+        .min_by(|x, y| norm(x).total_cmp(&norm(y)))
+}
+
+/// LLL-reduces the rows of `basis` for the norm with coordinate `j`
+/// weighted by `scale[j]`, with δ = 0.99: exactly in integers, with the
+/// Gram–Schmidt vectors in floating point, which is plenty for so few
+/// dimensions. `None` on overflow.
+fn lll(basis: &mut [Vec<i128>], scale: &[f64]) -> Option<()> {
+    let n = basis.len();
+    let dot = |x: &[f64], y: &[f64]| -> f64 { x.iter().zip(y).map(|(a, b)| a * b).sum() };
+    // The Gram–Schmidt vectors' squared lengths, and the μ.
+    let gram_schmidt = |basis: &[Vec<i128>]| -> (Vec<f64>, Vec<Vec<f64>>) {
+        let b: Vec<Vec<f64>> = basis
+            .iter()
+            .map(|v| v.iter().zip(scale).map(|(&c, &x)| c as f64 * x).collect())
+            .collect();
+        let mut star: Vec<Vec<f64>> = Vec::with_capacity(n);
+        let mut len = vec![0.0; n];
+        let mut mu = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            let mut v = b[i].clone();
+            for j in 0..i {
+                mu[i][j] = if len[j] > 0.0 {
+                    dot(&b[i], &star[j]) / len[j]
+                } else {
+                    0.0
+                };
+                for (x, y) in v.iter_mut().zip(&star[j]) {
+                    *x -= mu[i][j] * y;
+                }
+            }
+            len[i] = dot(&v, &v);
+            star.push(v);
+        }
+        (len, mu)
+    };
+    let mut k = 1;
+    for _ in 0..LLL_STEPS {
+        if k >= n {
+            return Some(());
+        }
+        // Size-reduce row k by the rows before it.
+        for j in (0..k).rev() {
+            let (_, mu) = gram_schmidt(basis);
+            let r = mu[k][j];
+            if !r.is_finite() || r.abs() >= 1e30 {
+                return None;
+            }
+            // Rounded to the nearest; the cast truncates toward 0.
+            let r = (r + if r < 0.0 { -0.5 } else { 0.5 }) as i128;
+            if r != 0 {
+                for c in 0..basis[k].len() {
+                    let t = basis[j][c].checked_mul(r)?;
+                    basis[k][c] = basis[k][c].checked_sub(t)?;
+                }
+            }
+        }
+        let (len, mu) = gram_schmidt(basis);
+        if len[k] >= (0.99 - mu[k][k - 1] * mu[k][k - 1]) * len[k - 1] {
+            k += 1;
+        } else {
+            basis.swap(k, k - 1);
+            k = (k - 1).max(1);
+        }
+    }
+    Some(())
+}
+
+/// Searches translations and, if `rotations`, rotations by `xⁱ·g` for
+/// `i ≤ d − 3` for the smallest size, one move at a time, by steps from
+/// `2^SIZE_STEPS` down to 1 in each in turn.
+fn descend(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u128) {
+    let d = f.len() - 1;
+    let moves = if rotations { d.saturating_sub(1) } else { 0 };
     let (mut f, mut m) = (f.to_vec(), m);
     let mut size = lognorm(&f).1;
     for e in (0..=SIZE_STEPS).rev() {
