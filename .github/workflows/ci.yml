@@ -63,6 +63,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --target wasm32-unknown-unknown -p cofox-core -p cofox-wasm --locked -- -D warnings
       - run: cargo build --release --target wasm32-unknown-unknown -p cofox-wasm --locked
+      # The build for browsers with the wide-arithmetic proposal, with 64-bit
+      # limbs. See crates/core/src/arith/limb.rs.
+      - run: cargo clippy --target wasm32-unknown-unknown -p cofox-core -p cofox-wasm --locked --target-dir target/wide -- -D warnings
+        env:
+          RUSTFLAGS: -C target-feature=+wide-arithmetic --cfg cofox_wide_arithmetic
 
   docs:
     runs-on: ubuntu-latest

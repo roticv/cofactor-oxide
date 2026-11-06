@@ -14,9 +14,23 @@
 //   page passes to the sieving workers, and once there are enough
 //   relations it solves the matrix and tries dependencies one at a time.
 
-import init, { Collector, GnfsCollector, GnfsSieve, Sieve, factor } from "./pkg/cofox_wasm.js";
-
-const ready = init();
+// Browsers with the wide-arithmetic proposal get a build that uses its
+// 64×64→128-bit multiply, i64.mul_wide_u, which this tiny module tests for:
+// (func (param i64 i64) (result i64 i64) local.get 0 local.get 1 i64.mul_wide_u)
+// That build is optional locally, so a missing one falls back to the other.
+const WIDE = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 8, 1, 96, 2, 126, 126, 2, 126, 126, 3, 2, 1, 0,
+  10, 10, 1, 8, 0, 32, 0, 32, 1, 252, 22, 11,
+]);
+let Collector, GnfsCollector, GnfsSieve, Sieve, factor;
+const ready = (
+  WebAssembly.validate(WIDE)
+    ? import("./pkg-wide/cofox_wasm.js").catch(() => import("./pkg/cofox_wasm.js"))
+    : import("./pkg/cofox_wasm.js")
+).then((pkg) => {
+  ({ Collector, GnfsCollector, GnfsSieve, Sieve, factor } = pkg);
+  return pkg.default();
+});
 
 // Progress is sent at most this often, plus whenever the stage changes.
 const PROGRESS_MS = 100;

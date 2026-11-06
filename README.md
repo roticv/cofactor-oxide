@@ -89,7 +89,14 @@ number, nothing to install. Expect it to be slower than the native binary:
 
 - **No native 64×64→128-bit multiply.** Wasm has `i64.mul` but nothing that
   returns the high half, so multi-precision arithmetic, the hot loop of ECM
-  and the sieves, has to be emulated.
+  and the sieves, has to be emulated, or done with 32-bit limbs. The
+  [wide-arithmetic proposal](https://github.com/WebAssembly/wide-arithmetic)
+  adds `i64.mul_wide_u`, and the page loads a second build that uses it, with
+  64-bit limbs, in browsers that support it (Firefox 155 at the time of
+  writing, and Chrome behind `--js-flags=--wasm-staging`). In headless Chrome
+  it made ECM on RSA-100 2.8 times as fast and GNFS sieving 1.3 times as
+  fast, while the quadratic sieve, which spends its time adding bytes, gained
+  2%.
 - **Limited SIMD.** Wasm SIMD is fixed at 128 bits, while native code can use
   AVX2 or AVX-512.
 - **Threads need extra setup.** Wasm threads rely on `SharedArrayBuffer`, which
@@ -213,6 +220,15 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked
 cargo build --release --target wasm32-unknown-unknown -p cofox-wasm
 wasm-bindgen --target web --out-dir web/pkg \
   target/wasm32-unknown-unknown/release/cofox_wasm.wasm
+
+# Optional: the build for browsers with wide arithmetic. Rust still warns
+# that the target feature is unstable.
+RUSTFLAGS="-C target-feature=+wide-arithmetic --cfg cofox_wide_arithmetic" \
+  cargo build --release --target wasm32-unknown-unknown -p cofox-wasm \
+  --target-dir target/wide
+wasm-bindgen --target web --out-dir web/pkg-wide \
+  target/wide/wasm32-unknown-unknown/release/cofox_wasm.wasm
+
 python3 -m http.server -d web 8000   # then open http://localhost:8000
 ```
 

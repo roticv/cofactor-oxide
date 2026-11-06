@@ -451,7 +451,7 @@ fn split<const LIMBS: usize>(
 /// narrowest integer width that fits.
 ///
 /// Accepts numbers up to `16 * LIMB_BITS` bits: 1024 bits natively, 512 on
-/// wasm32.
+/// wasm32 unless built for wide arithmetic (see [`crate::arith::Limb`]).
 pub fn factor_str(s: &str) -> Result<Vec<Factor<String>>, ParseUintError> {
     factor_str_with(s, &Config::default(), |_| ControlFlow::Continue(()))
 }

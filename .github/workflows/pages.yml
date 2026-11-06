@@ -45,6 +45,17 @@ jobs:
           wasm-bindgen --target web --out-dir web/pkg \
             target/wasm32-unknown-unknown/release/cofox_wasm.wasm
 
+      # A second build for browsers with the wide-arithmetic proposal, which
+      # web/worker.js loads when they support it.
+      - name: Build with wide arithmetic
+        env:
+          RUSTFLAGS: -C target-feature=+wide-arithmetic --cfg cofox_wide_arithmetic
+        run: |
+          cargo build --release --locked --target wasm32-unknown-unknown -p cofox-wasm \
+            --target-dir target/wide
+          wasm-bindgen --target web --out-dir web/pkg-wide \
+            target/wide/wasm32-unknown-unknown/release/cofox_wasm.wasm
+
       - uses: actions/upload-pages-artifact@v5
         with:
           path: web

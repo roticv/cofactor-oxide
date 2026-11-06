@@ -5,16 +5,21 @@
 //! becomes a slow library call there. 32-bit limbs with `u64` products compile
 //! to a single `i64.mul` instead.
 //!
+//! The wide-arithmetic proposal adds that instruction (`i64.mul_wide_u`). A
+//! wasm build with `RUSTFLAGS="-C target-feature=+wide-arithmetic --cfg
+//! cofox_wide_arithmetic"` uses 64-bit limbs again. The cfg is needed because
+//! stable Rust doesn't set `target_feature = "wide-arithmetic"` yet.
+//!
 //! Build with `RUSTFLAGS="--cfg cofox_limb32"` to use 32-bit limbs on a native
 //! target, which is how the wasm32 code path gets tested.
 
-#[cfg(not(any(target_arch = "wasm32", cofox_limb32)))]
+#[cfg(not(any(cofox_limb32, all(target_arch = "wasm32", not(cofox_wide_arithmetic)))))]
 mod imp {
     pub type Limb = u64;
     pub type WideLimb = u128;
 }
 
-#[cfg(any(target_arch = "wasm32", cofox_limb32))]
+#[cfg(any(cofox_limb32, all(target_arch = "wasm32", not(cofox_wide_arithmetic))))]
 mod imp {
     pub type Limb = u32;
     pub type WideLimb = u64;
