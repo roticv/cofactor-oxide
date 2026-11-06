@@ -155,6 +155,7 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
             // as many relations as ideals in the factor bases.
             next_check: self.fb.rational.len() + self.fb.algebraic.len(),
             ready: false,
+            released: false,
         }
     }
 }
@@ -169,6 +170,9 @@ pub struct Relations<const LIMBS: usize> {
     matrix: Matrix,
     next_check: usize,
     ready: bool,
+    /// Whether `seen` and `matrix` were let go of to solve the matrix,
+    /// to be rebuilt from `store` if relations are added after all.
+    released: bool,
 }
 
 impl<const LIMBS: usize> Relations<LIMBS> {
@@ -179,6 +183,7 @@ impl<const LIMBS: usize> Relations<LIMBS> {
 
     /// Adds `relations`, skipping any already found.
     pub fn add(&mut self, relations: impl IntoIterator<Item = Relation>) {
+        self.restore();
         for rel in relations {
             if self.seen.insert(rel.a, rel.b) && self.store.push(&rel) {
                 self.matrix.push(&self.gnfs.fb, &rel);
@@ -198,22 +203,47 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// checked every 10% more relations.
     pub fn is_ready(&mut self) -> bool {
         if !self.ready && self.len() >= self.next_check {
+            self.restore();
             self.next_check = self.len() + self.len() / 10;
             self.ready = self.matrix.ready(CHARACTERS + POST_ROWS, EXTRA);
         }
         self.ready
     }
 
+    /// Lets go of the pairs seen and the matrix, which with millions of
+    /// relations take as much memory as filtering needs, for the browser's
+    /// 4 GB.
+    fn release(&mut self) {
+        self.seen = Seen::default();
+        self.matrix = Matrix::new(&self.gnfs.fb);
+        self.released = true;
+    }
+
+    /// Rebuilds what [`Relations::release`] let go of.
+    fn restore(&mut self) {
+        if !self.released {
+            return;
+        }
+        self.released = false;
+        for i in 0..self.store.len() {
+            let rel = self.store.get(i);
+            self.seen.insert(rel.a, rel.b);
+            self.matrix.push(&self.gnfs.fb, &rel);
+        }
+    }
+
     /// The dependencies among the relations, as indices into them.
-    pub fn dependencies(&self) -> Vec<Vec<usize>> {
+    pub fn dependencies(&mut self) -> Vec<Vec<usize>> {
         self.dependencies_with(&Serial)
     }
 
     /// [`Relations::dependencies`], with block Lanczos's products split by
     /// `par`.
-    pub fn dependencies_with(&self, par: &impl Parallel) -> Vec<Vec<usize>> {
-        let fb = &self.gnfs.fb;
+    pub fn dependencies_with(&mut self, par: &impl Parallel) -> Vec<Vec<usize>> {
+        self.restore();
         let (kept, rows, cols) = self.matrix.pruned();
+        self.release();
+        let fb = &self.gnfs.fb;
         let filtered = filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
         let pieces = split(kept.iter().map(|_| 1), par.threads());
         let chars: Vec<u64> = par

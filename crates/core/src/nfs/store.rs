@@ -1,7 +1,7 @@
 //! Compact storage for millions of relations: each packed into a few
-//! words of one vector rather than two vectors of its own, and the pairs
-//! `(a, b)` seen so far as 64-bit fingerprints in an open-addressing
-//! table. Together they take a fraction of the memory of `Vec<Relation>`
+//! words of a chunked [`Records`] rather than two vectors of its own, and
+//! the pairs `(a, b)` seen so far as 64-bit fingerprints in an
+//! open-addressing table. Together they take a fraction of the memory of `Vec<Relation>`
 //! and a `BTreeSet`, which matters most in the browser, where memory is
 //! capped at 4 GB.
 
@@ -16,9 +16,9 @@ use super::sieve::Relation;
 /// the relation's is 2^32 or more.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
+    records: Records,
+    /// The words of the relation being added.
     words: Vec<u32>,
-    /// Where each relation starts, and where the last ends.
-    starts: Vec<usize>,
 }
 
 /// The words before a relation's primes.
@@ -30,14 +30,11 @@ const WIDE: u32 = 1 << 30;
 
 impl Store {
     pub fn new() -> Self {
-        Self {
-            words: Vec::new(),
-            starts: vec![0],
-        }
+        Self::default()
     }
 
     pub fn len(&self) -> usize {
-        self.starts.len() - 1
+        self.records.len()
     }
 
     /// Adds `rel`, unless its prime counts don't fit, below 2^15.
@@ -53,6 +50,7 @@ impl Store {
             | (a as u32) << 15
             | if wide { WIDE } else { 0 }
             | if rel.negative { NEGATIVE } else { 0 };
+        self.words.clear();
         self.words.extend([
             ua as u32,
             (ua >> 32) as u32,
@@ -66,12 +64,12 @@ impl Store {
         } else {
             self.words.extend(primes.map(|&p| p as u32));
         }
-        self.starts.push(self.words.len());
+        self.records.push(&self.words);
         true
     }
 
     fn words(&self, i: usize) -> &[u32] {
-        &self.words[self.starts[i]..self.starts[i + 1]]
+        self.records.get(i)
     }
 
     /// Relation `i`'s `(a, b)`.
@@ -101,6 +99,69 @@ impl Store {
             rational: primes[..r].to_vec(),
             algebraic: primes[r..].to_vec(),
         }
+    }
+}
+
+/// Records of words, kept in chunks of a fixed size rather than one
+/// vector, so that adding to millions of them never copies them all to a
+/// vector twice the size: in the browser's 4 GB, the copy and the space
+/// the old vector leaves can be what runs out.
+#[derive(Clone, Debug, Default)]
+pub struct Records {
+    chunks: Vec<Vec<u32>>,
+    /// Where each record starts: its chunk, and its offset in the chunk,
+    /// each record within one chunk.
+    starts: Vec<Vec<(u32, u32)>>,
+    len: usize,
+}
+
+/// Words in a chunk, unless a record needs more.
+const CHUNK: usize = 1 << 22;
+
+/// Starts in each vector of them.
+const STARTS: usize = 1 << 20;
+
+impl Records {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn push(&mut self, record: &[u32]) {
+        match self.chunks.last() {
+            Some(c) if c.len() + record.len() <= c.capacity() => {}
+            _ => self
+                .chunks
+                .push(Vec::with_capacity(CHUNK.max(record.len()))),
+        }
+        let chunk = self.chunks.len() - 1;
+        let words = &mut self.chunks[chunk];
+        if self.len.is_multiple_of(STARTS) {
+            self.starts.push(Vec::with_capacity(STARTS));
+        }
+        let starts = self.starts.last_mut().expect("just pushed");
+        starts.push((chunk as u32, words.len() as u32));
+        words.extend_from_slice(record);
+        self.len += 1;
+    }
+
+    fn start(&self, i: usize) -> (usize, usize) {
+        let (c, o) = self.starts[i / STARTS][i % STARTS];
+        (c as usize, o as usize)
+    }
+
+    /// Record `i`.
+    pub fn get(&self, i: usize) -> &[u32] {
+        let (c, o) = self.start(i);
+        let end = match (i + 1 < self.len).then(|| self.start(i + 1)) {
+            Some((next, e)) if next == c => e,
+            _ => self.chunks[c].len(),
+        };
+        &self.chunks[c][o..end]
+    }
+
+    /// Every record's words, in order.
+    pub fn words(&self) -> impl Iterator<Item = &u32> {
+        self.chunks.iter().flatten()
     }
 }
 

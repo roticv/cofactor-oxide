@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use super::base::{FactorBase, Prime};
 use super::modp::{inv, jacobi, mul_add};
 use super::sieve::Relation;
+use super::store::Records;
 
 /// Columns before the factor bases': one set in every row, so that each
 /// dependency has an even number of relations, and the rational sign.
@@ -39,10 +40,8 @@ pub fn root_of(rel: &Relation, p: u64) -> u64 {
 /// itself, with no cycle finding.
 #[derive(Clone, Debug)]
 pub struct Matrix {
-    /// The rows' columns, one row after another.
-    entries: Vec<u32>,
-    /// Where each row starts, and where the last ends.
-    starts: Vec<usize>,
+    /// Each row's columns.
+    rows: Records,
     cols: usize,
     large: BTreeMap<(u64, u64), u32>,
 }
@@ -50,8 +49,7 @@ pub struct Matrix {
 impl Matrix {
     pub fn new(fb: &FactorBase) -> Self {
         Self {
-            entries: Vec::new(),
-            starts: vec![0],
+            rows: Records::default(),
             cols: FIXED + fb.rational.len() + fb.algebraic.len(),
             large: BTreeMap::new(),
         }
@@ -93,69 +91,58 @@ impl Matrix {
             });
         }
         row.sort_unstable();
-        let start = self.entries.len();
+        // Columns an even number of times cancel.
+        let mut odd: Vec<u32> = Vec::with_capacity(row.len());
         for c in row {
-            if self.entries.len() > start && self.entries.last() == Some(&c) {
-                self.entries.pop();
+            if odd.last() == Some(&c) {
+                odd.pop();
             } else {
-                self.entries.push(c);
+                odd.push(c);
             }
         }
-        self.starts.push(self.entries.len());
+        self.rows.push(&odd);
     }
 
     fn len(&self) -> usize {
-        self.starts.len() - 1
+        self.rows.len()
     }
 
     fn row(&self, r: usize) -> &[u32] {
-        &self.entries[self.starts[r]..self.starts[r + 1]]
+        self.rows.get(r)
     }
 
     /// Removes rows with a column no other row has, until none are left.
     /// Returns which rows survive, how many there are, and how many
     /// columns they use.
+    ///
+    /// In passes over the rows, each removing the rows with a column of
+    /// weight 1 among those still alive, rather than through an index of
+    /// each column's rows, which would take as much memory again as the
+    /// matrix. What is left doesn't depend on the order.
     fn prune(&self) -> (Vec<bool>, usize, usize) {
-        // Each column's rows, and its weight among the rows still alive.
         let mut weight = vec![0u32; self.cols];
-        for &c in &self.entries {
+        for &c in self.rows.words() {
             weight[c as usize] += 1;
         }
-        let mut start = vec![0usize; self.cols + 1];
-        for (c, &w) in weight.iter().enumerate() {
-            start[c + 1] = start[c] + w as usize;
-        }
-        let mut fill = start.clone();
-        let mut by_col = vec![0u32; start[self.cols]];
-        for r in 0..self.len() {
-            for &c in self.row(r) {
-                by_col[fill[c as usize]] = r as u32;
-                fill[c as usize] += 1;
-            }
-        }
         let mut alive = vec![true; self.len()];
-        let mut singles: Vec<usize> = (0..self.cols).filter(|&c| weight[c] == 1).collect();
         let mut rows = self.len();
-        let mut cols = weight.iter().filter(|&&w| w > 0).count();
-        while let Some(c) = singles.pop() {
-            let Some(&r) = by_col[start[c]..start[c + 1]]
-                .iter()
-                .find(|&&r| alive[r as usize])
-            else {
-                continue;
-            };
-            alive[r as usize] = false;
-            rows -= 1;
-            for &c in self.row(r as usize) {
-                let c = c as usize;
-                weight[c] -= 1;
-                match weight[c] {
-                    0 => cols -= 1,
-                    1 => singles.push(c),
-                    _ => {}
+        loop {
+            let before = rows;
+            for (r, alive) in alive.iter_mut().enumerate() {
+                let row = self.row(r);
+                if *alive && row.iter().any(|&c| weight[c as usize] == 1) {
+                    *alive = false;
+                    rows -= 1;
+                    for &c in row {
+                        weight[c as usize] -= 1;
+                    }
                 }
             }
+            if rows == before {
+                break;
+            }
         }
+        let cols = weight.iter().filter(|&&w| w > 0).count();
         (alive, rows, cols)
     }
 

@@ -333,7 +333,7 @@ fn gnfs_parallel(
         (&mut status, show_status),
     );
     finish_save(collected.save.take(), &mut status);
-    let relations = collected.relations;
+    let mut relations = collected.relations;
     match last_q {
         0 => status.stage(&format!(
             "GNFS: {} relations, enough without sieving",
