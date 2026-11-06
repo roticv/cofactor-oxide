@@ -87,8 +87,13 @@ impl Effort {
     }
 }
 
-/// Rotations with the best α kept for scoring by size.
+/// Rotations with the best estimated size plus α kept for scoring exactly.
 const ROOT_CELLS: usize = 32;
+
+/// The root sieve uses prime powers up to this, and estimates the size
+/// along each row from this many points.
+const ROOT_POWER: u64 = 4096;
+const ROOT_GRID: usize = 16;
 
 /// Of those, the best by size plus α kept for Murphy's E.
 const ROOT_KEEP: usize = 4;
@@ -107,8 +112,11 @@ const SCAN_STARTS: usize = 4;
 /// Steps after which LLL gives up, far more than its few dimensions need.
 const LLL_STEPS: usize = 1000;
 
-/// α counts the roots modulo primes up to this.
-const ALPHA_PRIMES: u64 = 200;
+/// α counts the factors of primes up to this, as in CADO-NFS.
+const ALPHA_PRIMES: u64 = 2000;
+
+/// Root optimization sieves with the powers of primes up to this.
+const ROOT_PRIMES: u64 = 200;
 
 /// Two polynomials for GNFS: `f` of degree `d` and `g(x) = l·x − m`, with
 /// `F(m, l) = l^d·f(m/l)` equal to `N` or a small multiple of it, so that
@@ -181,46 +189,9 @@ impl Poly {
     /// [`Poly::select`], with Kleinjung's search, size optimization and
     /// root optimization shared out by `par`.
     pub fn select_with<const LIMBS: usize>(n: &Uint<LIMBS>, par: &impl Parallel) -> Option<Self> {
-        let d = degree(n.bits());
         let murphy = Murphy::new(&Params::for_bits(n.bits()));
-        let mut candidates: Vec<Small> = Vec::new();
-        for a in 1..=LEADS {
-            let (q, _) = n.div_rem(&Uint::from_u64(a));
-            let top = root(&q, d as u32);
-            for k in 0..OFFSETS {
-                let m = top.wrapping_sub(&Uint::from_u64(k));
-                if let Some(poly) = base_m(n, &m, d) {
-                    candidates.push(poly);
-                }
-            }
-        }
-        if candidates.is_empty() {
-            return None;
-        }
-        candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
-        candidates.truncate(FINALISTS);
-        // Kleinjung's candidates, whose a_{d−1} is small.
-        let p0 = kleinjung_prime(&candidates[0]);
-        let u_max = (KJ_SPREAD * p0 * p0) as i64;
         let effort = Effort::for_bits(n.bits());
-        let found = map_dynamic(par, KJ_LEADS, |i| {
-            kleinjung::candidates(n, d, KJ_STEP * (i as u64 + 1), p0, u_max, effort.nq)
-                .into_iter()
-                .map(|(f, m, l)| Small::new(f, m, l))
-                .collect::<Vec<_>>()
-        });
-        candidates.extend(found.into_iter().flatten());
-        candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
-        candidates.truncate(SIZE_KEEP);
-        // Size-optimize them; nearby m often optimize to the same one.
-        let mut sized = map_dynamic(par, candidates.len(), |i| {
-            let c = &candidates[i];
-            let (f, m) = size_optimize(&c.f, c.m, c.l, true);
-            Small::new(f, m, c.l)
-        });
-        sized.sort_by(|x, y| x.size.total_cmp(&y.size));
-        sized.dedup_by(|x, y| x.f == y.f && x.m == y.m);
-        sized.truncate(ROOT_FINALISTS);
+        let sized = finalists(n, degree(n.bits()), effort, par)?;
         let rated = map_dynamic(par, sized.len(), |i| {
             let c = &sized[i];
             root_optimize(&c.f, c.m, c.l, effort)
@@ -290,6 +261,54 @@ impl Poly {
     pub fn degree(&self) -> usize {
         self.f.len() - 1
     }
+}
+
+/// Size-optimized candidates of degree `d` for root optimization: base-m
+/// ones and Kleinjung's, the best `ROOT_FINALISTS` by size.
+fn finalists<const LIMBS: usize>(
+    n: &Uint<LIMBS>,
+    d: usize,
+    effort: Effort,
+    par: &impl Parallel,
+) -> Option<Vec<Small>> {
+    let mut candidates: Vec<Small> = Vec::new();
+    for a in 1..=LEADS {
+        let (q, _) = n.div_rem(&Uint::from_u64(a));
+        let top = root(&q, d as u32);
+        for k in 0..OFFSETS {
+            let m = top.wrapping_sub(&Uint::from_u64(k));
+            if let Some(poly) = base_m(n, &m, d) {
+                candidates.push(poly);
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
+    candidates.truncate(FINALISTS);
+    // Kleinjung's candidates, whose a_{d−1} is small.
+    let p0 = kleinjung_prime(&candidates[0]);
+    let u_max = (KJ_SPREAD * p0 * p0) as i64;
+    let found = map_dynamic(par, KJ_LEADS, |i| {
+        kleinjung::candidates(n, d, KJ_STEP * (i as u64 + 1), p0, u_max, effort.nq)
+            .into_iter()
+            .map(|(f, m, l)| Small::new(f, m, l))
+            .collect::<Vec<_>>()
+    });
+    candidates.extend(found.into_iter().flatten());
+    candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
+    candidates.truncate(SIZE_KEEP);
+    // Size-optimize them; nearby m often optimize to the same one.
+    let mut sized = map_dynamic(par, candidates.len(), |i| {
+        let c = &candidates[i];
+        let (f, m) = size_optimize(&c.f, c.m, c.l, true);
+        Small::new(f, m, c.l)
+    });
+    sized.sort_by(|x, y| x.size.total_cmp(&y.size));
+    sized.dedup_by(|x, y| x.f == y.f && x.m == y.m);
+    sized.truncate(ROOT_FINALISTS);
+    Some(sized)
 }
 
 /// [`Poly::base_m`], as a candidate for selection.
@@ -568,71 +587,100 @@ fn descend(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u128) {
     (f, m)
 }
 
-/// Sieves rotations `f + (j₁·x + j₀)·g` for the most roots modulo
-/// small primes, and returns the best few by size plus α, each
-/// size-optimized by translation.
-///
-/// For a prime `p` and an `x` with `g(x) ≢ 0`, the rotation has the root `x`
-/// exactly when `j₀ + j₁·x ≡ −f(x)/g(x) (mod p)`: for each `j₁`, an
-/// arithmetic progression of `j₀`. Each root lowers α by
-/// `p/(p + 1)·log₂ p/(p − 1)`.
-/// A small prime for the root sieve: its weight in α, and the pairs
-/// `(x, t)` with `f + t·g ≡ 0` at `x`.
-struct RootPrime {
-    p: u64,
+/// A power of a small prime for the root sieve: its weight in α, and the
+/// pairs `(x, t)` with `f + t·g ≡ 0` at `x` modulo it.
+struct RootPower {
+    pk: u64,
     w: f32,
     roots: Vec<(u64, u64)>,
 }
 
+/// Sieves rotations `f + (j₁·x + j₀)·g` for the smallest size plus α, and
+/// returns the best few, each size-optimized by translation.
+///
+/// For a prime power `p^k` and an `x` with `g(x)` a unit, the rotation's
+/// value at `x` is divisible by `p^k` exactly when
+/// `j₀ + j₁·x ≡ −f(x)/g(x) (mod p^k)`: for each `j₁`, an arithmetic
+/// progression of `j₀`. Each lowers α by `log₂ p/(p^(k−1)·(p + 1))`, and
+/// summed over `k` these are α's average valuations. The
+/// rotations also grow the size, so each cell is scored by the size after
+/// translation, interpolated along its row from `ROOT_GRID` points, less
+/// its gain.
 fn root_optimize(f: &[i128], m: u128, l: u128, effort: Effort) -> Vec<(Vec<i128>, u128)> {
     let d = f.len() - 1;
     let rot1 = if d >= 4 { effort.rot1 } else { 0 };
     let rot0 = effort.rot0;
     let width = 2 * rot0 as usize;
-    // For each small prime, its weight and the pairs (x, t) with
-    // f + t·g ≡ 0 at x: rotations by j₀ ≡ t − j₁·x gain a root at x.
-    let primes: Vec<RootPrime> = Primes::new(2, ALPHA_PRIMES)
-        .map(|p| {
-            let w = (p as f64 / (p + 1) as f64 * log2(p as f64) / (p - 1) as f64) as f32;
-            let fp = reduce(f, p);
-            let mp = (m % u128::from(p)) as u64;
-            let lp = (l % u128::from(p)) as u64;
-            let roots = (0..p)
+    let mut powers: Vec<RootPower> = Vec::new();
+    for p in Primes::new(2, ROOT_PRIMES) {
+        let (mut pk, mut below) = (p, 1u64);
+        while pk <= ROOT_POWER {
+            let w = (log2(p as f64) / (below as f64 * (p + 1) as f64)) as f32;
+            let fp = reduce(f, pk);
+            let (mp, lp) = ((m % u128::from(pk)) as u64, (l % u128::from(pk)) as u64);
+            let roots = (0..pk)
                 .filter_map(|x| {
-                    let gx = (lp * x % p + p - mp) % p;
-                    (gx != 0).then(|| (x, (p - eval(&fp, x, p)) % p * inv(gx, p) % p))
+                    let gx = (lp * x % pk + pk - mp) % pk;
+                    (gx % p != 0).then(|| (x, (pk - eval(&fp, x, pk)) % pk * inv(gx, pk) % pk))
                 })
                 .collect();
-            RootPrime { p, w, roots }
-        })
-        .collect();
+            powers.push(RootPower { pk, w, roots });
+            below = pk;
+            pk *= p;
+        }
+    }
     // One row of j₀ at a time, so that it stays in cache, keeping the best
-    // cells of all rows seen as (gain, j₁, index of j₀).
+    // cells of all rows seen as (score, j₁, index of j₀).
     let mut best: Vec<(f32, i64, usize)> = Vec::new();
     let mut row = vec![0f32; width];
     let mut order: Vec<u32> = (0..width as u32).collect();
+    let step = width / ROOT_GRID;
     for j1 in -rot1..=rot1 {
         row.fill(0.0);
-        for &RootPrime { p, w, ref roots } in &primes {
+        for &RootPower { pk, w, ref roots } in &powers {
             for &(x, t) in roots {
                 // j₀ ≡ t − j₁·x, at index j₀ + rot0.
-                let r = (t as i64 - j1 * x as i64).rem_euclid(p as i64) as u64;
-                let mut i = ((r + rot0 as u64) % p) as usize;
+                let r = (t as i64 - j1 * x as i64).rem_euclid(pk as i64) as u64;
+                let mut i = ((r + rot0 as u64) % pk) as usize;
                 while i < width {
-                    row[i] += w;
-                    i += p as usize;
+                    row[i] -= w;
+                    i += pk as usize;
                 }
             }
         }
-        let by_gain = |a: &u32, b: &u32| row[*b as usize].total_cmp(&row[*a as usize]);
-        order.select_nth_unstable_by(ROOT_CELLS - 1, by_gain);
+        // Add the size, interpolated between grid points.
+        let Some(rotated) = rotate(f, m, l, 1, i128::from(j1)) else {
+            continue;
+        };
+        // The size after translation, which the best rotations need: each
+        // grid point starts from the translation that suited the last.
+        let mut shift = 0i128;
+        let sizes: Vec<f32> = (0..=ROOT_GRID)
+            .map(|k| {
+                let j0 = (k * step) as i128 - i128::from(rot0);
+                let Some((g, gm)) =
+                    rotate(&rotated, m, l, 0, j0).and_then(|g| translate(&g, m, l, shift))
+                else {
+                    return f32::MAX;
+                };
+                let (g, gm2) = descend(&g, gm, l, false);
+                shift += (gm as i128 - gm2 as i128) / l as i128;
+                lognorm(&g).1 as f32
+            })
+            .collect();
+        for (i, cell) in row.iter_mut().enumerate() {
+            let (k, frac) = (i / step, (i % step) as f32 / step as f32);
+            *cell += sizes[k] + (sizes[(k + 1).min(ROOT_GRID)] - sizes[k]) * frac;
+        }
+        let by_score = |a: &u32, b: &u32| row[*a as usize].total_cmp(&row[*b as usize]);
+        order.select_nth_unstable_by(ROOT_CELLS - 1, by_score);
         best.extend(
             order[..ROOT_CELLS]
                 .iter()
                 .map(|&i| (row[i as usize], j1, i as usize)),
         );
         if best.len() > ROOT_CELLS {
-            best.select_nth_unstable_by(ROOT_CELLS - 1, |a, b| b.0.total_cmp(&a.0));
+            best.select_nth_unstable_by(ROOT_CELLS - 1, |a, b| a.0.total_cmp(&b.0));
             best.truncate(ROOT_CELLS);
         }
     }
@@ -653,23 +701,84 @@ fn root_optimize(f: &[i128], m: u128, l: u128, effort: Effort) -> Vec<(Vec<i128>
         .collect()
 }
 
-/// Murphy's α in bits: the sum over small primes `p` of
-/// `(1 − q_p·p/(p+1))·log₂ p/(p − 1)`, with `q_p` the roots of `f` modulo
-/// `p`, counting a root at infinity when `p` divides the leading
-/// coefficient. A random integer has `1/(p − 1)` factors of `p` on
-/// average, and a value of `f` about `q_p·p/(p² − 1)`.
+/// Murphy's α in bits: the sum over primes `p` below `ALPHA_PRIMES` of
+/// `(1/(p − 1) − v_p)·log₂ p`, where a random integer has `1/(p − 1)`
+/// factors of `p` on average and a value `F(a, b)` of `f` at coprime
+/// `a`, `b` has `v_p`, from `valuation`. Negative is better.
 pub fn alpha<C: Coeff>(f: &[C]) -> f64 {
-    let lead = &f[f.len() - 1];
     Primes::new(2, ALPHA_PRIMES)
-        .map(|p| {
-            let mut q = super::modp::roots(f, p).len() as f64;
-            if lead.mod_p(p) == 0 {
-                q += 1.0;
-            }
-            let p = p as f64;
-            (1.0 - q * p / (p + 1.0)) * log2(p) / (p - 1.0)
-        })
+        .map(|p| (1.0 / (p - 1) as f64 - valuation(f, p)) * log2(p as f64))
         .sum()
+}
+
+/// The average number of factors of `p` in `F(a, b)` over coprime `a`,
+/// `b`: `b` is a unit with chance `p/(p + 1)`, and then this is the average
+/// over `x = a/b` in `ℤ_p` of `f(x)`'s; otherwise it is the average over
+/// `y = b/a` in `pℤ_p` of the reversed polynomial's. Both are worked out
+/// modulo the largest power of `p` that keeps products in a `u128`, which
+/// leaves out only valuations past it.
+pub fn valuation<C: Coeff>(f: &[C], p: u64) -> f64 {
+    let mut pk = p;
+    while pk.checked_mul(p).is_some_and(|x| x < 1 << 40) {
+        pk *= p;
+    }
+    let fp: Vec<u64> = f.iter().map(|c| c.mod_p(pk)).collect();
+    // The reversed polynomial at p·y: coefficient i of x^d·f(1/x), times p^i.
+    let mut scale = 1u64;
+    let rev: Vec<u64> = fp
+        .iter()
+        .rev()
+        .map(|&c| {
+            let v = mul_mod(c, scale, pk);
+            scale = mul_mod(scale, p, pk);
+            v
+        })
+        .collect();
+    let pf = p as f64;
+    (pf * affine_valuation(fp, p, pk) + affine_valuation(rev, p, pk)) / (pf + 1.0)
+}
+
+/// The average number of factors of `p` in `f(x)` over `x` in `ℤ_p`, for
+/// `f` modulo `pk`: for each root `r` modulo `p`, a `1/p` chance of `x`
+/// near it, and then `f(r + p·y) = p·g(y)` with `y` again uniform.
+fn affine_valuation(mut f: Vec<u64>, p: u64, mut pk: u64) -> f64 {
+    // Factors of p common to every coefficient count for every x.
+    let mut v = 0.0;
+    while pk > 1 && f.iter().all(|&c| c % p == 0) {
+        if f.iter().all(|&c| c == 0) {
+            return v + (pk.ilog(p)) as f64;
+        }
+        f.iter_mut().for_each(|c| *c /= p);
+        pk /= p;
+        v += 1.0;
+    }
+    if pk <= 1 {
+        return v;
+    }
+    let reduced: Vec<u64> = f.iter().map(|&c| c % p).collect();
+    for r in 0..p {
+        if super::modp::eval(&reduced, r, p) != 0 {
+            continue;
+        }
+        // g(y) = f(r + p·y)/p, modulo pk/p: shift by r, scale by p^i.
+        let mut g = f.clone();
+        for i in 0..g.len() {
+            for j in (i..g.len() - 1).rev() {
+                g[j] = (g[j] + mul_mod(r, g[j + 1], pk)) % pk;
+            }
+        }
+        let mut scale = 1u64;
+        for c in g.iter_mut() {
+            *c = mul_mod(*c, scale, pk) / p;
+            scale = mul_mod(scale, p, pk);
+        }
+        v += (1.0 + affine_valuation(g, p, pk / p)) / p as f64;
+    }
+    v
+}
+
+fn mul_mod(a: u64, b: u64, k: u64) -> u64 {
+    (u128::from(a) * u128::from(b) % u128::from(k)) as u64
 }
 
 /// `2^x` for `|x| < 1000`: the integer part in the exponent field, the

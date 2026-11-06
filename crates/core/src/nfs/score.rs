@@ -71,6 +71,11 @@ pub fn lognorm<C: Coeff>(f: &[C]) -> (f64, f64) {
 /// sieve region of `ρ(u_f)·ρ(u_g)`, the chance that values of both
 /// polynomials there are smooth, with `u` the value's size over the
 /// smoothness bound's, the values made smaller by their α.
+///
+/// The smoothness bounds are the large-prime bounds, as in CADO-NFS since
+/// 2018. With the factor bases' bounds, E sat so far in ρ's tail that it
+/// ranked RSA-110's candidates in nearly random order; with these it orders
+/// them as CADO-NFS's own E does.
 pub struct Murphy {
     rho: Vec<f64>,
     /// `log₂` of the algebraic and rational smoothness bounds.
@@ -101,8 +106,8 @@ impl Murphy {
         let q = params.qmin as f64;
         Self {
             rho,
-            log_bf: log2(f64::from(params.algebraic_bound)),
-            log_bg: log2(f64::from(params.rational_bound)),
+            log_bf: f64::from(params.algebraic_lpb),
+            log_bg: f64::from(params.rational_lpb),
             log_area: f64::from(2 * params.log_i - 1) + log2(q),
         }
     }

@@ -130,6 +130,22 @@ fn m_plain(n: &str, d: usize) -> String {
 }
 
 #[test]
+fn alpha_matches_cado_nfs() {
+    // CADO-NFS's polynomial for RSA-110, which it gives α −5.43 in natural
+    // logarithms: −7.83 bits.
+    let f: [i128; 6] = [
+        -9739644201068194179961740,
+        3798467775703585729918,
+        172225589060678412,
+        -11267352477454,
+        -140707281,
+        3420,
+    ];
+    let nat = alpha(&f) * std::f64::consts::LN_2;
+    assert!((nat + 5.43).abs() < 0.005, "α {nat}");
+}
+
+#[test]
 fn alpha_rewards_roots() {
     // x³ − x has every residue mod 2 and 3 as a root; x³ + x + 1 has none
     // mod 2 and 3.

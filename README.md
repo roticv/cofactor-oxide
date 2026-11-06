@@ -197,10 +197,13 @@ smaller special-q give smaller values to factor.
 
 cofox chooses polynomials for numbers up to about 480 bits (145 digits),
 searching as CADO-NFS does: Kleinjung's method over many special-q, size
-optimization by LLL reduction, then root optimization. For RSA-110 its
-polynomial needs about 1.4 ms of sieving a relation, against 2.5 to 2.9
-ms for the one it chose before and 1.1 to 1.4 ms for CADO-NFS's, and the
-search takes about 2½ minutes on 10 threads. Past 480 bits, give it
+optimization by LLL reduction, then a root sieve over prime powers that
+weighs each rotation's size against its roots. For RSA-110 its
+polynomial's Murphy E, by CADO-NFS's measure, is 5.74·10⁻⁶, against
+3.34·10⁻⁶ for the one it chose before and 5.89·10⁻⁶ for CADO-NFS's own;
+sieving with the earlier of these improvements alone took 1.4 ms a
+relation instead of 2.5 to 2.9. The search takes about 2 minutes on 10
+threads. Past 480 bits, give it
 ones chosen by CADO-NFS or msieve with `--poly`, in either's format, of
 degree up to 6 with coefficients of any size below 2^256. The sieve's parameters are tuned up to 600 bits (180 digits). The
 siever can keep up to three large primes a side, each below 2^40, and
