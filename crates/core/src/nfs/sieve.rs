@@ -290,11 +290,21 @@ impl Side {
             .enumerate()
         {
             let j = j0 + r as u64;
+            // On even rows, where even x makes a and b both even, only odd
+            // x are sieved.
+            let even = j.is_multiple_of(2);
             for s in &mut self.small {
+                let p = s.p as usize;
                 let mut x = s.next as usize;
+                let step = if even {
+                    x += (x + 1) % 2 * p;
+                    2 * p
+                } else {
+                    p
+                };
                 while x < width {
                     row[x] = row[x].saturating_add(s.log);
-                    x += s.p as usize;
+                    x += step;
                 }
                 // From row j to j + 1, the first hit moves by ρ mod p.
                 s.next += s.rho;
@@ -601,8 +611,9 @@ impl Sieve {
                                 continue;
                             }
                             for (i, (&r, &a)) in r.iter().zip(a).enumerate() {
-                                if r >= r_t && a >= a_t {
-                                    candidates.push((base + k * CHUNK + i) as u32);
+                                let x = base + k * CHUNK + i;
+                                if r >= r_t && a >= a_t && (j % 2 == 1 || x % 2 == 1) {
+                                    candidates.push(x as u32);
                                 }
                             }
                         }
