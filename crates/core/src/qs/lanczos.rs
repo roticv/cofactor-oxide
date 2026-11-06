@@ -116,9 +116,22 @@ struct Sparse<'a, P> {
     /// columns, block row by block row, each entry its row and column
     /// within its block as `row << 16 | column`. Each product reads and
     /// writes within one block's range at a time, which stays in cache.
+    ///
+    /// Within a block the entries go round-robin over its columns: each
+    /// column's first, then each one's second, and so on. The first block
+    /// rows, the small primes', have several entries in many columns, and
+    /// in column order `Bᵀw` would add them into the same word one after
+    /// another, each waiting on the last; at RSA-110 that made it twice as
+    /// slow as `Bv`. Round-robin takes a quarter to a third of that off.
     entries: Vec<u32>,
     /// Where each block's entries start, and where the last ends.
     starts: Vec<usize>,
+    /// For `Bᵀw`, if there is memory to spare: the entries again, block
+    /// column by block column, each block's sorted by row, so that it reads
+    /// `w` in order and adds to different words in turn, as fast as `Bv`.
+    /// At RSA-110 it takes 240 MB, too much beside the rest in the
+    /// browser's 4 GB.
+    by_column: Option<(Vec<u32>, Vec<usize>)>,
     /// The dense rows, by bit.
     dense: Vec<usize>,
     /// Each column's bits in the dense rows.
@@ -133,7 +146,7 @@ struct Sparse<'a, P> {
 }
 
 impl<'a, P: Parallel> Sparse<'a, P> {
-    fn new(cols: &[Vec<usize>], rows: usize, post: usize, par: &'a P) -> Self {
+    fn new(cols: &[Vec<usize>], rows: usize, post: usize, by_column: bool, par: &'a P) -> Self {
         let mut weight = vec![0usize; rows];
         for &r in cols.iter().flatten() {
             weight[r] += 1;
@@ -175,12 +188,48 @@ impl<'a, P: Parallel> Sparse<'a, P> {
                 fill[k] += 1;
             }
         }
+        // Each block's entries are in column order; the rank of each in its
+        // column's run, then the column, puts them round-robin.
+        let mut keyed = Vec::new();
+        for k in 0..starts.len() - 1 {
+            let block = &mut entries[starts[k]..starts[k + 1]];
+            keyed.clear();
+            let mut rank = 0u32;
+            for (n, &e) in block.iter().enumerate() {
+                rank = if n > 0 && block[n - 1] & 0xffff == e & 0xffff {
+                    rank + 1
+                } else {
+                    0
+                };
+                keyed.push((rank, e));
+            }
+            keyed.sort_unstable_by_key(|&(rank, e)| (rank, e & 0xffff));
+            for (e, &(_, k)) in block.iter_mut().zip(&keyed) {
+                *e = k;
+            }
+        }
+        let by_column = by_column.then(|| {
+            let mut t = Vec::with_capacity(entries.len());
+            let mut t_starts = Vec::with_capacity(starts.len());
+            t_starts.push(0);
+            for j in 0..col_blocks {
+                for i in 0..row_blocks {
+                    let k = i * col_blocks + j;
+                    let from = t.len();
+                    t.extend_from_slice(&entries[starts[k]..starts[k + 1]]);
+                    t[from..].sort_unstable();
+                    t_starts.push(t.len());
+                }
+            }
+            (t, t_starts)
+        });
         let pieces = PIECES_PER_THREAD * par.threads();
         Self {
             rows,
             cols: n,
             entries,
             starts,
+            by_column,
             vec_pieces: split(cols.iter().map(|_| 1), pieces),
             dense,
             masks,
@@ -264,7 +313,13 @@ impl<'a, P: Parallel> Sparse<'a, P> {
             let mut out: Vec<u64> = self.masks[range].iter().map(|&m| mul_word(&t, m)).collect();
             for i in 0..row_blocks {
                 let w = &w[i * BLOCK..];
-                for &e in self.block(i, j) {
+                let block = match &self.by_column {
+                    Some((t, starts)) => {
+                        &t[starts[j * row_blocks + i]..starts[j * row_blocks + i + 1]]
+                    }
+                    None => self.block(i, j),
+                };
+                for &e in block {
                     out[(e & 0xffff) as usize] ^= w[(e >> 16) as usize];
                 }
             }
@@ -352,7 +407,9 @@ pub fn null_space(
     par: &impl Parallel,
 ) -> Vec<Vec<usize>> {
     let n = cols.len();
-    let b = Sparse::new(cols, rows, post, par);
+    // The second copy of the entries where memory isn't as tight as the
+    // browser's.
+    let b = Sparse::new(cols, rows, post, !cfg!(target_arch = "wasm32"), par);
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let y: Vec<u64> = (0..n)
         .map(|_| {
@@ -477,4 +534,49 @@ pub fn null_space(
     found.sort_unstable();
     found.dedup();
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel::Serial;
+
+    /// `Bv` and `Bᵀw` with and without the second copy, against the sums
+    /// taken entry by entry, on a matrix of several blocks a side whose
+    /// first rows are heavy, as the small primes' are.
+    #[test]
+    fn products_match() {
+        let (rows, n) = (5000, 4500);
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let cols: Vec<Vec<usize>> = (0..n)
+            .map(|_| {
+                let mut col: Vec<usize> = (0..20).map(|_| (next() % 300) as usize).collect();
+                col.extend((0..10).map(|_| (next() % rows as u64) as usize));
+                col.sort_unstable();
+                col.dedup();
+                col
+            })
+            .collect();
+        let v: Vec<u64> = (0..n).map(|_| next()).collect();
+        let w: Vec<u64> = (0..rows).map(|_| next()).collect();
+        let mut bv = vec![0u64; rows];
+        let mut btw = vec![0u64; n];
+        for (c, col) in cols.iter().enumerate() {
+            for &r in col {
+                bv[r] ^= v[c];
+                btw[c] ^= w[r];
+            }
+        }
+        for by_column in [false, true] {
+            let b = Sparse::new(&cols, rows, 0, by_column, &Serial);
+            assert_eq!(b.mul_full(&v), bv, "Bv, copy {by_column}");
+            assert_eq!(b.mul_t(&w), btw, "Bᵀw, copy {by_column}");
+        }
+    }
 }
