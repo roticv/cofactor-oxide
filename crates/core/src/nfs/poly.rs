@@ -62,8 +62,10 @@ const ROOT_FINALISTS: usize = 32;
 /// `|j₀| < rot0`. The search grows with the time sieving will take.
 ///
 /// The special-q roots, `KJ_LEADS·nq` in all, double every 20 bits from
-/// 100,000 at 266 bits, as in CADO-NFS's parameters: about 3 million at
-/// RSA-110, which takes a few CPU minutes. At least 64 for each leading
+/// 100,000 at 266 bits to about 3 million at RSA-110's 364, then every 30,
+/// as in CADO-NFS's parameters: 6 million at 120 digits and 14 million at
+/// 130. Doubling every 20 bits all the way took RSA-130 31 minutes on 10
+/// threads. At least 64 for each leading
 /// coefficient. The rotations grow from the small settings below 210 bits
 /// to the full ones from 290; at 90 and 100 digits, the full ones made
 /// sieving a third and three fifths faster.
@@ -78,7 +80,8 @@ impl Effort {
     fn for_bits(bits: u32) -> Self {
         // 0 up to 210 bits, 4 from 290.
         let step = (bits.saturating_sub(210) / 20).min(4);
-        let roots = 100_000.0 * exp2((f64::from(bits) - 266.0) / 20.0);
+        let b = f64::from(bits);
+        let roots = 100_000.0 * exp2((b.min(364.0) - 266.0) / 20.0 + (b - 364.0).max(0.0) / 30.0);
         Self {
             nq: ((roots / KJ_LEADS as f64) as usize).max(64),
             rot1: 4 << step.saturating_sub(2),

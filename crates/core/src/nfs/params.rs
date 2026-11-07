@@ -25,8 +25,22 @@
 /// relations rather than 6.3 million, but each special-q gave over twice
 /// as many, and the larger matrix cost minutes against hours of sieving.
 /// Between 330 and 364 bits the cofactor bound is interpolated, so sizes
-/// there keep a large prime and a half on average. The rows past 364 bits
-/// are guesses.
+/// there keep a large prime and a half on average.
+///
+/// The rows for RSA-120 (397 bits) and RSA-130 (430) come from sieving
+/// 2000-wide slices of special-q at points from 250,000 to 32 million with
+/// each candidate, and adding up the time to reach the relations needed,
+/// `0.66·(π(2^lpb₀) + π(2^lpb₁))` as RSA-110 needed. A relation is found
+/// again under each of its algebraic primes in the range sieved, so each
+/// counted `1/m` for its `m` such primes: from 2.0 to 2.1 million that
+/// predicted 1.6% duplicates, against 1.2% measured. At 120 digits, `I` of
+/// 2^13 cost 20% more than 2^12, 27- and 28-bit large primes beat 28 and
+/// 28, factor bases of 2.5 to 5 million were within 4% of each other, and
+/// starting special-q lower than about 4 million saved less sieving than
+/// the duplicates cost: about 10 core-hours of sieving in all. At 130
+/// digits, `I` of 2^13 and factor bases of 10 million won by 6 to 10%
+/// over CADO-NFS's c130 parameters and our 120-digit row: about 37
+/// core-hours. The rows past 430 bits are guesses.
 ///
 /// `I` stops at 2^13, where the buckets of the largest primes' hits take
 /// a few hundred megabytes for each thread. Past 600 bits the last row
@@ -34,7 +48,7 @@
 /// of them a side, to be practical. The siever takes large-prime bounds up
 /// to 2^40, below the quadratic characters' primes.
 #[allow(clippy::type_complexity)]
-const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 10] = [
+const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
     (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250),
     (160, [60_000, 60_000], [21, 21], [21, 21], 10, 15_000),
     (200, [500_000, 500_000], [23, 23], [23, 23], 11, 125_000),
@@ -56,12 +70,20 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 10] = [
         1_250_000,
     ),
     (
-        400,
-        [8_000_000, 8_000_000],
-        [28, 28],
-        [56, 56],
+        397,
+        [5_000_000, 5_000_000],
+        [27, 28],
+        [52, 54],
+        12,
+        4_000_000,
+    ),
+    (
+        430,
+        [10_000_000, 10_000_000],
+        [28, 29],
+        [54, 57],
         13,
-        2_000_000,
+        8_000_000,
     ),
     (
         465,
@@ -69,7 +91,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 10] = [
         [29, 29],
         [58, 58],
         13,
-        5_000_000,
+        16_000_000,
     ),
     (
         530,

@@ -207,8 +207,9 @@ sieving with the earlier of these improvements alone took 1.4 ms a
 relation instead of 2.5 to 2.9. The search takes about 2 minutes on 10
 threads. Past 480 bits, give it
 ones chosen by CADO-NFS or msieve with `--poly`, in either's format, of
-degree up to 6 with coefficients of any size below 2^256. The sieve's parameters are tuned up to 600 bits (180 digits). The
-siever can keep up to three large primes a side, each below 2^40, and
+degree up to 6 with coefficients of any size below 2^256. The sieve's
+parameters run to 600 bits (180 digits), measured up to 130 digits and
+guessed beyond. The siever can keep up to three large primes a side, each below 2^40, and
 special-q up to 2^40 too, as numbers such as RSA-270 need. Cofactors
 below 2^62 are split by ECM and rho, and larger ones, of up to 127 bits,
 by a quick P−1 alone: at 90 digits with 34-bit large primes, ECM curves
@@ -216,7 +217,10 @@ there cost far more than the relations they added, and dropping them
 gave 3 to 4 times as many relations a second. Up to 330 bits the parameter table keeps
 one large prime a side, as at 90 digits two a side took 2.5 times as
 long; from 364 bits it uses smaller factor bases with two a side, which
-factored RSA-110 in 3 h 19 min on 6 threads against 4 h 56 min.
+factored RSA-110 in 3 h 19 min on 6 threads against 4 h 56 min. The rows
+for 120 and 130 digits come from timing slices of special-q with each
+candidate and counting the duplicates a range of special-q gives:
+RSA-120 should take about 10 core-hours of sieving and RSA-130 about 37.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a

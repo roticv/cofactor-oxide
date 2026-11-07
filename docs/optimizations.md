@@ -225,6 +225,24 @@ Tried and dropped:
 - **Three large primes:** supported, but below 600 bits they cost more
   per relation than they gain.
 
+**Parameters for 120 and 130 digits.** No trial factorization is quick
+enough to compare settings at these sizes, so each candidate sieved
+2000-wide slices of special-q from 250,000 to 32 million on one thread,
+and the time to reach the relations needed was added up, a relation
+counting `1/m` for the `m` algebraic primes it has in the range sieved,
+since it is found again under each. That predicted 1.6% duplicates from
+2.0 to 2.1 million, against 1.2% measured, and makes starting low cost
+more than it saves:
+
+| | Best | Runner-up | Worst tried |
+|---|---|---|---|
+| RSA-120 | factor bases 5M, 27/28-bit large primes, `I` = 2^12, from 4M: about 10 core-hours | CADO-NFS's c120 parameters, within 4% | 8M, 28/28 bits, `I` = 2^13 (the old guess): about 20% more per relation |
+| RSA-130 | factor bases 10M, 28/29 bits, `I` = 2^13, from 8M: about 37 core-hours | CADO-NFS's c130 parameters: 39 | 10M with 29/29 bits: 47 |
+
+The polynomial search's budget doubled every 20 bits, which took
+RSA-130's search 31 minutes on 10 threads; past RSA-110 it now doubles every 30,
+as CADO-NFS's does.
+
 ### Filtering
 
 Duplicates and singletons are removed, then clique removal drops surplus
@@ -339,6 +357,5 @@ threads. Natively the arithmetic is about 3 times as fast.
 - **The default thread count:** the efficiency cores add little to
   sieving, and 4 threads may do as well as 10.
 - **Batch cofactorization** (Bernstein's), for larger numbers.
-- **Parameters for 120–130 digits**, where the table's rows are guesses.
 - **Further square-root work:** less padding to powers of 2, and keeping
   idle threads busy where a step has fewer jobs than threads.
