@@ -32,7 +32,7 @@ use super::params::Params;
 use super::poly::{Poly, to_u128};
 use crate::arith::{Limb, Uint};
 use crate::primes::Primes;
-use crate::qs::cofactor::split;
+use crate::qs::cofactor::{probable_prime, split};
 use crate::qs::log2;
 
 /// The most positions sieved at a time.
@@ -682,9 +682,7 @@ impl Sieve {
         };
         let mut rational = Vec::new();
         self.rational.divide(a, b, x, r_hits, &mut v, &mut rational);
-        if !self.rational.cofactor(&v, &mut rational) {
-            return None;
-        }
+        let r_left = self.rational.cofactor(&v, &mut rational)?;
 
         // Algebraic side: F(a, b), which q divides.
         let mut v = norm(&self.f_wide, a, b);
@@ -695,8 +693,19 @@ impl Sieve {
         }
         self.algebraic
             .divide(a, b, x, a_hits, &mut v, &mut algebraic);
-        if !self.algebraic.cofactor(&v, &mut algebraic) {
-            return None;
+        let a_left = self.algebraic.cofactor(&v, &mut algebraic)?;
+
+        // Splitting cofactors costs the most, so it waits until both sides
+        // have passed the cheap tests: most candidates fail one of them.
+        for (side, left, factors) in [
+            (&self.rational, r_left, &mut rational),
+            (&self.algebraic, a_left, &mut algebraic),
+        ] {
+            if let Some(c) = left
+                && !side.large_primes(c, factors)
+            {
+                return None;
+            }
         }
         Some(Relation {
             a,
@@ -715,15 +724,29 @@ impl Side {
         f64::from(self.mfb) + self.skipped + FUDGE
     }
 
-    /// Whether `v`, what trial division left, is 1, or no larger than the
-    /// cofactor bound and a product of primes below the large-prime bound,
-    /// which are added to `factors`.
-    fn cofactor(&self, v: &Wide, factors: &mut Vec<u64>) -> bool {
-        match to_u128(v) {
-            None | Some(0) => false,
-            Some(1) => true,
-            Some(c) if c > self.cofactor_bound => false,
-            Some(c) => self.large_primes(c, factors),
+    /// The cheap tests of `v`, what trial division left: `None` if it
+    /// can't be a product of primes below the large-prime bound and no
+    /// larger than the cofactor bound, `Some(None)` if it's 1 or such a
+    /// prime, which is added to `factors`, and otherwise `Some(Some(c))`
+    /// for [`large_primes`](Self::large_primes) to split.
+    fn cofactor(&self, v: &Wide, factors: &mut Vec<u64>) -> Option<Option<u128>> {
+        let c = to_u128(v).filter(|&c| c != 0 && c <= self.cofactor_bound)?;
+        let (large, b) = (u128::from(self.large_bound), u128::from(self.largest));
+        if c == 1 {
+            Some(None)
+        } else if c < large {
+            factors.push(c as u64);
+            Some(None)
+        } else if c < self.prime_below.into() {
+            // A prime too large.
+            None
+        } else if c < b * b * b
+            && (c >= large * large || (c < 1 << 62 && c % 2 == 1 && probable_prime(c as u64)))
+        {
+            // At most two primes, not both below L, or a prime.
+            None
+        } else {
+            Some(Some(c))
         }
     }
 

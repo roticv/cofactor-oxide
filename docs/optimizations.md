@@ -214,6 +214,7 @@ and large primes up to 2⁴⁰.
 | Cofactors past 2⁶² get a quick P−1 alone | Nearly all have a prime too large; the ECM curves found relations at a twentieth of the sieve's rate. 3.3 times the relations a second with two large primes, 3.8 with three |
 | Two large primes a side with smaller factor bases from 364 bits | RSA-110: 4 h 56 min → 3 h 19 min on 6 threads. It needed 10.1 million relations rather than 6.3 million, but each special-q gave over twice as many |
 | Small primes divided out in 32-bit pieces | No 128-bit division in software |
+| Splits wait until both sides pass the cheap tests | A cofactor is first checked for size, `B² ≤ c < L²` and a base-2 probable-prime test; only then are the 2LP splits run, rational side first. RSA-130 slice at 8M with two large primes: 1.03 million rational splits (98,000 successes) → 5,800, split time 2.5 s → 0.27 s, sieving 38.4 s → 36.5 s (5%), the same relations |
 
 Tried and dropped:
 
@@ -223,7 +224,15 @@ Tried and dropped:
   against 270 s with this table's larger factor bases. Below 364 bits
   the table still uses large factor bases with one large prime a side.
 - **Three large primes:** supported, but below 600 bits they cost more
-  per relation than they gain.
+  per relation than they gain. At RSA-130 (factor bases 10M, 28/29 bits)
+  an algebraic cofactor bound of 82 bits gave 14% more relations than 2LP
+  with the quick P−1, and 49% more with 200 ECM curves per cofactor, the
+  most any splitter could find. But the sieve and resieve alone took
+  about 64 s a slice against 2LP's 36 s, so even free splitting loses.
+- **Batch cofactorization** (Bernstein's) with two large primes: on that
+  slice the 2LP splits that fail cost 0.9 s of 38 s, all batch could save,
+  and the successes still need splitting, since a gcd says a cofactor is
+  smooth without giving its primes. Deferring the splits saved more.
 
 **Parameters for 120 and 130 digits.** No trial factorization is quick
 enough to compare settings at these sizes, so each candidate sieved
@@ -356,6 +365,7 @@ threads. Natively the arithmetic is about 3 times as fast.
   overflow, instead of saturating ones.
 - **The default thread count:** the efficiency cores add little to
   sieving, and 4 threads may do as well as 10.
-- **Batch cofactorization** (Bernstein's), for larger numbers.
+- **Batch cofactorization with three large primes** past 130 digits, if
+  three large primes start to pay there.
 - **Further square-root work:** less padding to powers of 2, and keeping
   idle threads busy where a step has fewer jobs than threads.

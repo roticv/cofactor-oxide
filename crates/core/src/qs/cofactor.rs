@@ -147,6 +147,12 @@ fn rho(m: &Mod64, c: u64) -> Option<u64> {
     }
 }
 
+/// Whether odd `c < 2^62` passes the strong probable-prime test to base 2:
+/// a much cheaper way than [`split`] to rule out a prime.
+pub fn probable_prime(c: u64) -> bool {
+    probably_prime(&Mod64::new(c))
+}
+
 /// Splits `c < 2^62`, whose prime factors are all larger than its cube
 /// root so that it has at most two, into primes `[p, q]` with `p ≤ q`, if
 /// it isn't prime itself.
