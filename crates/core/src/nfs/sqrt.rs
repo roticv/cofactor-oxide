@@ -53,17 +53,21 @@ fn modulo(x: &BigInt, m: &BigInt) -> BigInt {
 /// products of coefficients shared out by `par`.
 fn mul(a: &[BigInt], b: &[BigInt], f: &[BigInt], par: &impl Parallel) -> Vec<BigInt> {
     let d = f.len() - 1;
-    let pairs: Vec<(usize, usize)> = (0..a.len())
-        .flat_map(|i| (0..b.len()).map(move |j| (i, j)))
-        .filter(|&(i, j)| !a[i].is_zero() && !b[j].is_zero())
-        .collect();
-    let products = map_dynamic(par, pairs.len(), |k| {
-        bigmul::mul(&a[pairs[k].0], &b[pairs[k].1])
+    let mut c = bigmul::poly_mul(a, b, par).unwrap_or_else(|| {
+        let pairs: Vec<(usize, usize)> = (0..a.len())
+            .flat_map(|i| (0..b.len()).map(move |j| (i, j)))
+            .filter(|&(i, j)| !a[i].is_zero() && !b[j].is_zero())
+            .collect();
+        let products = map_dynamic(par, pairs.len(), |k| {
+            bigmul::mul(&a[pairs[k].0], &b[pairs[k].1])
+        });
+        let mut c = vec![BigInt::zero(); a.len() + b.len() - 1];
+        for (&(i, j), p) in pairs.iter().zip(products) {
+            c[i + j] += p;
+        }
+        c
     });
-    let mut c = vec![BigInt::zero(); 2 * d - 1];
-    for (&(i, j), p) in pairs.iter().zip(products) {
-        c[i + j] += p;
-    }
+    c.resize(2 * d - 1, BigInt::zero());
     for k in (d..2 * d - 1).rev() {
         let t = core::mem::take(&mut c[k]);
         if !t.is_zero() {
@@ -78,7 +82,7 @@ fn mul(a: &[BigInt], b: &[BigInt], f: &[BigInt], par: &impl Parallel) -> Vec<Big
 
 /// `c mod m` for each coefficient, shared out by `par`.
 fn modulo_all(c: &[BigInt], m: &Barrett, par: &impl Parallel) -> Vec<BigInt> {
-    map_dynamic(par, c.len(), |i| m.reduce(&c[i]))
+    m.reduce_all(c, par)
 }
 
 /// `a·b mod (F, m)`.
@@ -337,13 +341,35 @@ pub fn factor<const LIMBS: usize>(
     }
     let mut y = modulo(&lead, &nb).modpow(&half, &nb);
     y = modulo(&(y * eval_mod(&df, &cm, &l, &nb)), &nb);
+    // ∏ p^(e/2): packed into words, multiplied up in a balanced tree on all
+    // threads, then reduced once, rather than a modular power for each p.
+    let mut words: Vec<BigInt> = Vec::new();
+    let mut word = 1u128;
     for (p, e) in exponents {
         debug_assert!(e % 2 == 0, "odd exponent of {p}");
-        y = modulo(
-            &(y * BigInt::from(p).modpow(&BigInt::from(e / 2), &nb)),
-            &nb,
-        );
+        for _ in 0..e / 2 {
+            if let Some(w) = word.checked_mul(u128::from(p)) {
+                word = w;
+            } else {
+                words.push(BigInt::from(word));
+                word = u128::from(p);
+            }
+        }
     }
+    words.push(BigInt::from(word));
+    while words.len() > 1 {
+        let next = map_dynamic(par, words.len() / 2, |i| {
+            bigmul::mul(&words[2 * i], &words[2 * i + 1])
+        });
+        if words.len() % 2 == 1 {
+            let last = words.pop().expect("odd");
+            words = next;
+            words.push(last);
+        } else {
+            words = next;
+        }
+    }
+    y = modulo(&(y * &words[0]), &nb);
     let g = num_integer_gcd(modulo(&(x - y), &nb), nb.clone());
     (g > BigInt::one() && g < nb).then(|| g.to_string().parse().ok())?
 }

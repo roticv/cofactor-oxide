@@ -271,6 +271,23 @@ exactly.
 |---|---|
 | One dependency at a time on all threads | Each gives a factor with probability about 1/2, so few are needed. 90 digits: 63 s → 25.6 s a square root on six threads |
 | NTT multiplication and Barrett reduction | num-bigint multiplies two 64-million-bit numbers in 6 s and takes a remainder in 15. Products now go through number-theoretic transforms modulo two primes below 2⁶², remainders through Barrett's method with a Newton reciprocal, and the lifting goes up by powers of `p` ending just past the bound. RSA-110: 339 s → 84 s natively, 40 → 6 minutes in wasm |
+| Products of polynomials transforming each coefficient once | Rather than both operands of every product of two coefficients: about 3 times fewer transforms. RSA-110's first dependency on 6 threads: 63 s → about 40 s |
+| Batched Barrett reductions | The reciprocal and modulus transformed once for all of a polynomial's coefficients, and each coefficient and prime its own job: → about 33 s |
+| Transforms in cache-sized blocks, each level's twiddle factors in order | Inside a block, each level read its twiddles at a stride across a table of `n/2`: → about 22.5 s |
+| The rational side as one product tree | A modular power for each of hundreds of thousands of primes, on one thread, became words multiplied up on all threads and reduced once: → about 18 s |
+
+On one thread the two primes go one after the other, which halves the
+memory. In wasm, RSA-110's square root takes 195 s instead of 364 s, at
+1.8 GB on its own instead of 1.4 GB, which still fits in the memory the
+matrix step leaves: the whole run peaks at 3.6 GB, as before.
+
+Tried and dropped:
+
+- **Shoup's multiplication** by the twiddle factors, and **radix-4
+  passes** over the large levels: no faster, as the transforms are
+  limited by memory rather than arithmetic.
+- **Both primes at once in products of polynomials:** about 2% faster
+  natively, but 2.3 GB in wasm.
 
 ### Memory
 
@@ -323,6 +340,5 @@ threads. Natively the arithmetic is about 3 times as fast.
   sieving, and 4 threads may do as well as 10.
 - **Batch cofactorization** (Bernstein's), for larger numbers.
 - **Parameters for 120–130 digits**, where the table's rows are guesses.
-- **Further square-root work:** transforming each coefficient once in
-  polynomial products, less padding to powers of 2, reusing Barrett
-  reciprocals.
+- **Further square-root work:** less padding to powers of 2, and keeping
+  idle threads busy where a step has fewer jobs than threads.
