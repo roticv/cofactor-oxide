@@ -58,15 +58,33 @@ norms than degree 6 against linear once numbers pass about 200 digits,
 on paper. Montgomery's two-quadratics construction works but gives poor
 polynomials, Prest and Zimmermann's 2010 search did better without
 winning, and no selection method has beaten linear pairs in practice.
-This is the one unsolved question where the siever, cofactoring and
-matrix carry over unchanged: only the rational side's norm becomes a
-polynomial.
+Using them would change more than the rational norm: the rational side
+would need ideals and roots in the factor base, quadratic characters,
+and a second algebraic square root.
 
-*First experiment:* generate degree-3 pairs for a 100-digit number by
-Montgomery's method, score them with the existing Murphy's E, and sieve
-a fixed slice of special-q against the current degree-4 polynomial.
-`norm` already computes `F(a, b)` for any degree; `rational` would take
-a second polynomial.
+*Measured, and not worth it below about 200 digits.* A Python
+experiment built pairs with Coxon's algorithms ([arXiv
+1109.6398](https://arxiv.org/abs/1109.6398)): his Algorithm 4.5 for
+cubics from a progression of length 4, his Algorithm 5.2 (Koo, Jo and
+Kwon's length 5, with Kleinjung-style collisions for `q² | m³ − kN`),
+and Montgomery's two quadratics. It reproduced Coxon's c91 example
+exactly and scored every pair with a copy of `score.rs`'s Murphy's E,
+α computed the same way for both kinds:
+
+| | Our linear pair | Best (3,3) | Best (2,2) | Linear ahead by |
+|---|---|---|---|---|
+| RSA-100 (degree 4) | 5.6·10⁻⁶ | 2.0·10⁻⁷ | 4.5·10⁻⁷ | 12× |
+| RSA-120 (degree 5) | 1.3·10⁻⁶ | 4.4·10⁻⁸ | 3.6·10⁻⁸ | 29× |
+| RSA-130 (degree 5) | 3.9·10⁻⁷ | 7.4·10⁻⁹ | 1.2·10⁻⁸ | 33× |
+
+Algorithm 5.2 reaches the optimal `N^(1/6)` cubics only with `p` near
+`N^(2/9)` and `|m − ∛(kN)| ≤ p^1.5`; collisions found `p` of 10⁴ to 10⁶.
+And the gap isn't only the construction: the pair `x³ ∓ S` that meets
+the resultant bound exactly, which no real pair can beat, scores 0.22,
+0.26 and 0.32 times our linear E at α 0, and only ties at RSA-130 with
+α −4 on both sides, as good as the root sieve gets on one. The ratio
+grows with size, so the crossover on paper past 200 digits stands, but
+only for pairs nobody can construct.
 
 ### Predicting yield per special-q
 
@@ -225,6 +243,7 @@ to `ℤ/Nℤ` and smaller elements, and nobody knows how to build one.
 
 For factoring a given number, none of this is a plan. The levers that
 moved the record were polynomial quality, three large primes with real
-ECM, a 2³³ region, duplicate removal in the siever, and a GPU fleet. The
-one algorithmic direction where this code is a useful instrument is
-nonlinear polynomial pairs, above.
+ECM, a 2³³ region, duplicate removal in the siever, and a GPU fleet.
+Nonlinear polynomial pairs, the one algorithmic direction where this
+code was a useful instrument, were measured above and lose by more than
+an order of magnitude at the sizes it can reach.

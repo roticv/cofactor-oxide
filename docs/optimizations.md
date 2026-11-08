@@ -168,6 +168,12 @@ Tried and dropped:
   With the old search our degree-5 polynomials were worse; with the new
   one, RSA-110's degree 4 and 5 tie (5.74 and 5.65·10⁻⁶; 1.15 and 1.14
   ms a relation on average), so the switch stays.
+- **Nonlinear pairs**, two cubics or two quadratics, built by Coxon's
+  and Montgomery's methods in a Python experiment and scored with the
+  same Murphy's E: 12 times worse than our linear pair at RSA-100, 29 at
+  RSA-120 and 33 at RSA-130. Even a pair at the resultant bound only
+  ties at 130 digits; [ideas.md](ideas.md#nonlinear-polynomial-pairs)
+  has the numbers.
 
 Selection now takes about 3 s at 262 bits, 26 s at 330 and about 2
 minutes at RSA-110, on 10 threads.
