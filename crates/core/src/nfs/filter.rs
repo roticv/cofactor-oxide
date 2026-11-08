@@ -306,6 +306,9 @@ fn sym_diff(a: &[u32], b: &[u32]) -> Vec<u32> {
     }
     out.extend_from_slice(&a[i..]);
     out.extend_from_slice(&b[j..]);
+    // Room for both was set aside, and rows are kept for the rest of the
+    // run: at RSA-120 the slack took 0.3 GB.
+    out.shrink_to_fit();
     out
 }
 

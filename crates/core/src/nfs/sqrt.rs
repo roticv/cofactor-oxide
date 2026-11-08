@@ -27,7 +27,6 @@ use num_traits::{One, Signed, Zero};
 use super::bigmul::{self, Barrett};
 use super::modp::{irreducible, mul_mod};
 use super::poly::Poly;
-use super::sieve::Relation;
 use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, map_dynamic};
 use crate::primes::Primes;
@@ -129,6 +128,34 @@ fn product(mut elems: Vec<Vec<BigInt>>, f: &[BigInt], par: &impl Parallel) -> Ve
         elems = next;
     }
     elems.pop().unwrap()
+}
+
+/// Factors `c·a − b·θ` multiplied together at each leaf of the product
+/// tree.
+const LEAF: usize = 16;
+
+/// The product of `c·a − b·θ` over `pairs`, modulo the monic `f`.
+fn linear_product(pairs: &[(i64, u64)], lead: &BigInt, f: &[BigInt]) -> Vec<BigInt> {
+    let d = f.len() - 1;
+    let mut p = vec![BigInt::one()];
+    for &(a, b) in pairs {
+        let (ca, b) = (lead * a, BigInt::from(b));
+        // p·(c·a − b·θ), then θ^d replaced by −(f − θ^d).
+        let mut next = vec![BigInt::zero(); p.len() + 1];
+        for (i, c) in p.iter().enumerate() {
+            next[i] += c * &ca;
+            next[i + 1] -= c * &b;
+        }
+        if next.len() > d {
+            let top = next.pop().expect("degree d");
+            for (n, fc) in next.iter_mut().zip(f) {
+                *n -= &top * fc;
+            }
+        }
+        p = next;
+    }
+    p.resize(d, BigInt::zero());
+    p
 }
 
 /// `x^e` in `𝔽_p[x]/(f)`.
@@ -294,13 +321,15 @@ fn to_u64(x: &BigInt) -> u64 {
     x.iter_u64_digits().next().unwrap_or(0)
 }
 
-/// Tries the dependency `deps` for a factor of `n`: returns
-/// `gcd(X − Y, n)` if it is proper. The large products are shared out by
-/// `par`.
+/// Tries a dependency for a factor of `n`: `pairs` are its relations'
+/// `(a, b)`, and `rational` the multiplicity of each rational prime among
+/// them, all even. Returns `gcd(X − Y, n)` if it is proper. The large
+/// products are shared out by `par`.
 pub fn factor<const LIMBS: usize>(
     n: &Uint<LIMBS>,
     poly: &Poly,
-    deps: &[&Relation],
+    pairs: &[(i64, u64)],
+    rational: &BTreeMap<u64, u32>,
     par: &impl Parallel,
 ) -> Option<Uint<LIMBS>> {
     let nb: BigInt = n.to_string().parse().ok()?;
@@ -313,15 +342,14 @@ pub fn factor<const LIMBS: usize>(
     f.push(BigInt::one());
     let df: Vec<BigInt> = (1..=d).map(|i| &f[i] * BigInt::from(i)).collect();
 
-    let elems = deps
-        .iter()
-        .map(|r| {
-            let mut e = vec![BigInt::zero(); d];
-            e[0] = &lead * BigInt::from(r.a);
-            e[1] = -BigInt::from(r.b);
-            e
-        })
-        .collect();
+    // The leaves of the product tree: runs of LEAF factors c·a − b·θ,
+    // multiplied out directly rather than each made a polynomial of its
+    // own, which for a million relations was millions of small allocations.
+    let leaves = pairs.len().div_ceil(LEAF);
+    let elems = map_dynamic(par, leaves, |k| {
+        let run = &pairs[k * LEAF..pairs.len().min((k + 1) * LEAF)];
+        linear_product(run, &lead, &f)
+    });
     let gamma = product(elems, &f, par);
     let delta = mul(&mul(&gamma, &df, &f, par), &df, &f, par);
     let s = algebraic_sqrt(&delta, &f, &lead, par)?;
@@ -331,21 +359,15 @@ pub fn factor<const LIMBS: usize>(
     // with S and F′ homogenized to degree d − 1.
     let cm = modulo(&(&lead * &poly.m), &nb);
     let l = modulo(&poly.l, &nb);
-    let half = BigInt::from(deps.len() / 2);
+    let half = BigInt::from(pairs.len() / 2);
     let x = modulo(&(eval_mod(&s, &cm, &l, &nb) * l.modpow(&half, &nb)), &nb);
-    let mut exponents: BTreeMap<u64, u32> = BTreeMap::new();
-    for r in deps {
-        for &p in &r.rational {
-            *exponents.entry(p).or_default() += 1;
-        }
-    }
     let mut y = modulo(&lead, &nb).modpow(&half, &nb);
     y = modulo(&(y * eval_mod(&df, &cm, &l, &nb)), &nb);
     // ∏ p^(e/2): packed into words, multiplied up in a balanced tree on all
     // threads, then reduced once, rather than a modular power for each p.
     let mut words: Vec<BigInt> = Vec::new();
     let mut word = 1u128;
-    for (p, e) in exponents {
+    for (&p, &e) in rational {
         debug_assert!(e % 2 == 0, "odd exponent of {p}");
         for _ in 0..e / 2 {
             if let Some(w) = word.checked_mul(u128::from(p)) {

@@ -79,6 +79,17 @@ impl Store {
         (a as i64, u64::from(w[2]) | u64::from(w[3]) << 32)
     }
 
+    /// Relation `i`'s rational primes, without unpacking the rest.
+    pub fn rational(&self, i: usize) -> impl Iterator<Item = u64> + '_ {
+        let w = self.words(i);
+        let r = (w[4] & 0x7fff) as usize;
+        let wide = w[4] & WIDE != 0;
+        let step = if wide { 2 } else { 1 };
+        w[HEADER..HEADER + r * step]
+            .chunks(step)
+            .map(|p| u64::from(p[0]) | p.get(1).map_or(0, |&h| u64::from(h) << 32))
+    }
+
     /// Relation `i`, unpacked.
     pub fn get(&self, i: usize) -> Relation {
         let w = self.words(i);
@@ -162,6 +173,33 @@ impl Records {
     /// Every record's words, in order.
     pub fn words(&self) -> impl Iterator<Item = &u32> {
         self.chunks.iter().flatten()
+    }
+
+    /// Calls `f` with each record and its index, in order, letting go of
+    /// each chunk once its records are passed, so that copying them out
+    /// never holds both copies whole.
+    pub fn drain(self, mut f: impl FnMut(usize, &[u32])) {
+        let Self {
+            chunks,
+            starts,
+            len,
+        } = self;
+        let start = |i: usize| {
+            let (c, o) = starts[i / STARTS][i % STARTS];
+            (c as usize, o as usize)
+        };
+        let mut i = 0;
+        for (c, chunk) in chunks.into_iter().enumerate() {
+            while i < len && start(i).0 == c {
+                let o = start(i).1;
+                let end = match (i + 1 < len).then(|| start(i + 1)) {
+                    Some((next, e)) if next == c => e,
+                    _ => chunk.len(),
+                };
+                f(i, &chunk[o..end]);
+                i += 1;
+            }
+        }
     }
 }
 

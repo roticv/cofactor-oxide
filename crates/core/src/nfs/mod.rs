@@ -31,6 +31,7 @@ mod sieve;
 mod sqrt;
 mod store;
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
@@ -43,7 +44,7 @@ pub use sieve::{Relation, Sieve, special_qs};
 
 use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, split};
-use crate::qs::dependencies_post;
+use crate::qs::dependency_masks;
 use matrix::{Matrix, characters};
 use store::{Seen, Store};
 
@@ -211,13 +212,13 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         self.ready
     }
 
-    /// Lets go of the pairs seen and the matrix, which with millions of
-    /// relations take as much memory as filtering needs, for the browser's
-    /// 4 GB.
-    fn release(&mut self) {
+    /// Lets go of the pairs seen and hands over the matrix, which with
+    /// millions of relations take as much memory as filtering needs, for
+    /// the browser's 4 GB.
+    fn release(&mut self) -> Matrix {
         self.seen = Seen::default();
-        self.matrix = Matrix::new(&self.gnfs.fb);
         self.released = true;
+        core::mem::replace(&mut self.matrix, Matrix::new(&self.gnfs.fb))
     }
 
     /// Rebuilds what [`Relations::release`] let go of.
@@ -233,60 +234,56 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         }
     }
 
-    /// The dependencies among the relations, as indices into them.
-    pub fn dependencies(&mut self) -> Vec<Vec<usize>> {
+    /// The dependencies among the relations.
+    pub fn dependencies(&mut self) -> Dependencies {
         self.dependencies_with(&Serial)
     }
 
     /// [`Relations::dependencies`], with block Lanczos's products split by
     /// `par`.
-    pub fn dependencies_with(&mut self, par: &impl Parallel) -> Vec<Vec<usize>> {
+    ///
+    /// Each stage takes the last one's data rather than copying it, since
+    /// at RSA-120 a copy of the matrix is about a gigabyte: the pairs seen
+    /// go first, the matrix's rows are moved out as they are pruned, the
+    /// characters are added to the filtered rows in place, and block
+    /// Lanczos lets go of the rows once it has packed them.
+    pub fn dependencies_with(&mut self, par: &impl Parallel) -> Dependencies {
         self.restore();
-        let (kept, rows, cols) = self.matrix.pruned();
-        self.release();
+        let (kept, rows, cols) = self.release().into_pruned();
         let fb = &self.gnfs.fb;
-        let filtered = filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
+        let filter::Filtered { mut rows, sets } =
+            filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
         let pieces = split(kept.iter().map(|_| 1), par.threads());
         let chars: Vec<u64> = par
             .map(|i| {
                 kept[pieces[i]..pieces[i + 1]]
                     .iter()
-                    .map(|&r| characters(fb, self.store.ab(r)))
+                    .map(|&r| characters(fb, self.store.ab(r as usize)))
                     .collect::<Vec<_>>()
             })
             .concat();
-        let rows: Vec<Vec<usize>> = filtered
-            .rows
-            .iter()
-            .zip(&filtered.sets)
-            .map(|(row, set)| {
-                let mask = set.iter().fold(0, |m, &i| m ^ chars[i as usize]);
-                let dense = (0..fb.characters.len()).filter(|i| mask >> i & 1 == 1);
-                row.iter()
-                    .map(|&c| c as usize)
-                    .chain(dense.map(|i| cols + i))
-                    .collect()
-            })
-            .collect();
-        let deps = dependencies_post(&rows, cols + fb.characters.len(), POST_ROWS, par);
-        // Each dependency's relations: those in an odd number of its rows.
-        let pieces = split(deps.iter().map(|_| 1), par.threads());
-        par.map(|i| {
-            deps[pieces[i]..pieces[i + 1]]
-                .iter()
-                .map(|dep| {
-                    let mut odd = vec![false; kept.len()];
-                    for &i in dep.iter().flat_map(|&row| &filtered.sets[row]) {
-                        odd[i as usize] ^= true;
-                    }
-                    (0..kept.len())
-                        .filter(|&i| odd[i])
-                        .map(|i| kept[i])
-                        .collect()
-                })
-                .collect::<Vec<Vec<usize>>>()
-        })
-        .concat()
+        for (row, set) in rows.iter_mut().zip(&sets) {
+            let mask = set.iter().fold(0, |m, &i| m ^ chars[i as usize]);
+            row.reserve_exact(mask.count_ones() as usize);
+            row.extend(
+                (0..fb.characters.len())
+                    .filter(|i| mask >> i & 1 == 1)
+                    .map(|i| (cols + i) as u32),
+            );
+        }
+        drop(chars);
+        let masks = dependency_masks(rows, cols + fb.characters.len(), POST_ROWS, par);
+        // Each relation is in a dependency if it is in an odd number of
+        // the dependency's rows.
+        let mut of_kept = vec![0u64; kept.len()];
+        for (set, &m) in sets.iter().zip(&masks) {
+            if m != 0 {
+                for &i in set {
+                    of_kept[i as usize] ^= m;
+                }
+            }
+        }
+        Dependencies::new(&kept, &of_kept)
     }
 
     /// Takes the square roots for the dependency `dep`, returning a proper
@@ -298,9 +295,90 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// [`Relations::try_dependency`], with the large products split by
     /// `par`.
     pub fn try_dependency_with(&self, dep: &[usize], par: &impl Parallel) -> Option<Uint<LIMBS>> {
-        let dep: Vec<Relation> = dep.iter().map(|&i| self.store.get(i)).collect();
-        let dep: Vec<&Relation> = dep.iter().collect();
-        sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &dep, par)
+        // Only the pairs and the rational primes are needed, read straight
+        // from the store rather than unpacking each relation.
+        let pairs: Vec<(i64, u64)> = dep.iter().map(|&i| self.store.ab(i)).collect();
+        let mut rational = BTreeMap::new();
+        for &i in dep {
+            for p in self.store.rational(i) {
+                *rational.entry(p).or_insert(0u32) += 1;
+            }
+        }
+        sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &pairs, &rational, par)
+    }
+}
+
+/// The dependencies among a [`Relations`]' relations, up to 64, as a
+/// word for each relation in any: its bits say which. Lists of millions of
+/// relations each would take far more memory.
+#[derive(Clone, Debug, Default)]
+pub struct Dependencies {
+    /// The relations in some dependency, by index, and the word for each.
+    relations: Vec<u32>,
+    masks: Vec<u64>,
+    /// The bits of the distinct dependencies.
+    bits: Vec<u32>,
+}
+
+impl Dependencies {
+    /// From each relation `kept[i]`'s word `masks[i]`.
+    fn new(kept: &[u32], masks: &[u64]) -> Self {
+        let (relations, masks): (Vec<u32>, Vec<u64>) = kept
+            .iter()
+            .zip(masks)
+            .filter(|&(_, &m)| m != 0)
+            .map(|(&r, &m)| (r, m))
+            .unzip();
+        // A fingerprint of each dependency, to drop repeats.
+        let mut prints = [0u64; 64];
+        for (&r, &m) in relations.iter().zip(&masks) {
+            let h = u64::from(r)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(29)
+                | 1;
+            for (q, print) in prints.iter_mut().enumerate() {
+                if m >> q & 1 == 1 {
+                    *print = print.wrapping_add(h);
+                }
+            }
+        }
+        let mut bits: Vec<u32> = Vec::new();
+        for q in 0..64 {
+            let p = prints[q as usize];
+            if p != 0 && bits.iter().all(|&b| prints[b as usize] != p) {
+                bits.push(q);
+            }
+        }
+        Self {
+            relations,
+            masks,
+            bits,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.bits.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bits.is_empty()
+    }
+
+    /// Each dependency's relations in turn, as from [`Dependencies::get`].
+    pub fn iter(&self) -> impl Iterator<Item = Vec<usize>> + '_ {
+        (0..self.len()).map(|i| self.get(i))
+    }
+
+    /// Dependency `i`'s relations, as indices for
+    /// [`Relations::try_dependency`].
+    pub fn get(&self, i: usize) -> Vec<usize> {
+        let q = self.bits[i];
+        self.relations
+            .iter()
+            .zip(&self.masks)
+            .filter(|&(_, &m)| m >> q & 1 == 1)
+            .map(|(&r, _)| r as usize)
+            .collect()
     }
 }
 
@@ -338,5 +416,5 @@ pub fn gnfs_with<const LIMBS: usize>(
     Ok(relations
         .dependencies()
         .iter()
-        .find_map(|dep| relations.try_dependency(dep)))
+        .find_map(|dep| relations.try_dependency(&dep)))
 }

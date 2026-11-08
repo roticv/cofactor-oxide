@@ -36,7 +36,7 @@ use cycles::Cycles;
 
 pub use base::{FactorBase, Prime, multiplier};
 pub use job::{QsCollector, QsJob, QsSieve, Start};
-pub(crate) use linalg::dependencies_post;
+pub(crate) use linalg::dependency_masks;
 pub use linalg::{dependencies, dependencies_with};
 pub use modp::{pow_mod, sqrt_mod};
 pub use params::{BLOCK_SIZE, DOUBLE_LARGE_BITS, Params};

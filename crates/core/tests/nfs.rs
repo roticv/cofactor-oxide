@@ -310,7 +310,7 @@ fn gnfs_with_poly(n: &Uint<16>, poly: Poly) -> Option<Uint<16>> {
     relations
         .dependencies()
         .iter()
-        .find_map(|dep| relations.try_dependency(dep))
+        .find_map(|dep| relations.try_dependency(&dep))
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn gnfs_factors_in_pieces() {
     let f = relations
         .dependencies_with(&Pieces(3))
         .iter()
-        .find_map(|dep| relations.try_dependency_with(dep, &Pieces(3)))
+        .find_map(|dep| relations.try_dependency_with(&dep, &Pieces(3)))
         .expect("no factor");
     assert!(f == p || f == q, "{n} gave {f}");
 }

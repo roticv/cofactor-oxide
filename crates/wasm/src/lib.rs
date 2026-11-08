@@ -3,8 +3,8 @@
 use std::ops::ControlFlow;
 
 use cofox_core::nfs::{
-    Gnfs, Params, Relations, Sieve as NfsSieve, parse_poly, parse_relation, poly_text,
-    relation_line,
+    Dependencies, Gnfs, Params, Relations, Sieve as NfsSieve, parse_poly, parse_relation,
+    poly_text, relation_line,
 };
 use cofox_core::qs::{QsCollector, QsJob, QsSieve, Start};
 use cofox_core::{Config, Progress, QsMode};
@@ -218,7 +218,7 @@ pub struct GnfsCollector {
     poly: String,
     ideals: u32,
     bits: u32,
-    dependencies: Vec<Vec<usize>>,
+    dependencies: Dependencies,
 }
 
 #[wasm_bindgen]
@@ -234,7 +234,7 @@ impl GnfsCollector {
             ideals: (fb.rational.len() + fb.algebraic.len()) as u32,
             bits: n.bits(),
             relations: gnfs.relations(),
-            dependencies: Vec::new(),
+            dependencies: Dependencies::default(),
         })
     }
 
@@ -281,7 +281,11 @@ impl GnfsCollector {
     /// The square roots for dependency `i`: a proper factor, or
     /// `undefined` if it gives none.
     pub fn try_dependency(&self, i: u32) -> Option<String> {
-        let dep = self.dependencies.get(i as usize)?;
-        self.relations.try_dependency(dep).map(|f| f.to_string())
+        let i = i as usize;
+        if i >= self.dependencies.len() {
+            return None;
+        }
+        let dep = self.dependencies.get(i);
+        self.relations.try_dependency(&dep).map(|f| f.to_string())
     }
 }

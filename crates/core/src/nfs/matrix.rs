@@ -112,14 +112,14 @@ impl Matrix {
     }
 
     /// Removes rows with a column no other row has, until none are left.
-    /// Returns which rows survive, how many there are, and how many
-    /// columns they use.
+    /// Returns which rows survive, how many there are, and each column's
+    /// weight among them.
     ///
     /// In passes over the rows, each removing the rows with a column of
     /// weight 1 among those still alive, rather than through an index of
     /// each column's rows, which would take as much memory again as the
     /// matrix. What is left doesn't depend on the order.
-    fn prune(&self) -> (Vec<bool>, usize, usize) {
+    fn prune(&self) -> (Vec<bool>, usize, Vec<u32>) {
         let mut weight = vec![0u32; self.cols];
         for &c in self.rows.words() {
             weight[c as usize] += 1;
@@ -142,24 +142,48 @@ impl Matrix {
                 break;
             }
         }
-        let cols = weight.iter().filter(|&&w| w > 0).count();
-        (alive, rows, cols)
+        (alive, rows, weight)
     }
 
     /// Whether, after pruning, at least `extra` more rows than columns are
     /// left, counting `dense` columns that pruning never removes.
     pub fn ready(&self, dense: usize, extra: usize) -> bool {
-        let (_, rows, cols) = self.prune();
+        let (_, rows, weight) = self.prune();
+        let cols = weight.iter().filter(|&&w| w > 0).count();
         rows >= cols + dense + extra
     }
 
-    /// The rows that survive pruning: their indices, the rows, and the
-    /// number of columns.
-    pub fn pruned(&self) -> (Vec<usize>, Vec<Vec<u32>>, usize) {
-        let (alive, _, _) = self.prune();
-        let kept: Vec<usize> = (0..self.len()).filter(|&r| alive[r]).collect();
-        let rows = kept.iter().map(|&r| self.row(r).to_vec()).collect();
-        (kept, rows, self.cols)
+    /// The rows that survive pruning: their indices, the rows, with the
+    /// columns they use renumbered from 0 in order, and the number of
+    /// those columns. Takes the matrix, whose rows are let go of as they
+    /// are copied.
+    pub fn into_pruned(self) -> (Vec<u32>, Vec<Vec<u32>>, usize) {
+        let (alive, count, weight) = self.prune();
+        let mut renumber = weight;
+        let mut used = 0;
+        for w in &mut renumber {
+            *w = if *w > 0 {
+                used += 1;
+                used - 1
+            } else {
+                u32::MAX
+            };
+        }
+        let Self {
+            rows: records,
+            large,
+            ..
+        } = self;
+        drop(large);
+        let mut kept = Vec::with_capacity(count);
+        let mut rows = Vec::with_capacity(count);
+        records.drain(|r, row| {
+            if alive[r] {
+                kept.push(r as u32);
+                rows.push(row.iter().map(|&c| renumber[c as usize]).collect());
+            }
+        });
+        (kept, rows, used as usize)
     }
 }
 

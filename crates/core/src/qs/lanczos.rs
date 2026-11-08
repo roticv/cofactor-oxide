@@ -146,10 +146,10 @@ struct Sparse<'a, P> {
 }
 
 impl<'a, P: Parallel> Sparse<'a, P> {
-    fn new(cols: &[Vec<usize>], rows: usize, post: usize, by_column: bool, par: &'a P) -> Self {
+    fn new(cols: &[Vec<u32>], rows: usize, post: usize, by_column: bool, par: &'a P) -> Self {
         let mut weight = vec![0usize; rows];
         for &r in cols.iter().flatten() {
-            weight[r] += 1;
+            weight[r as usize] += 1;
         }
         let mut order: Vec<usize> = (0..rows).collect();
         order.sort_unstable_by_key(|&r| core::cmp::Reverse(weight[r]));
@@ -168,7 +168,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
         let block = |r: usize, c: usize| r / BLOCK * col_blocks + c / BLOCK;
         let mut starts = vec![0usize; row_blocks * col_blocks + 1];
         for (c, col) in cols.iter().enumerate() {
-            for &r in col {
+            for r in col.iter().map(|&r| r as usize) {
                 match bit[r] {
                     u8::MAX => starts[block(r, c) + 1] += 1,
                     b @ 0..64 => masks[c] |= 1 << b,
@@ -182,7 +182,11 @@ impl<'a, P: Parallel> Sparse<'a, P> {
         let mut fill = starts.clone();
         let mut entries = vec![0u32; starts[starts.len() - 1]];
         for (c, col) in cols.iter().enumerate() {
-            for &r in col.iter().filter(|&&r| bit[r] == u8::MAX) {
+            for r in col
+                .iter()
+                .map(|&r| r as usize)
+                .filter(|&r| bit[r] == u8::MAX)
+            {
                 let k = block(r, c);
                 entries[fill[k]] = (((r % BLOCK) << 16) | (c % BLOCK)) as u32;
                 fill[k] += 1;
@@ -390,26 +394,40 @@ fn choose(t: &Small, prev: u64) -> (Small, u64) {
     (winv, s)
 }
 
-/// Finds up to 64 vectors `x ≠ 0` with `Bx = 0`, as lists of columns, for
-/// `B` with `rows` rows and the given columns, using `par` for the
-/// matrix and vector products. Returns nothing if this `seed` fails, which
-/// another seed is unlikely to repeat.
+/// Finds up to 64 vectors `x ≠ 0` with `Bx = 0`, for `B` with `rows` rows
+/// and the given columns, using `par` for the matrix and vector products,
+/// and trying up to `tries` random starts. Returns a word for each column
+/// whose bit `q` says whether the column is in the `q`th vector: all zero
+/// if every start failed. The columns are taken rather than borrowed so
+/// that they can be let go of once packed.
 ///
 /// The `post` densest rows of `B` are left out of the iterations, which
 /// makes each cheaper, and the vectors found are combined at the end to
 /// satisfy them as well, as in msieve. That leaves fewer dependencies, so
 /// `B` should have at least `post + 64` more columns than rows.
 pub fn null_space(
-    cols: &[Vec<usize>],
+    cols: Vec<Vec<u32>>,
     rows: usize,
-    seed: u64,
     post: usize,
+    tries: u64,
     par: &impl Parallel,
-) -> Vec<Vec<usize>> {
+) -> Vec<u64> {
     let n = cols.len();
     // The second copy of the entries where memory isn't as tight as the
-    // browser's.
-    let b = Sparse::new(cols, rows, post, !cfg!(target_arch = "wasm32"), par);
+    // browser's. The columns themselves aren't needed once the entries
+    // are packed.
+    let b = Sparse::new(&cols, rows, post, !cfg!(target_arch = "wasm32"), par);
+    drop(cols);
+    (0..tries)
+        .find_map(|seed| attempt(&b, rows, seed))
+        .unwrap_or_else(|| vec![0; n])
+}
+
+/// One run of block Lanczos on `b` from the random start `seed`: for each
+/// column, a word whose bit `q` says whether it is in the `q`th vector
+/// found, or `None` if this seed fails or finds nothing.
+fn attempt<P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec<u64>> {
+    let n = b.cols;
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let y: Vec<u64> = (0..n)
         .map(|_| {
@@ -440,12 +458,12 @@ pub fn null_space(
         }
         steps += 1;
         if steps > max_steps {
-            return Vec::new();
+            return None;
         }
         let va2v = b.inner(&av, &av);
         let (winv, s) = choose(&vav, s1);
         if s == 0 {
-            return Vec::new();
+            return None;
         }
         // X += V·W⁻¹·VᵀV₀.
         let t = tables(&mul(&winv, &b.inner(&v, &v0)));
@@ -523,17 +541,7 @@ pub fn null_space(
         })
         .collect();
     debug_assert!(b.mul_full(&deps).iter().all(|&w| w == 0), "Bx ≠ 0");
-    let mut found: Vec<Vec<usize>> = (0..combos.len())
-        .map(|q| {
-            (0..n)
-                .filter(|&i| deps[i] >> q & 1 == 1)
-                .collect::<Vec<_>>()
-        })
-        .filter(|dep| !dep.is_empty())
-        .collect();
-    found.sort_unstable();
-    found.dedup();
-    found
+    deps.iter().any(|&w| w != 0).then_some(deps)
 }
 
 #[cfg(test)]
@@ -554,10 +562,10 @@ mod tests {
             x ^= x << 17;
             x
         };
-        let cols: Vec<Vec<usize>> = (0..n)
+        let cols: Vec<Vec<u32>> = (0..n)
             .map(|_| {
-                let mut col: Vec<usize> = (0..20).map(|_| (next() % 300) as usize).collect();
-                col.extend((0..10).map(|_| (next() % rows as u64) as usize));
+                let mut col: Vec<u32> = (0..20).map(|_| (next() % 300) as u32).collect();
+                col.extend((0..10).map(|_| (next() % rows as u64) as u32));
                 col.sort_unstable();
                 col.dedup();
                 col
@@ -568,7 +576,7 @@ mod tests {
         let mut bv = vec![0u64; rows];
         let mut btw = vec![0u64; n];
         for (c, col) in cols.iter().enumerate() {
-            for &r in col {
+            for r in col.iter().map(|&r| r as usize) {
                 bv[r] ^= v[c];
                 btw[c] ^= w[r];
             }

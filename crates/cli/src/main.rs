@@ -356,7 +356,7 @@ fn gnfs_parallel(
     // probability about ½, so few are needed.
     let mut found = None;
     for (i, dep) in deps.iter().enumerate() {
-        found = relations.try_dependency_with(dep, &Threads(threads));
+        found = relations.try_dependency_with(&dep, &Threads(threads));
         let outcome = if found.is_some() {
             "a factor"
         } else {
