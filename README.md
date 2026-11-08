@@ -31,7 +31,8 @@ short, which is also the name of the command-line tool.
 A number moves through these stages in order. Each stage peels off the factors
 it can find, and whatever composite is left goes to the next stage.
 [docs/optimizations.md](docs/optimizations.md) records what made each stage
-fast, with the measurements, and what was tried and dropped.
+fast, with the measurements, and what was tried and dropped;
+[docs/ideas.md](docs/ideas.md) lists what to try next, and what not to.
 
 | Stage | Algorithm | Good at |
 | ----- | --------- | ------- |
