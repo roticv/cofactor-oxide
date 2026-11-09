@@ -235,24 +235,32 @@ Tried and dropped:
   with the quick P−1, and 49% more with 200 ECM curves per cofactor, the
   most any splitter could find. But the sieve and resieve alone took
   about 64 s a slice against 2LP's 36 s, so even free splitting loses.
+  At RSA-140 (factor bases 20M, 29/29 bits) an algebraic bound of 87 bits
+  took 1.6 times as long a slice for about the same relations: 264
+  core-hours to enough relations against 174.
 - **Batch cofactorization** (Bernstein's) with two large primes: on that
   slice the 2LP splits that fail cost 0.9 s of 38 s, all batch could save,
   and the successes still need splitting, since a gcd says a cofactor is
   smooth without giving its primes. Deferring the splits saved more.
 
-**Parameters for 120 and 130 digits.** No trial factorization is quick
+**Parameters for 120 to 140 digits.** No trial factorization is quick
 enough to compare settings at these sizes, so each candidate sieved
-2000-wide slices of special-q from 250,000 to 32 million on one thread,
-and the time to reach the relations needed was added up, a relation
-counting `1/m` for the `m` algebraic primes it has in the range sieved,
-since it is found again under each. That predicted 1.6% duplicates from
-2.0 to 2.1 million, against 1.2% measured, and makes starting low cost
-more than it saves:
+2000-wide slices of special-q from 250,000 to 32 million (128 million at
+140 digits) on one thread, and the time to reach the relations needed
+was added up, a relation counting `1/m` for the `m` algebraic primes it
+has in the range sieved, since it is found again under each. That
+predicted 1.6% duplicates from 2.0 to 2.1 million, against 1.2%
+measured, and makes starting low cost more than it saves:
 
 | | Best | Runner-up | Worst tried |
 |---|---|---|---|
 | RSA-120 | factor bases 5M, 27/28-bit large primes, `I` = 2^12, from 4M: about 10 core-hours | CADO-NFS's c120 parameters, within 4% | 8M, 28/28 bits, `I` = 2^13 (the old guess): about 20% more per relation |
 | RSA-130 | factor bases 10M, 28/29 bits, `I` = 2^13, from 8M: about 37 core-hours | CADO-NFS's c130 parameters: 39 | 10M with 29/29 bits: 47 |
+| RSA-140 | factor bases 20M, 29/29 bits, `I` = 2^13, from 32M: about 174 core-hours (30M: 172) | 20M with 28/29 bits: 178 | CADO-NFS's c140 parameters (30/30 bits): 244 |
+
+The relations needed are `0.56·(π(2^lpb₀) + π(2^lpb₁))`, from the real
+RSA-120 run, which needed 12.2 million; the RSA-120 and RSA-130 rows
+were chosen with 0.66. The RSA-140 row has not had a real run.
 
 The polynomial search's budget doubled every 20 bits, which took
 RSA-130's search 31 minutes on 10 threads; past RSA-110 it now doubles every 30,

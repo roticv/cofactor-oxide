@@ -40,7 +40,13 @@
 /// the duplicates cost: about 10 core-hours of sieving in all. At 130
 /// digits, `I` of 2^13 and factor bases of 10 million won by 6 to 10%
 /// over CADO-NFS's c130 parameters and our 120-digit row: about 37
-/// core-hours. The rows past 430 bits are guesses.
+/// core-hours. For RSA-140 (463 bits), with the relations needed
+/// recalibrated to `0.56·(…)` by a real RSA-120 run, factor bases of 20
+/// million, 29/29 bits and special-q from 32 million came to about 174
+/// core-hours: 30 million tied, 10 million cost 31% more, CADO-NFS's c140
+/// parameters 40% more and three large primes 52% more, and starting at
+/// 16 million cost more in duplicates than it saved. The rows past 465
+/// bits are guesses.
 ///
 /// `I` stops at 2^13, where the buckets of the largest primes' hits take
 /// a few hundred megabytes for each thread. Past 600 bits the last row
@@ -91,7 +97,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [29, 29],
         [58, 58],
         13,
-        16_000_000,
+        32_000_000,
     ),
     (
         530,
