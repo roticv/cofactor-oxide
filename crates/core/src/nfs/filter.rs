@@ -40,21 +40,27 @@ pub fn filter(rows: Vec<Vec<u32>>, cols: usize, excess: usize) -> Filtered {
     let mut m = State::new(rows, cols);
     m.prune();
     m.remove_cliques(excess);
+    m.index();
     m.merge();
     m.prune();
     let (rows, sets) = m
         .rows
         .into_iter()
         .zip(m.sets)
-        .zip(&m.alive)
-        .filter(|(_, alive)| **alive)
-        .map(|(row_set, _)| row_set)
+        .enumerate()
+        .filter(|&(r, _)| m.alive[r])
+        .map(|(r, (row, set))| {
+            let set = if set.is_empty() { vec![r as u32] } else { set };
+            (row, set)
+        })
         .unzip();
     Filtered { rows, sets }
 }
 
 struct State {
     rows: Vec<Vec<u32>>,
+    /// The original rows each row is the sum of, sorted; empty for just
+    /// itself, as most rows stay, which saves an allocation a row.
     sets: Vec<Vec<u32>>,
     alive: Vec<bool>,
     /// Each column's number of live rows.
@@ -71,23 +77,55 @@ struct State {
 impl State {
     fn new(rows: Vec<Vec<u32>>, cols: usize) -> Self {
         let mut weight = vec![0u32; cols];
-        let mut by_col = vec![Vec::new(); cols];
-        for (r, row) in rows.iter().enumerate() {
-            for &c in row {
-                weight[c as usize] += 1;
-                by_col[c as usize].push(r as u32);
-            }
+        for &c in rows.iter().flatten() {
+            weight[c as usize] += 1;
         }
-        Self {
-            sets: (0..rows.len() as u32).map(|r| vec![r]).collect(),
+        let mut m = Self {
+            sets: vec![Vec::new(); rows.len()],
             alive: vec![true; rows.len()],
             live_rows: rows.len(),
             live_cols: weight.iter().filter(|&&w| w > 0).count(),
             total: rows.iter().map(Vec::len).sum(),
             rows,
             weight,
-            by_col,
+            by_col: vec![Vec::new(); cols],
+        };
+        m.index();
+        m
+    }
+
+    /// Rebuilds the lists of each column's rows from the live rows alone,
+    /// each list its exact size: merging only ever adds to them, and at
+    /// RSA-140 they had grown from 2.6 to 4.2 GB.
+    fn index(&mut self) {
+        for (list, &w) in self.by_col.iter_mut().zip(&self.weight) {
+            list.clear();
+            list.shrink_to(w as usize);
+            list.reserve_exact(w as usize);
         }
+        for (r, row) in self.rows.iter().enumerate() {
+            if self.alive[r] {
+                for &c in row {
+                    self.by_col[c as usize].push(r as u32);
+                }
+            }
+        }
+    }
+
+    /// The sum of the original rows of rows `r` and `p`.
+    fn sum_sets(&self, r: usize, p: usize) -> Vec<u32> {
+        let (own_r, own_p) = ([r as u32], [p as u32]);
+        let a: &[u32] = if self.sets[r].is_empty() {
+            &own_r
+        } else {
+            &self.sets[r]
+        };
+        let b: &[u32] = if self.sets[p].is_empty() {
+            &own_p
+        } else {
+            &self.sets[p]
+        };
+        sym_diff(a, b)
     }
 
     /// The live rows with column `c`, which also become its list.
@@ -104,8 +142,11 @@ impl State {
     fn kill(&mut self, r: u32, singles: &mut Vec<u32>) {
         self.alive[r as usize] = false;
         self.live_rows -= 1;
-        self.total -= self.rows[r as usize].len();
-        for &c in &self.rows[r as usize] {
+        // Most rows die: their memory goes with them.
+        let row = core::mem::take(&mut self.rows[r as usize]);
+        self.sets[r as usize] = Vec::new();
+        self.total -= row.len();
+        for &c in &row {
             let w = &mut self.weight[c as usize];
             *w -= 1;
             match *w {
@@ -188,6 +229,12 @@ impl State {
     /// until the rows average [`DENSITY`] columns.
     fn merge(&mut self) {
         for w in 2..=MAX_MERGE {
+            // The lists only grow as rows are summed: rebuilt once they
+            // are twice what the live rows need.
+            let listed: usize = self.by_col.iter().map(Vec::len).sum();
+            if listed > 2 * self.total {
+                self.index();
+            }
             let light: Vec<u32> = (0..self.weight.len() as u32)
                 .filter(|&c| (2..=w).contains(&self.weight[c as usize]))
                 .collect();
@@ -243,10 +290,7 @@ impl State {
                     return (Vec::new(), Vec::new());
                 }
                 let (r, p) = (rs[i] as usize, rs[parent[i]] as usize);
-                (
-                    sym_diff(&self.rows[r], &self.rows[p]),
-                    sym_diff(&self.sets[r], &self.sets[p]),
-                )
+                (sym_diff(&self.rows[r], &self.rows[p]), self.sum_sets(r, p))
             })
             .collect();
         let mut pending = Vec::with_capacity(k);

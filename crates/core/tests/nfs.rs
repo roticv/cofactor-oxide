@@ -424,6 +424,66 @@ fn gnfs_factors_in_pieces() {
     assert!(f == p || f == q, "{n} gave {f}");
 }
 
+/// Keeps the relations in a vector, as the command line keeps them in a
+/// file.
+#[derive(Default)]
+struct VecSpill {
+    words: Vec<Vec<u32>>,
+    fail_after: Option<usize>,
+}
+
+impl cofox_core::nfs::Spill for VecSpill {
+    fn write(&mut self, words: &[u32]) -> bool {
+        if self.fail_after == Some(self.words.len()) {
+            return false;
+        }
+        self.words.push(words.to_vec());
+        true
+    }
+
+    fn read(&mut self, f: &mut dyn FnMut(&[u32])) {
+        self.words.iter().for_each(|w| f(w));
+    }
+}
+
+#[test]
+fn gnfs_factors_with_relations_spilled() {
+    // The relations leave memory while the matrix is solved, and come
+    // back, in order, for the square roots; a spill that fails part way
+    // leaves them in memory.
+    let (n, p, q) = (
+        u("1176217249472123917871099760550263221639"),
+        u("98936812917358800691"),
+        u("11888570237800257629"),
+    );
+    let gnfs = cofox_core::nfs::Gnfs::new(&n, &Params::for_bits(n.bits())).unwrap();
+    let mut sieve = gnfs.sieve();
+    let mut relations = gnfs.relations();
+    for k in 0.. {
+        for (q, r) in gnfs.special_qs(k) {
+            relations.add(sieve.special_q(q, r));
+        }
+        if relations.is_ready() {
+            break;
+        }
+    }
+    let len = relations.len();
+    for fail_after in [None, Some(len / 2)] {
+        let mut spill = VecSpill {
+            fail_after,
+            ..VecSpill::default()
+        };
+        let deps = relations.dependencies_spilling(&Pieces(3), &mut spill);
+        assert_eq!(relations.len(), len);
+        assert_eq!(spill.words.len(), fail_after.unwrap_or(len));
+        let f = deps
+            .iter()
+            .find_map(|dep| relations.try_dependency_with(&dep, &Pieces(3)))
+            .expect("no factor");
+        assert!(f == p || f == q, "{n} gave {f}");
+    }
+}
+
 #[test]
 fn relations_as_text() {
     use cofox_core::nfs::{parse_relation, relation_line};

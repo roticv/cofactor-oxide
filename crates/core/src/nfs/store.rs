@@ -68,8 +68,14 @@ impl Store {
         true
     }
 
-    fn words(&self, i: usize) -> &[u32] {
+    /// Relation `i`'s words, as [`Store::push_words`] takes them back.
+    pub(super) fn words(&self, i: usize) -> &[u32] {
         self.records.get(i)
+    }
+
+    /// Adds a relation's words, as [`Store::words`] gave them.
+    pub(super) fn push_words(&mut self, words: &[u32]) {
+        self.records.push(words);
     }
 
     /// Relation `i`'s `(a, b)`.

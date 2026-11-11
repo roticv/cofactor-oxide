@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, ErrorKind, IsTerminal, Write};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, IsTerminal, Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use cofox_core::arith::ParseUintError;
 use cofox_core::nfs::{
-    Gnfs, Params, Poly, Relations, parse_poly, parse_relation, poly_text, relation_line,
+    Gnfs, Params, Poly, Relations, Spill, parse_poly, parse_relation, poly_text, relation_line,
 };
 use cofox_core::parallel::Parallel;
 use cofox_core::qs::{QsJob, Start};
@@ -347,7 +347,10 @@ fn gnfs_parallel(
     if show_status {
         status.show("Number field sieve: filtering and solving the matrix");
     }
-    let deps = relations.dependencies_with(&Threads(threads));
+    let deps = match FileSpill::new() {
+        Some(mut spill) => relations.dependencies_spilling(&Threads(threads), &mut spill),
+        None => relations.dependencies_with(&Threads(threads)),
+    };
     status.stage(&format!("GNFS: {} dependencies", deps.len()));
     if show_status {
         status.show("Number field sieve: square roots");
@@ -372,6 +375,85 @@ fn gnfs_parallel(
     }
     status.clear();
     Ok(found.map(|f| f.to_string()))
+}
+
+/// A temporary file the relations wait in while the matrix is solved,
+/// freeing their memory for filtering and block Lanczos: about 4 GB of
+/// RSA-140's 14.8 GB peak, which with other programs running pushed the
+/// matrix into compressed memory and stretched it from about an hour to
+/// almost five.
+struct FileSpill {
+    path: PathBuf,
+    writer: Option<BufWriter<File>>,
+}
+
+impl FileSpill {
+    fn new() -> Option<Self> {
+        let path = std::env::temp_dir().join(format!("cofox-{}.relations", std::process::id()));
+        let file = File::create(&path).ok()?;
+        Some(Self {
+            path,
+            writer: Some(BufWriter::with_capacity(1 << 20, file)),
+        })
+    }
+}
+
+impl Spill for FileSpill {
+    fn write(&mut self, words: &[u32]) -> bool {
+        let Some(writer) = &mut self.writer else {
+            return false;
+        };
+        let mut bytes = Vec::with_capacity(4 * (words.len() + 1));
+        bytes.extend_from_slice(&(words.len() as u32).to_le_bytes());
+        bytes.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        if writer.write_all(&bytes).is_ok() {
+            return true;
+        }
+        self.writer = None;
+        false
+    }
+
+    fn read(&mut self, f: &mut dyn FnMut(&[u32])) {
+        let fail = |e: std::io::Error| -> ! {
+            panic!(
+                "cofox: can't read back the relations from {}: {e}",
+                self.path.display()
+            )
+        };
+        if let Some(mut writer) = self.writer.take() {
+            writer.flush().unwrap_or_else(|e| fail(e));
+        }
+        let mut reader =
+            BufReader::with_capacity(1 << 20, File::open(&self.path).unwrap_or_else(|e| fail(e)));
+        let mut words = Vec::new();
+        let mut word = [0u8; 4];
+        loop {
+            match reader.read_exact(&mut word) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => fail(e),
+            }
+            let len = u32::from_le_bytes(word) as usize;
+            let mut bytes = vec![0u8; 4 * len];
+            reader.read_exact(&mut bytes).unwrap_or_else(|e| fail(e));
+            words.clear();
+            words.extend(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&b| u32::from_le_bytes(b)),
+            );
+            f(&words);
+        }
+    }
+}
+
+impl Drop for FileSpill {
+    fn drop(&mut self) {
+        self.writer = None;
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Sieves the special-q in `[lo, hi)` for `n`, saving the relations to

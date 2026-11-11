@@ -239,6 +239,17 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         self.dependencies_with(&Serial)
     }
 
+    /// [`Relations::dependencies_with`], keeping the relations in `spill`
+    /// rather than in memory while the matrix is filtered and solved. At
+    /// RSA-140 they take about 4 GB, a third of the peak.
+    pub fn dependencies_spilling(
+        &mut self,
+        par: &impl Parallel,
+        spill: &mut impl Spill,
+    ) -> Dependencies {
+        self.solve(par, Some(spill))
+    }
+
     /// [`Relations::dependencies`], with block Lanczos's products split by
     /// `par`.
     ///
@@ -248,11 +259,13 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// characters are added to the filtered rows in place, and block
     /// Lanczos lets go of the rows once it has packed them.
     pub fn dependencies_with(&mut self, par: &impl Parallel) -> Dependencies {
+        self.solve(par, None::<&mut NoSpill>)
+    }
+
+    fn solve(&mut self, par: &impl Parallel, spill: Option<&mut impl Spill>) -> Dependencies {
         self.restore();
         let (kept, rows, cols) = self.release().into_pruned();
         let fb = &self.gnfs.fb;
-        let filter::Filtered { mut rows, sets } =
-            filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
         let pieces = split(kept.iter().map(|_| 1), par.threads());
         let chars: Vec<u64> = par
             .map(|i| {
@@ -262,6 +275,19 @@ impl<const LIMBS: usize> Relations<LIMBS> {
                     .collect::<Vec<_>>()
             })
             .concat();
+        // The pairs are only needed again for the square roots, so they
+        // can leave memory before filtering, the peak.
+        let spill = spill.and_then(|spill| {
+            let store = &self.store;
+            (0..store.len())
+                .all(|i| spill.write(store.words(i)))
+                .then_some(spill)
+        });
+        if spill.is_some() {
+            self.store = Store::new();
+        }
+        let filter::Filtered { mut rows, sets } =
+            filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
         for (row, set) in rows.iter_mut().zip(&sets) {
             let mask = set.iter().fold(0, |m, &i| m ^ chars[i as usize]);
             row.reserve_exact(mask.count_ones() as usize);
@@ -283,7 +309,13 @@ impl<const LIMBS: usize> Relations<LIMBS> {
                 }
             }
         }
-        Dependencies::new(&kept, &of_kept)
+        drop(sets);
+        let deps = Dependencies::new(&kept, &of_kept);
+        if let Some(spill) = spill {
+            drop((kept, of_kept));
+            spill.read(&mut |words| self.store.push_words(words));
+        }
+        deps
     }
 
     /// Takes the square roots for the dependency `dep`, returning a proper
@@ -306,6 +338,30 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         }
         sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &pairs, &rational, par)
     }
+}
+
+/// Somewhere other than memory to keep the relations, such as a file,
+/// while [`Relations::dependencies_spilling`] solves the matrix.
+pub trait Spill {
+    /// Keeps the next relation's words, returning false if it can't, in
+    /// which case the relations stay in memory.
+    fn write(&mut self, words: &[u32]) -> bool;
+
+    /// Calls `f` with each relation's words, in the order written. The
+    /// relations are lost if this can't, so it should panic rather than
+    /// return early.
+    fn read(&mut self, f: &mut dyn FnMut(&[u32]));
+}
+
+/// The relations stay in memory.
+struct NoSpill;
+
+impl Spill for NoSpill {
+    fn write(&mut self, _: &[u32]) -> bool {
+        false
+    }
+
+    fn read(&mut self, _: &mut dyn FnMut(&[u32])) {}
 }
 
 /// The dependencies among a [`Relations`]' relations, up to 64, as a
