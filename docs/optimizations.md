@@ -260,7 +260,30 @@ measured, and makes starting low cost more than it saves:
 
 The relations needed are `0.56·(π(2^lpb₀) + π(2^lpb₁))`, from the real
 RSA-120 run, which needed 12.2 million; the RSA-120 and RSA-130 rows
-were chosen with 0.66. The RSA-140 row has not had a real run.
+were chosen with 0.66.
+
+Real runs with these rows, on an M4 MacBook Air with 10 threads (4
+performance and 6 efficiency cores):
+
+| | RSA-120 | RSA-140 |
+|---|---|---|
+| Total | 2 h 03 min, with 3 min of polynomial search | 59.5 h, with the polynomial from the tuning (its search took 62 min while sharing the cores) |
+| Sieving | 1 h 51 min, special-q 4M to 8.5M | 54.7 h, special-q 30.6M to 75.7M |
+| Relations | 12.19M distinct of 13.48M | 39.2M distinct of 46.1M |
+| Relations needed | 0.56 of the large primes | 0.63 to 0.70: 35.7M was too few |
+| Filtering and matrix | 6.8 min | 4.7 h |
+| Square roots | 15 s a dependency; the first 8 failed, by chance | 90 s a dependency; the second split |
+| CPU time | 18.3 core-hours | 538 core-hours |
+| Peak resident memory | 8.0 GB (5.8 GB after 8b4c806) | 14.8 GB |
+
+RSA-140 took twice the model's 30 hours: it needed 13 to 24% more
+relations than the RSA-120 ratio predicted, its 10 threads sieved at
+about half the rate the one-thread slices implied, and the matrix took
+hours rather than minutes. A profile of the running sieve put 40% of
+the time in each special-q's prime setup and bucket fill, 37% in
+sieving and 23% in resieving, with cofactorization about 1%. The
+readiness check, after every 10% more relations, can also oversieve by
+up to a tenth near the end.
 
 The polynomial search's budget doubled every 20 bits, which took
 RSA-130's search 31 minutes on 10 threads; past RSA-110 it now doubles every 30,

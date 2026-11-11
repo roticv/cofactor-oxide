@@ -14,7 +14,8 @@ short, which is also the name of the command-line tool.
 > quadratic sieve splits what is left up to 120 digits. Both run on every
 > core, natively and in the browser. The number field sieve works end to
 > end in the CLI with `--gnfs`, where it factored RSA-100 in 29 minutes on
-> six threads (the quadratic sieve takes about 20 on ten), and in the
+> six threads (the quadratic sieve takes about 20 on ten), RSA-120 in 2
+> hours and RSA-140 in 59.5 hours on a ten-core M4 MacBook Air, and in the
 > browser, which uses it from about 105 digits.
 
 ## Goals
@@ -222,6 +223,9 @@ factored RSA-110 in 3 h 19 min on 6 threads against 4 h 56 min. The rows
 for 120 and 130 digits come from timing slices of special-q with each
 candidate and counting the duplicates a range of special-q gives:
 RSA-120 should take about 10 core-hours of sieving and RSA-130 about 37.
+Real runs took 2 h 03 min for RSA-120 and 59.5 h for RSA-140, which
+needed more relations than the model predicted and 14.8 GB of memory;
+[docs/optimizations.md](docs/optimizations.md) has the details.
 
 WebAssembly needs the `wasm32-unknown-unknown` target, which requires a
 rustup-managed toolchain (Homebrew's `rust` formula can't add targets), and a
