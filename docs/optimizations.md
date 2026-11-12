@@ -330,6 +330,8 @@ Tried and dropped:
   entry of the products took 0.62 ns rather than 0.45.
 - **4-bit tables for the 128-bit vector updates,** 8 KB rather than 64:
   faster alone, but a whole solve took 18 s rather than 14.
+- **128 vectors at a time in wasm, in `v128` registers:** about 1.6× slower
+  than 64 in Node at 30,000 to 200,000 columns (200,000: 33 s → 54 s).
 
 ### Square root
 
@@ -377,6 +379,7 @@ threads. Natively the arithmetic is about 3 times as fast.
 |---|---|
 | 32-bit limbs | See [arithmetic](#arithmetic) |
 | A second build for the wide-arithmetic proposal | `i64.mul_wide_u` lets wasm use 64-bit limbs. In headless Chrome: ECM on RSA-100 7.75 s → 2.78 s; GNFS sieving 6.99 s → 5.40 s; the quadratic sieve 2%. The worker checks support with a 34-byte module and falls back |
+| SIMD (`simd128`) in that build, which every browser with wide arithmetic has | The compiler vectorizes loops in the sieves. In Node, without wide arithmetic: the quadratic sieve on a 76-digit number 59–60 s → 49 s, GNFS sieving at 90 digits 2.52 → 2.36 s; ECM unchanged |
 | No by-column copy of the matrix | Saves memory; the round-robin order alone took `Bᵀw` from 27.5 to 21.4 ms a step |
 
 ## Ways of measuring that paid off

@@ -239,9 +239,10 @@ cargo build --release --target wasm32-unknown-unknown -p cofox-wasm
 wasm-bindgen --target web --out-dir web/pkg \
   target/wasm32-unknown-unknown/release/cofox_wasm.wasm
 
-# Optional: the build for browsers with wide arithmetic. Rust still warns
-# that the target feature is unstable.
-RUSTFLAGS="-C target-feature=+wide-arithmetic --cfg cofox_wide_arithmetic" \
+# Optional: the build for browsers with wide arithmetic, which also uses
+# SIMD, as all of them have it. Rust still warns that wide arithmetic is
+# unstable.
+RUSTFLAGS="-C target-feature=+wide-arithmetic,+simd128 --cfg cofox_wide_arithmetic" \
   cargo build --release --target wasm32-unknown-unknown -p cofox-wasm \
   --target-dir target/wide
 wasm-bindgen --target web --out-dir web/pkg-wide \

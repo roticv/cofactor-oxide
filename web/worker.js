@@ -17,7 +17,8 @@
 // Browsers with the wide-arithmetic proposal get a build that uses its
 // 64×64→128-bit multiply, i64.mul_wide_u, which this tiny module tests for:
 // (func (param i64 i64) (result i64 i64) local.get 0 local.get 1 i64.mul_wide_u)
-// That build is optional locally, so a missing one falls back to the other.
+// That build also uses SIMD, which every such browser has. It is optional
+// locally, so a missing one falls back to the other.
 const WIDE = new Uint8Array([
   0, 97, 115, 109, 1, 0, 0, 0, 1, 8, 1, 96, 2, 126, 126, 2, 126, 126, 3, 2, 1, 0,
   10, 10, 1, 8, 0, 32, 0, 32, 1, 252, 22, 11,

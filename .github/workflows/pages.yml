@@ -46,10 +46,11 @@ jobs:
             target/wasm32-unknown-unknown/release/cofox_wasm.wasm
 
       # A second build for browsers with the wide-arithmetic proposal, which
-      # web/worker.js loads when they support it.
+      # web/worker.js loads when they support it. Those browsers all have
+      # SIMD too, which the compiler uses to speed up the sieves.
       - name: Build with wide arithmetic
         env:
-          RUSTFLAGS: -C target-feature=+wide-arithmetic --cfg cofox_wide_arithmetic
+          RUSTFLAGS: -C target-feature=+wide-arithmetic,+simd128 --cfg cofox_wide_arithmetic
         run: |
           cargo build --release --locked --target wasm32-unknown-unknown -p cofox-wasm \
             --target-dir target/wide
