@@ -107,10 +107,6 @@ impl Matrix {
         self.rows.len()
     }
 
-    fn row(&self, r: usize) -> &[u32] {
-        self.rows.get(r)
-    }
-
     /// Removes rows with a column no other row has, until none are left.
     /// Returns which rows survive, how many there are, and each column's
     /// weight among them.
@@ -128,8 +124,7 @@ impl Matrix {
         let mut rows = self.len();
         loop {
             let before = rows;
-            for (r, alive) in alive.iter_mut().enumerate() {
-                let row = self.row(r);
+            for (alive, row) in alive.iter_mut().zip(self.rows.iter()) {
                 if *alive && row.iter().any(|&c| weight[c as usize] == 1) {
                     *alive = false;
                     rows -= 1;

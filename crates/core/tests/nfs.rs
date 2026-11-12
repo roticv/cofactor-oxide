@@ -467,8 +467,11 @@ fn gnfs_factors_with_relations_spilled() {
             break;
         }
     }
+    let relations = relations;
     let len = relations.len();
+    // A matrix is solved once, so each try takes a copy.
     for fail_after in [None, Some(len / 2)] {
+        let mut relations = relations.clone();
         let mut spill = VecSpill {
             fail_after,
             ..VecSpill::default()
@@ -797,4 +800,18 @@ fn gnfs_factors_with_special_q_past_32_bits() {
         .expect("no factor");
     println!("{f} in {:.2?}", t.elapsed());
     assert!(f == u("98936812917358800691") || f == u("11888570237800257629"));
+}
+
+#[test]
+#[should_panic(expected = "the matrix was solved")]
+fn relations_cannot_be_added_after_solving() {
+    // The store keeps no algebraic primes to rebuild the matrix from.
+    let n = u("1176217249472123917871099760550263221639");
+    let gnfs = cofox_core::nfs::Gnfs::new(&n, &Params::for_bits(n.bits())).unwrap();
+    let mut sieve = gnfs.sieve();
+    let mut relations = gnfs.relations();
+    let (q, r) = gnfs.special_qs(0)[0];
+    relations.add(sieve.special_q(q, r));
+    relations.dependencies();
+    relations.add(sieve.special_q(q, r));
 }

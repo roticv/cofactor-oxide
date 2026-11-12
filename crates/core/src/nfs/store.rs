@@ -11,9 +11,14 @@ use alloc::vec::Vec;
 use super::sieve::Relation;
 
 /// Relations, each as words: `a` and `b`, low word first; a word with the
-/// rational and algebraic prime counts, the sign, and whether the primes
-/// are wide; then the primes, a word each, or two, low first, if any of
-/// the relation's is 2^32 or more.
+/// rational prime count, the sign, and whether the primes are wide; then
+/// the rational primes, a word each, or two, low first, if any of the
+/// relation's is 2^32 or more.
+///
+/// The algebraic primes aren't kept: once the relation's row is in the
+/// matrix, only the square roots need the relation again, and they need
+/// only `(a, b)` and the rational primes. At RSA-140 the algebraic primes
+/// would have taken 2.5 GB, two thirds of the primes.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     records: Records,
@@ -37,19 +42,18 @@ impl Store {
         self.records.len()
     }
 
-    /// Adds `rel`, unless its prime counts don't fit, below 2^15.
+    /// Adds `rel`, unless its rational prime count doesn't fit, below
+    /// 2^15.
     pub fn push(&mut self, rel: &Relation) -> bool {
-        let (r, a) = (rel.rational.len(), rel.algebraic.len());
-        if r >= 1 << 15 || a >= 1 << 15 {
+        let r = rel.rational.len();
+        if r >= 1 << 15 {
             return false;
         }
-        let primes = rel.rational.iter().chain(&rel.algebraic);
+        let primes = rel.rational.iter();
         let wide = primes.clone().any(|&p| p >> 32 != 0);
         let (ua, b) = (rel.a as u64, rel.b);
-        let counts = r as u32
-            | (a as u32) << 15
-            | if wide { WIDE } else { 0 }
-            | if rel.negative { NEGATIVE } else { 0 };
+        let counts =
+            r as u32 | if wide { WIDE } else { 0 } | if rel.negative { NEGATIVE } else { 0 };
         self.words.clear();
         self.words.extend([
             ua as u32,
@@ -95,28 +99,6 @@ impl Store {
             .chunks(step)
             .map(|p| u64::from(p[0]) | p.get(1).map_or(0, |&h| u64::from(h) << 32))
     }
-
-    /// Relation `i`, unpacked.
-    pub fn get(&self, i: usize) -> Relation {
-        let w = self.words(i);
-        let (a, b) = self.ab(i);
-        let r = (w[4] & 0x7fff) as usize;
-        let primes: Vec<u64> = if w[4] & WIDE != 0 {
-            w[HEADER..]
-                .chunks(2)
-                .map(|p| u64::from(p[0]) | u64::from(p[1]) << 32)
-                .collect()
-        } else {
-            w[HEADER..].iter().map(|&p| p.into()).collect()
-        };
-        Relation {
-            a,
-            b,
-            negative: w[4] & NEGATIVE != 0,
-            rational: primes[..r].to_vec(),
-            algebraic: primes[r..].to_vec(),
-        }
-    }
 }
 
 /// Records of words, kept in chunks of a fixed size rather than one
@@ -126,9 +108,11 @@ impl Store {
 #[derive(Clone, Debug, Default)]
 pub struct Records {
     chunks: Vec<Vec<u32>>,
-    /// Where each record starts: its chunk, and its offset in the chunk,
-    /// each record within one chunk.
-    starts: Vec<Vec<(u32, u32)>>,
+    /// Where each record starts in its chunk, each record within one.
+    starts: Vec<Vec<u32>>,
+    /// The index of each chunk's first record, which with the starts
+    /// takes 4 bytes a record rather than 8 for a chunk and an offset each.
+    firsts: Vec<usize>,
     len: usize,
 }
 
@@ -146,34 +130,50 @@ impl Records {
     pub fn push(&mut self, record: &[u32]) {
         match self.chunks.last() {
             Some(c) if c.len() + record.len() <= c.capacity() => {}
-            _ => self
-                .chunks
-                .push(Vec::with_capacity(CHUNK.max(record.len()))),
+            _ => {
+                self.chunks
+                    .push(Vec::with_capacity(CHUNK.max(record.len())));
+                self.firsts.push(self.len);
+            }
         }
-        let chunk = self.chunks.len() - 1;
-        let words = &mut self.chunks[chunk];
+        let words = self.chunks.last_mut().expect("just pushed");
         if self.len.is_multiple_of(STARTS) {
             self.starts.push(Vec::with_capacity(STARTS));
         }
         let starts = self.starts.last_mut().expect("just pushed");
-        starts.push((chunk as u32, words.len() as u32));
+        starts.push(words.len() as u32);
         words.extend_from_slice(record);
         self.len += 1;
     }
 
-    fn start(&self, i: usize) -> (usize, usize) {
-        let (c, o) = self.starts[i / STARTS][i % STARTS];
-        (c as usize, o as usize)
+    fn offset(&self, i: usize) -> usize {
+        self.starts[i / STARTS][i % STARTS] as usize
     }
 
     /// Record `i`.
     pub fn get(&self, i: usize) -> &[u32] {
-        let (c, o) = self.start(i);
-        let end = match (i + 1 < self.len).then(|| self.start(i + 1)) {
-            Some((next, e)) if next == c => e,
-            _ => self.chunks[c].len(),
+        let c = self.firsts.partition_point(|&f| f <= i) - 1;
+        let end = if i + 1 < self.len && self.firsts.get(c + 1) != Some(&(i + 1)) {
+            self.offset(i + 1)
+        } else {
+            self.chunks[c].len()
         };
-        &self.chunks[c][o..end]
+        &self.chunks[c][self.offset(i)..end]
+    }
+
+    /// Every record, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &[u32]> {
+        self.chunks.iter().enumerate().flat_map(move |(c, chunk)| {
+            let next = self.firsts.get(c + 1).copied().unwrap_or(self.len);
+            (self.firsts[c]..next).map(move |i| {
+                let end = if i + 1 < next {
+                    self.offset(i + 1)
+                } else {
+                    chunk.len()
+                };
+                &chunk[self.offset(i)..end]
+            })
+        })
     }
 
     /// Every record's words, in order.
@@ -188,22 +188,19 @@ impl Records {
         let Self {
             chunks,
             starts,
+            firsts,
             len,
         } = self;
-        let start = |i: usize| {
-            let (c, o) = starts[i / STARTS][i % STARTS];
-            (c as usize, o as usize)
-        };
-        let mut i = 0;
+        let offset = |i: usize| starts[i / STARTS][i % STARTS] as usize;
         for (c, chunk) in chunks.into_iter().enumerate() {
-            while i < len && start(i).0 == c {
-                let o = start(i).1;
-                let end = match (i + 1 < len).then(|| start(i + 1)) {
-                    Some((next, e)) if next == c => e,
-                    _ => chunk.len(),
+            let next = firsts.get(c + 1).copied().unwrap_or(len);
+            for i in firsts[c]..next {
+                let end = if i + 1 < next {
+                    offset(i + 1)
+                } else {
+                    chunk.len()
                 };
-                f(i, &chunk[o..end]);
-                i += 1;
+                f(i, &chunk[offset(i)..end]);
             }
         }
     }
@@ -220,9 +217,12 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// Records `(a, b)`, returning whether it is new.
+    /// Records `(a, b)`, returning whether it is new. The table grows
+    /// when three quarters full, where probes stay short: at RSA-140's 39.2
+    /// million pairs that is 64 million slots, 0.5 GB, rather than the 128
+    /// million of growing at half.
     pub fn insert(&mut self, a: i64, b: u64) -> bool {
-        if 2 * (self.len + 1) > self.slots.len() {
+        if 4 * (self.len + 1) > 3 * self.slots.len() {
             self.grow();
         }
         let key = fingerprint(a, b);
@@ -268,4 +268,50 @@ fn fingerprint(a: i64, b: u64) -> u64 {
         x ^ (x >> 31)
     };
     mix(mix(a as u64) ^ b.rotate_left(32)).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Records of varied lengths over several chunks, with one longer
+    /// than a chunk, read back by index, in order, and drained.
+    #[test]
+    fn records_across_chunks() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut lens: Vec<usize> = (0..400_000).map(|_| (next() % 60) as usize).collect();
+        lens[200_000] = CHUNK + 5;
+        let record =
+            |i: usize, len: usize| -> Vec<u32> { (0..len).map(|k| (i * 7 + k) as u32).collect() };
+        let mut records = Records::default();
+        for (i, &len) in lens.iter().enumerate() {
+            records.push(&record(i, len));
+        }
+        assert_eq!(records.len(), lens.len());
+        assert!(records.chunks.len() > 3);
+        for i in (0..lens.len())
+            .step_by(997)
+            .chain([199_999, 200_000, 200_001, lens.len() - 1])
+        {
+            assert_eq!(records.get(i), record(i, lens[i]), "record {i}");
+        }
+        assert!(
+            records
+                .iter()
+                .enumerate()
+                .all(|(i, r)| r == record(i, lens[i]))
+        );
+        let mut seen = 0;
+        records.drain(|i, r| {
+            assert_eq!((i, r), (seen, &record(i, lens[i])[..]));
+            seen += 1;
+        });
+        assert_eq!(seen, lens.len());
+    }
 }

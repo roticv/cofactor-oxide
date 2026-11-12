@@ -378,10 +378,8 @@ fn gnfs_parallel(
 }
 
 /// A temporary file the relations wait in while the matrix is solved,
-/// freeing their memory for filtering and block Lanczos: about 4 GB of
-/// RSA-140's 14.8 GB peak, which with other programs running pushed the
-/// matrix into compressed memory and stretched it from about an hour to
-/// almost five.
+/// freeing their memory for filtering and block Lanczos: about 2 GB at
+/// RSA-140.
 struct FileSpill {
     path: PathBuf,
     writer: Option<BufWriter<File>>,

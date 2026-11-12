@@ -158,7 +158,7 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
             next_check: self.fb.rational.len() + self.fb.algebraic.len(),
             last_check: None,
             ready: false,
-            released: false,
+            solved: false,
         }
     }
 }
@@ -175,10 +175,13 @@ pub struct Relations<const LIMBS: usize> {
     /// The relations and surplus at the last check that left any rows.
     last_check: Option<(usize, isize)>,
     ready: bool,
-    /// Whether `seen` and `matrix` were let go of to solve the matrix,
-    /// to be rebuilt from `store` if relations are added after all.
-    released: bool,
+    /// Whether `seen` and `matrix` were let go of to solve the matrix.
+    /// The store has no algebraic primes to rebuild them from, so no
+    /// relations can be added after.
+    solved: bool,
 }
+
+const SOLVED: &str = "the matrix was solved: relations can't be added or checked after";
 
 impl<const LIMBS: usize> Relations<LIMBS> {
     /// The polynomials the relations are for.
@@ -187,8 +190,12 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     }
 
     /// Adds `relations`, skipping any already found.
+    ///
+    /// # Panics
+    ///
+    /// If the matrix was solved.
     pub fn add(&mut self, relations: impl IntoIterator<Item = Relation>) {
-        self.restore();
+        assert!(!self.solved, "{SOLVED}");
         for rel in relations {
             if self.seen.insert(rel.a, rel.b) && self.store.push(&rel) {
                 self.matrix.push(&self.gnfs.fb, &rel);
@@ -247,8 +254,12 @@ impl<const LIMBS: usize> Relations<LIMBS> {
 
     /// How many more relations than needed are left after pruning:
     /// negative while too few.
+    ///
+    /// # Panics
+    ///
+    /// If the matrix was solved.
     pub fn surplus(&mut self) -> isize {
-        self.restore();
+        assert!(!self.solved, "{SOLVED}");
         self.matrix.surplus(CHARACTERS + POST_ROWS, EXTRA)
     }
 
@@ -256,32 +267,24 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// millions of relations take as much memory as filtering needs, for
     /// the browser's 4 GB.
     fn release(&mut self) -> Matrix {
+        assert!(!self.solved, "the matrix can only be solved once");
         self.seen = Seen::default();
-        self.released = true;
+        self.solved = true;
         core::mem::replace(&mut self.matrix, Matrix::new(&self.gnfs.fb))
     }
 
-    /// Rebuilds what [`Relations::release`] let go of.
-    fn restore(&mut self) {
-        if !self.released {
-            return;
-        }
-        self.released = false;
-        for i in 0..self.store.len() {
-            let rel = self.store.get(i);
-            self.seen.insert(rel.a, rel.b);
-            self.matrix.push(&self.gnfs.fb, &rel);
-        }
-    }
-
     /// The dependencies among the relations.
+    ///
+    /// # Panics
+    ///
+    /// If called a second time: solving takes the matrix.
     pub fn dependencies(&mut self) -> Dependencies {
         self.dependencies_with(&Serial)
     }
 
     /// [`Relations::dependencies_with`], keeping the relations in `spill`
     /// rather than in memory while the matrix is filtered and solved. At
-    /// RSA-140 they take about 4 GB, a third of the peak.
+    /// RSA-140 they take about 2 GB.
     pub fn dependencies_spilling(
         &mut self,
         par: &impl Parallel,
@@ -303,7 +306,6 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     }
 
     fn solve(&mut self, par: &impl Parallel, spill: Option<&mut impl Spill>) -> Dependencies {
-        self.restore();
         let (kept, rows, cols) = self.release().into_pruned();
         let fb = &self.gnfs.fb;
         let pieces = split(kept.iter().map(|_| 1), par.threads());
