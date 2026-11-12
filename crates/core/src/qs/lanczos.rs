@@ -2,8 +2,8 @@
 //!
 //! The relations are the columns of a sparse matrix `B`, one row per prime,
 //! and a dependency is a vector `x` with `Bx = 0`. Block Lanczos works with
-//! the symmetric `A = BᵀB` and 64 vectors at a time, packed one bit each
-//! into the `u64` words of a *block vector* (one word per relation). From
+//! the symmetric `A = BᵀB` and 64 or 128 vectors at a time, packed one bit
+//! each into the [`Word`]s of a *block vector* (one word per relation). From
 //! `V₀ = AY` for a random `Y`, it builds blocks `V₀, V₁, …` that are
 //! `A`-orthogonal to each other, each step needing only the last three, and
 //! accumulates the `X` with `AX = AY`. Then `A(X − Y) = 0`, which, with the
@@ -28,50 +28,173 @@ const BLOCK: usize = 2048;
 /// piece left as they finish, so that faster cores do more of them.
 const PIECES_PER_THREAD: usize = 8;
 
-/// A 64×64 matrix over GF(2), one row per word.
-type Small = [u64; 64];
-
-const IDENTITY: Small = {
-    let mut m = [0; 64];
-    let mut i = 0;
-    while i < 64 {
-        m[i] = 1 << i;
-        i += 1;
-    }
-    m
-};
-
-/// `xy`.
-fn mul(x: &Small, y: &Small) -> Small {
-    let mut out = [0; 64];
-    for (o, &row) in out.iter_mut().zip(x) {
-        let mut bits = row;
-        while bits != 0 {
-            *o ^= y[bits.trailing_zeros() as usize];
-            bits &= bits - 1;
-        }
-    }
-    out
+/// A block of vectors' bits at one index: one bit per vector.
+pub(crate) trait Word:
+    Copy + Send + Sync + Eq + core::ops::BitXor<Output = Self> + core::ops::BitAnd<Output = Self>
+{
+    const BITS: usize;
+    const ZERO: Self;
+    const ONES: Self;
+    /// Bit `i` alone.
+    fn unit(i: usize) -> Self;
+    fn bit(self, i: usize) -> bool;
+    /// Byte `b`, counting from the low end.
+    fn byte(self, b: usize) -> usize;
+    fn count_ones(self) -> u32;
+    fn trailing_zeros(self) -> u32;
+    /// A word from 64-bit pieces drawn from `next`.
+    fn draw(next: impl FnMut() -> u64) -> Self;
 }
 
-fn add(x: &Small, y: &Small) -> Small {
-    core::array::from_fn(|i| x[i] ^ y[i])
+impl Word for u64 {
+    const BITS: usize = 64;
+    const ZERO: Self = 0;
+    const ONES: Self = u64::MAX;
+    fn unit(i: usize) -> Self {
+        1 << i
+    }
+    fn bit(self, i: usize) -> bool {
+        self >> i & 1 == 1
+    }
+    fn byte(self, b: usize) -> usize {
+        (self >> (8 * b)) as usize & 0xff
+    }
+    fn count_ones(self) -> u32 {
+        u64::count_ones(self)
+    }
+    fn trailing_zeros(self) -> u32 {
+        u64::trailing_zeros(self)
+    }
+    fn draw(mut next: impl FnMut() -> u64) -> Self {
+        next()
+    }
+}
+
+/// 128 bits in a SIMD register, where a xor or an and is one instruction
+/// rather than the two it is on a `u128`. In the sparse products, an entry
+/// took 0.45 ns with these on an M4, as with `u64`, but 0.62 ns with `u128`.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub(crate) struct Wide(simd::V);
+
+#[cfg(target_arch = "aarch64")]
+mod simd {
+    pub(super) use core::arch::aarch64::{uint64x2_t as V, vandq_u64 as and, veorq_u64 as xor};
+}
+
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    pub(super) use core::arch::x86_64::{__m128i as V, _mm_and_si128 as and, _mm_xor_si128 as xor};
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl Wide {
+    const fn new(x: u128) -> Self {
+        // SAFETY: both are 16 bytes of plain bits.
+        Self(unsafe { core::mem::transmute::<u128, simd::V>(x) })
+    }
+
+    fn get(self) -> u128 {
+        // SAFETY: as in `new`.
+        unsafe { core::mem::transmute::<simd::V, u128>(self.0) }
+    }
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl core::ops::BitXor for Wide {
+    type Output = Self;
+    fn bitxor(self, other: Self) -> Self {
+        // SAFETY: the instruction is in the target's baseline, NEON or SSE2.
+        Self(unsafe { simd::xor(self.0, other.0) })
+    }
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl core::ops::BitAnd for Wide {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        // SAFETY: the instruction is in the target's baseline, NEON or SSE2.
+        Self(unsafe { simd::and(self.0, other.0) })
+    }
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl PartialEq for Wide {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl Eq for Wide {}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl Word for Wide {
+    const BITS: usize = 128;
+    const ZERO: Self = Self::new(0);
+    const ONES: Self = Self::new(u128::MAX);
+    fn unit(i: usize) -> Self {
+        Self::new(1 << i)
+    }
+    fn bit(self, i: usize) -> bool {
+        self.get() >> i & 1 == 1
+    }
+    fn byte(self, b: usize) -> usize {
+        (self.get() >> (8 * b)) as usize & 0xff
+    }
+    fn count_ones(self) -> u32 {
+        self.get().count_ones()
+    }
+    fn trailing_zeros(self) -> u32 {
+        self.get().trailing_zeros()
+    }
+    fn draw(mut next: impl FnMut() -> u64) -> Self {
+        Self::new(u128::from(next()) | u128::from(next()) << 64)
+    }
+}
+
+/// A `W::BITS`-square matrix over GF(2), one row per word.
+type Small<W> = Vec<W>;
+
+fn identity<W: Word>() -> Small<W> {
+    (0..W::BITS).map(W::unit).collect()
+}
+
+/// `xy`.
+fn mul<W: Word>(x: &[W], y: &[W]) -> Small<W> {
+    x.iter()
+        .map(|&row| {
+            let (mut bits, mut o) = (row, W::ZERO);
+            while bits != W::ZERO {
+                let i = bits.trailing_zeros() as usize;
+                o = o ^ y[i];
+                bits = bits ^ W::unit(i);
+            }
+            o
+        })
+        .collect()
+}
+
+fn add<W: Word>(x: &[W], y: &[W]) -> Small<W> {
+    x.iter().zip(y).map(|(&a, &b)| a ^ b).collect()
 }
 
 /// `x` with only the columns in `mask` kept: `x·SSᵀ`.
-fn keep_cols(x: &Small, mask: u64) -> Small {
-    x.map(|row| row & mask)
+fn keep_cols<W: Word>(x: &[W], mask: W) -> Small<W> {
+    x.iter().map(|&row| row & mask).collect()
 }
 
-/// Tables for multiplying many words by `x`: entry `[b][v]` is the sum of
-/// the rows of `x` picked by the bits of byte value `v` at byte `b`.
-fn tables(x: &Small) -> Vec<[u64; 256]> {
-    (0..8)
-        .map(|b| {
-            let mut t = [0u64; 256];
+/// Tables for multiplying many words by `x`, of `x.len()` rows: entry
+/// `[b][v]` is the sum of the rows of `x` picked by the bits of byte value
+/// `v` at byte `b`.
+fn tables<W: Word>(x: &[W]) -> Vec<[W; 256]> {
+    x.chunks(8)
+        .map(|rows| {
+            let mut t = [W::ZERO; 256];
             for v in 1..256 {
                 let low = v & (v - 1);
-                t[v] = t[low] ^ x[8 * b + (v ^ low).trailing_zeros() as usize];
+                t[v] = t[low] ^ rows[(v ^ low).trailing_zeros() as usize];
             }
             t
         })
@@ -79,28 +202,30 @@ fn tables(x: &Small) -> Vec<[u64; 256]> {
 }
 
 /// The word `w` times the matrix of `tables`.
-fn mul_word(t: &[[u64; 256]], w: u64) -> u64 {
+fn mul_word<A: Word, W: Word>(t: &[[W; 256]], w: A) -> W {
     t.iter()
         .enumerate()
-        .fold(0, |acc, (b, t)| acc ^ t[(w >> (8 * b)) as usize & 0xff])
+        .fold(W::ZERO, |acc, (b, t)| acc ^ t[w.byte(b)])
 }
 
-/// `vᵀw` for block vectors `v` and `w`.
-fn inner(v: &[u64], w: &[u64]) -> Small {
+/// `vᵀw` for block vectors `v` and `w`, a row of `w`'s words for each bit
+/// of `v`'s.
+fn inner<A: Word, W: Word>(v: &[A], w: &[W]) -> Small<W> {
     // Sum w into a bucket per byte value at each byte position of v, then
     // read off each bit's row as the sum of the buckets with that bit.
-    let mut buckets = vec![[0u64; 256]; 8];
+    let mut buckets = vec![[W::ZERO; 256]; A::BITS / 8];
     for (&a, &b) in v.iter().zip(w) {
         for (i, bucket) in buckets.iter_mut().enumerate() {
-            bucket[(a >> (8 * i)) as usize & 0xff] ^= b;
+            let k = a.byte(i);
+            bucket[k] = bucket[k] ^ b;
         }
     }
-    let mut out = [0; 64];
+    let mut out = vec![W::ZERO; A::BITS];
     for (i, bucket) in buckets.iter().enumerate() {
         for bit in 0..8 {
             out[8 * i + bit] = (0..256)
                 .filter(|v| v >> bit & 1 == 1)
-                .fold(0, |acc, v| acc ^ bucket[v]);
+                .fold(W::ZERO, |acc, v| acc ^ bucket[v]);
         }
     }
     out
@@ -251,20 +376,24 @@ impl<'a, P: Parallel> Sparse<'a, P> {
 
     /// `f` over the pieces `bounds` of `0..n`, each giving the words of
     /// its range, joined.
-    fn gather(&self, bounds: &[usize], f: impl Fn(Range<usize>) -> Vec<u64> + Sync) -> Vec<u64> {
+    fn gather<W: Word>(
+        &self,
+        bounds: &[usize],
+        f: impl Fn(Range<usize>) -> Vec<W> + Sync,
+    ) -> Vec<W> {
         self.pieces(bounds, f).concat()
     }
 
     /// `f` at each word of a block vector, split across the threads.
-    fn each(&self, f: impl Fn(usize) -> u64 + Sync) -> Vec<u64> {
+    fn each<W: Word>(&self, f: impl Fn(usize) -> W + Sync) -> Vec<W> {
         self.gather(&self.vec_pieces, |range| range.map(&f).collect())
     }
 
     /// `vᵀw`, split across the threads.
-    fn inner(&self, v: &[u64], w: &[u64]) -> Small {
+    fn inner<A: Word, W: Word>(&self, v: &[A], w: &[W]) -> Small<W> {
         self.pieces(&self.vec_pieces, |r| inner(&v[r.clone()], &w[r]))
             .iter()
-            .fold([0; 64], |acc, x| add(&acc, x))
+            .fold(vec![W::ZERO; A::BITS], |acc, x| add(&acc, x))
     }
 
     /// The entries of the block at block row `i`, block column `j`.
@@ -275,14 +404,15 @@ impl<'a, P: Parallel> Sparse<'a, P> {
 
     /// `Bv`, with one word per row of `B`: each block row's words from its
     /// blocks in turn.
-    fn mul(&self, v: &[u64]) -> Vec<u64> {
+    fn mul<W: Word>(&self, v: &[W]) -> Vec<W> {
         let col_blocks = self.cols.div_ceil(BLOCK);
         let mut out = map_dynamic(self.par, self.rows.div_ceil(BLOCK), |i| {
-            let mut out = vec![0u64; BLOCK.min(self.rows - i * BLOCK)];
+            let mut out = vec![W::ZERO; BLOCK.min(self.rows - i * BLOCK)];
             for j in 0..col_blocks {
                 let v = &v[j * BLOCK..];
                 for &e in self.block(i, j) {
-                    out[(e >> 16) as usize] ^= v[(e & 0xffff) as usize];
+                    let o = &mut out[(e >> 16) as usize];
+                    *o = *o ^ v[(e & 0xffff) as usize];
                 }
             }
             out
@@ -296,7 +426,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
     }
 
     /// `Bv` with the post rows too: the whole of `B`.
-    fn mul_full(&self, v: &[u64]) -> Vec<u64> {
+    fn mul_full<W: Word>(&self, v: &[W]) -> Vec<W> {
         let mut out = self.mul(v);
         for (&r, w) in self.post.iter().zip(self.inner(&self.post_masks, v)) {
             out[r] = w;
@@ -305,8 +435,8 @@ impl<'a, P: Parallel> Sparse<'a, P> {
     }
 
     /// `Bᵀw`, with one word per column of `B`.
-    fn mul_t(&self, w: &[u64]) -> Vec<u64> {
-        let mut rows = [0u64; 64];
+    fn mul_t<W: Word>(&self, w: &[W]) -> Vec<W> {
+        let mut rows = [W::ZERO; 64];
         for (i, &r) in self.dense.iter().enumerate() {
             rows[i] = w[r];
         }
@@ -314,7 +444,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
         let row_blocks = self.rows.div_ceil(BLOCK);
         map_dynamic(self.par, self.cols.div_ceil(BLOCK), |j| {
             let range = j * BLOCK..self.cols.min((j + 1) * BLOCK);
-            let mut out: Vec<u64> = self.masks[range].iter().map(|&m| mul_word(&t, m)).collect();
+            let mut out: Vec<W> = self.masks[range].iter().map(|&m| mul_word(&t, m)).collect();
             for i in 0..row_blocks {
                 let w = &w[i * BLOCK..];
                 let block = match &self.by_column {
@@ -324,7 +454,8 @@ impl<'a, P: Parallel> Sparse<'a, P> {
                     None => self.block(i, j),
                 };
                 for &e in block {
-                    out[(e & 0xffff) as usize] ^= w[(e >> 16) as usize];
+                    let o = &mut out[(e & 0xffff) as usize];
+                    *o = *o ^ w[(e >> 16) as usize];
                 }
             }
             out
@@ -333,7 +464,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
     }
 
     /// `Av = BᵀBv`.
-    fn mul_a(&self, v: &[u64]) -> Vec<u64> {
+    fn mul_a<W: Word>(&self, v: &[W]) -> Vec<W> {
         self.mul_t(&self.mul(v))
     }
 }
@@ -345,54 +476,61 @@ impl<'a, P: Parallel> Sparse<'a, P> {
 /// invertible, as large as possible, preferring columns left out last
 /// time: every column has to be used within two steps for the blocks to
 /// stay orthogonal.
-fn choose(t: &Small, prev: u64) -> (Small, u64) {
-    let mut m: [u128; 64] = core::array::from_fn(|i| u128::from(t[i]) | 1 << (64 + i));
-    let mut order: Vec<usize> = (0..64).filter(|&i| prev >> i & 1 == 0).collect();
-    order.extend((0..64).filter(|&i| prev >> i & 1 == 1));
-    let mut s = 0u64;
-    for j in 0..64 {
+fn choose<W: Word>(t: &[W], prev: W) -> (Small<W>, W) {
+    let n = W::BITS;
+    let mut m: Vec<(W, W)> = (0..n).map(|i| (t[i], W::unit(i))).collect();
+    let xor = |a: (W, W), b: (W, W)| (a.0 ^ b.0, a.1 ^ b.1);
+    let mut order: Vec<usize> = (0..n).filter(|&i| !prev.bit(i)).collect();
+    order.extend((0..n).filter(|&i| prev.bit(i)));
+    let mut s = W::ZERO;
+    for j in 0..n {
         let c = order[j];
-        if let Some(k) = (j..64).find(|&k| m[order[k]] >> c & 1 == 1) {
+        if let Some(k) = (j..n).find(|&k| m[order[k]].0.bit(c)) {
             m.swap(order[k], c);
         }
-        if m[c] >> c & 1 == 1 {
-            s |= 1 << c;
-            for r in 0..64 {
-                if r != c && m[r] >> c & 1 == 1 {
-                    m[r] ^= m[c];
+        if m[c].0.bit(c) {
+            s = s ^ W::unit(c);
+            for r in 0..n {
+                if r != c && m[r].0.bit(c) {
+                    m[r] = xor(m[r], m[c]);
                 }
             }
         } else {
-            let k = (j..64)
-                .find(|&k| m[order[k]] >> (64 + c) & 1 == 1)
+            let k = (j..n)
+                .find(|&k| m[order[k]].1.bit(c))
                 .expect("the right half stays invertible");
             m.swap(order[k], c);
-            for r in 0..64 {
-                if r != c && m[r] >> (64 + c) & 1 == 1 {
-                    m[r] ^= m[c];
+            for r in 0..n {
+                if r != c && m[r].1.bit(c) {
+                    m[r] = xor(m[r], m[c]);
                 }
             }
-            m[c] = 0;
+            m[c] = (W::ZERO, W::ZERO);
         }
     }
-    let winv: Small = core::array::from_fn(|r| {
-        if s >> r & 1 == 1 {
-            (m[r] >> 64) as u64 & s
-        } else {
-            0
-        }
-    });
+    let winv: Small<W> = (0..n)
+        .map(|r| if s.bit(r) { m[r].1 & s } else { W::ZERO })
+        .collect();
     debug_assert!(
         {
             let wt = mul(&winv, t);
-            (0..64)
-                .filter(|&r| s >> r & 1 == 1)
-                .all(|r| wt[r] & s == 1 << r)
+            (0..n)
+                .filter(|&r| s.bit(r))
+                .all(|r| wt[r] & s == W::unit(r))
         },
         "W⁻¹ isn't the inverse of T on S"
     );
     (winv, s)
 }
+
+/// Matrices with at least this many columns are solved 128 vectors at a
+/// time, where [`Wide`] is available, rather than 64. That halves the
+/// steps, and a step's sparse products cost about the same, but its
+/// vector work twice as much. Run on one thread, a 100,000-column
+/// matrix's solve took 5.6 s rather than 6.8, and 150,000 columns' 13.6 s
+/// rather than 18.1; at 10,000 columns 128 was 10% slower.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+const WIDE_COLS: usize = 20_000;
 
 /// Finds up to 64 vectors `x ≠ 0` with `Bx = 0`, for `B` with `rows` rows
 /// and the given columns, using `par` for the matrix and vector products,
@@ -419,41 +557,54 @@ pub fn null_space(
     let b = Sparse::new(&cols, rows, post, !cfg!(target_arch = "wasm32"), par);
     drop(cols);
     (0..tries)
-        .find_map(|seed| attempt(&b, rows, seed))
+        .find_map(|seed| {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            if n >= WIDE_COLS {
+                return attempt::<Wide, _>(&b, rows, seed);
+            }
+            attempt::<u64, _>(&b, rows, seed)
+        })
         .unwrap_or_else(|| vec![0; n])
 }
 
-/// One run of block Lanczos on `b` from the random start `seed`: for each
-/// column, a word whose bit `q` says whether it is in the `q`th vector
-/// found, or `None` if this seed fails or finds nothing.
-fn attempt<P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec<u64>> {
+/// One run of block Lanczos on `b`, `W::BITS` vectors at a time, from the
+/// random start `seed`: for each column, a word whose bit `q` says whether
+/// it is in the `q`th vector found, or `None` if this seed fails or finds
+/// nothing.
+fn attempt<W: Word, P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec<u64>> {
     let n = b.cols;
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    let y: Vec<u64> = (0..n)
+    // xorshift*: the multiply makes successive draws nonlinear in each
+    // other over GF(2), else a wide word's halves would be one linear map
+    // of each other, and Y, so V, would have only 64 independent vectors.
+    let y: Vec<W> = (0..n)
         .map(|_| {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
+            W::draw(|| {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng.wrapping_mul(0x2545_F491_4F6C_DD1D)
+            })
         })
         .collect();
     let v0 = b.mul_a(&y);
 
     // V for this step and the two before, and the previous steps' W⁻¹,
     // VᵀAV, VᵀA²V and S.
+    let zero = || vec![W::ZERO; W::BITS];
     let mut v = v0.clone();
-    let (mut v1, mut v2) = (vec![0u64; n], vec![0u64; n]);
-    let (mut winv1, mut winv2) = ([0; 64], [0; 64]);
-    let (mut vav1, mut va2v1) = ([0; 64], [0; 64]);
-    let mut s1 = u64::MAX;
-    let mut x = vec![0u64; n];
-    // Each step uses about 63 of the 64 dimensions on average.
-    let max_steps = n / 60 + 20;
+    let (mut v1, mut v2) = (vec![W::ZERO; n], vec![W::ZERO; n]);
+    let (mut winv1, mut winv2) = (zero(), zero());
+    let (mut vav1, mut va2v1) = (zero(), zero());
+    let mut s1 = W::ONES;
+    let mut x = vec![W::ZERO; n];
+    // Each step uses all but about one of the dimensions on average.
+    let max_steps = n / (W::BITS - 4) + 20;
     let mut steps = 0;
     loop {
         let av = b.mul_a(&v);
         let vav = b.inner(&v, &av);
-        if vav == [0; 64] {
+        if vav.iter().all(|&w| w == W::ZERO) {
             break;
         }
         steps += 1;
@@ -462,7 +613,7 @@ fn attempt<P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec
         }
         let va2v = b.inner(&av, &av);
         let (winv, s) = choose(&vav, s1);
-        if s == 0 {
+        if s == W::ZERO {
             return None;
         }
         // X += V·W⁻¹·VᵀV₀.
@@ -471,10 +622,10 @@ fn attempt<P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec
 
         // V' = AV·SSᵀ + V·D + V₁·E + V₂·F, which makes V' A-orthogonal to
         // V, V₁ and V₂, and so to every earlier block.
-        let d = add(&IDENTITY, &mul(&winv, &add(&keep_cols(&va2v, s), &vav)));
+        let d = add(&identity(), &mul(&winv, &add(&keep_cols(&va2v, s), &vav)));
         let e = mul(&winv1, &keep_cols(&vav, s));
         let f = mul(
-            &mul(&winv2, &add(&IDENTITY, &mul(&vav1, &winv1))),
+            &mul(&winv2, &add(&identity(), &mul(&vav1, &winv1))),
             &keep_cols(&add(&keep_cols(&va2v1, s1), &vav1), s),
         );
         let (d, e, f) = (tables(&d), tables(&e), tables(&f));
@@ -488,35 +639,34 @@ fn attempt<P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec
         s1 = s;
     }
 
-    // A(X − Y) = 0 now, give or take the last V, and B maps the 128
-    // vectors of [X − Y | V] into a space of small dimension. Find the
-    // combinations that B maps to 0.
-    for (xi, yi) in x.iter_mut().zip(&y) {
-        *xi ^= yi;
+    // A(X − Y) = 0 now, give or take the last V, and B maps the vectors of
+    // [X − Y | V] into a space of small dimension. Find the combinations
+    // that B maps to 0.
+    for (xi, &yi) in x.iter_mut().zip(&y) {
+        *xi = *xi ^ yi;
     }
     let (bx, bv) = (b.mul_full(&x), b.mul_full(&v));
     let words = rows.div_ceil(64);
-    // Each of the 128 images as a bit string over the rows of B, reduced
+    // Each of the images as a bit string over the rows of B, reduced
     // against the earlier ones, with the combination it stands for.
-    let mut pivots: Vec<(usize, Vec<u64>, u128)> = Vec::new();
-    let mut combos: Vec<u128> = Vec::new();
-    for lane in 0..128 {
-        let (src, bit) = if lane < 64 {
-            (&bx, lane)
+    let mut pivots: Vec<(usize, Vec<u64>, (W, W))> = Vec::new();
+    let mut combos: Vec<(W, W)> = Vec::new();
+    for lane in 0..2 * W::BITS {
+        let (src, bit, mut combo) = if lane < W::BITS {
+            (&bx, lane, (W::unit(lane), W::ZERO))
         } else {
-            (&bv, lane - 64)
+            (&bv, lane - W::BITS, (W::ZERO, W::unit(lane - W::BITS)))
         };
         let mut image = vec![0u64; words];
         for (r, &w) in src.iter().enumerate() {
-            image[r / 64] |= (w >> bit & 1) << (r % 64);
+            image[r / 64] |= u64::from(w.bit(bit)) << (r % 64);
         }
-        let mut combo = 1u128 << lane;
         for (col, pivot, pcombo) in &pivots {
             if image[col / 64] >> (col % 64) & 1 == 1 {
                 for (a, b) in image.iter_mut().zip(pivot) {
                     *a ^= b;
                 }
-                combo ^= pcombo;
+                combo = (combo.0 ^ pcombo.0, combo.1 ^ pcombo.1);
             }
         }
         match image.iter().position(|&w| w != 0) {
@@ -534,9 +684,9 @@ fn attempt<P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec
         .iter()
         .zip(&v)
         .map(|(&xw, &vw)| {
-            let row = u128::from(xw) | u128::from(vw) << 64;
-            combos.iter().enumerate().fold(0, |acc, (q, &c)| {
-                acc | u64::from((row & c).count_ones() & 1) << q
+            combos.iter().enumerate().fold(0, |acc, (q, &(cx, cv))| {
+                let parity = ((xw & cx).count_ones() + (vw & cv).count_ones()) & 1;
+                acc | u64::from(parity) << q
             })
         })
         .collect();
@@ -585,6 +735,26 @@ mod tests {
             let b = Sparse::new(&cols, rows, 0, by_column, &Serial);
             assert_eq!(b.mul_full(&v), bv, "Bv, copy {by_column}");
             assert_eq!(b.mul_t(&w), btw, "Bᵀw, copy {by_column}");
+            // The same with 128-bit words, whose high halves are the low.
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            {
+                let wide = |x: &[u64]| -> Vec<Wide> {
+                    x.iter()
+                        .map(|&w| Wide::new(u128::from(w) * (1 | 1 << 64)))
+                        .collect()
+                };
+                let bits = |x: Vec<Wide>| -> Vec<u128> { x.iter().map(|w| w.get()).collect() };
+                assert_eq!(
+                    bits(b.mul_full(&wide(&v))),
+                    bits(wide(&bv)),
+                    "wide Bv, copy {by_column}"
+                );
+                assert_eq!(
+                    bits(b.mul_t(&wide(&w))),
+                    bits(wide(&btw)),
+                    "wide Bᵀw, copy {by_column}"
+                );
+            }
         }
     }
 }

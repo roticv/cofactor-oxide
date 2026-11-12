@@ -309,7 +309,8 @@ The merge target was swept on RSA-110's relations:
 
 ### Linear algebra
 
-Montgomery's block Lanczos, 64 vectors at a time, shared by both sieves.
+Montgomery's block Lanczos, 64 vectors at a time, or 128 natively for
+matrices of 20,000 columns or more, shared by both sieves.
 
 | Change | Effect |
 |---|---|
@@ -317,6 +318,7 @@ Montgomery's block Lanczos, 64 vectors at a time, shared by both sieves.
 | The 48 densest rows, quadratic characters among them, left out of the iterations | Satisfied in the final elimination instead |
 | `B` stored once in 2048 × 2048 blocks of 16-bit offset pairs | Both products run block by block, in L1. 90 digits: 24 s → 17 s on ten threads, half the memory |
 | Entries round-robin over each block's columns, and a by-column copy for `Bᵀw` | The small primes' rows put several entries in one column, and `Bᵀw` added them into one word in a chain, each waiting on the last. RSA-110: 27.5 → 18.4 ms a step; matrix step 931–963 s → 574 s. The copy is left out in wasm for memory |
+| 128 vectors at a time in a NEON or SSE2 register, from 20,000 columns | Half the steps. A step's products cost about the same, 8.4 rather than 7.9 ms at 150,000 columns, but its vector work twice as much. One thread: 100,000 columns 6.8 → 5.6 s, 150,000 18.1 → 13.6 s; 10,000 columns 10% slower. RSA-120 on ten threads, two runs each on a busy machine: 372 and 420 s → 328 and 383 s, about 12%; its block vectors no longer fit in L2 |
 
 Tried and dropped:
 
@@ -324,6 +326,10 @@ Tried and dropped:
   after 2 h 18 min.
 - **Summing each column in a register in `Bᵀw`,** and **stripes** of
   columns: no gain.
+- **128-bit words as `u128`:** the compiler splits each xor in two, and an
+  entry of the products took 0.62 ns rather than 0.45.
+- **4-bit tables for the 128-bit vector updates,** 8 KB rather than 64:
+  faster alone, but a whole solve took 18 s rather than 14.
 
 ### Square root
 
