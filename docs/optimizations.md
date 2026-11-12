@@ -360,6 +360,7 @@ Tried and dropped:
 | Relations packed in one vector of words, pairs seen as 64-bit fingerprints | 90 digits: relations in 526 MB instead of 977 MB |
 | Relations and matrix rows in fixed 16 MB chunks, pruning in passes, letting go of the duplicate check before filtering | RSA-110 fits the browser's 4 GB: 2.6 GB peak loading, 3.6 GB through the matrix and square roots |
 | Each linear-algebra stage takes the last one's data instead of copying it; dependencies kept as one word per relation; square roots read only `(a, b)` and the rational primes from the store | RSA-120 from its saved relations: live heap peak 4.49 → 2.99 GB, macOS peak footprint 6.48 → 4.43 GB, RSS 8.41 → 5.76 GB. Block Lanczos went from 4.10 to 2.13 GB and the dependencies from 4.49 to 1.46 GB; sieving takes about 50 MB a thread |
+| The command-line tool spills the relations to a temporary file once the quadratic characters are taken, before filtering, and reads them back for the square roots. Filtering frees dead rows as they go, rebuilds its column index after clique removal and whenever it grows to twice what it needs, and gives one-row sets no allocation | RSA-140 from its saved relations, live heap: filtering's peak 8.08 → 6.57 GB, with 4.9 GB of relations on disk. Loading, at 11.0 GB with the relations and matrix rows both held, is now the peak |
 
 ## The browser
 
