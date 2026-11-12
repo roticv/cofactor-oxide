@@ -145,12 +145,13 @@ impl Matrix {
         (alive, rows, weight)
     }
 
-    /// Whether, after pruning, at least `extra` more rows than columns are
-    /// left, counting `dense` columns that pruning never removes.
-    pub fn ready(&self, dense: usize, extra: usize) -> bool {
+    /// How many more rows than columns are left after pruning, beyond
+    /// `extra`, counting `dense` columns that pruning never removes:
+    /// negative while too few.
+    pub fn surplus(&self, dense: usize, extra: usize) -> isize {
         let (_, rows, weight) = self.prune();
         let cols = weight.iter().filter(|&&w| w > 0).count();
-        rows >= cols + dense + extra
+        rows as isize - (cols + dense + extra) as isize
     }
 
     /// The rows that survive pruning: their indices, the rows, with the

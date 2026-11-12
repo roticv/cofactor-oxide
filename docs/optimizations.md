@@ -270,20 +270,28 @@ performance and 6 efficiency cores):
 | Total | 2 h 03 min, with 3 min of polynomial search | 59.5 h, with the polynomial from the tuning (its search took 62 min while sharing the cores) |
 | Sieving | 1 h 51 min, special-q 4M to 8.5M | 54.7 h, special-q 30.6M to 75.7M |
 | Relations | 12.19M distinct of 13.48M | 39.2M distinct of 46.1M |
-| Relations needed | 0.56 of the large primes | 0.63 to 0.70: 35.7M was too few |
+| Relations needed | 0.56 of the large primes | 0.65: 36.0M, found by replaying the saved relations |
 | Filtering and matrix | 6.8 min | 4.7 h |
 | Square roots | 15 s a dependency; the first 8 failed, by chance | 90 s a dependency; the second split |
 | CPU time | 18.3 core-hours | 538 core-hours |
 | Peak resident memory | 8.0 GB (5.8 GB after 8b4c806) | 14.8 GB |
 
-RSA-140 took twice the model's 30 hours: it needed 13 to 24% more
-relations than the RSA-120 ratio predicted, its 10 threads sieved at
-about half the rate the one-thread slices implied, and the matrix took
-hours rather than minutes. A profile of the running sieve put 40% of
-the time in each special-q's prime setup and bucket fill, 37% in
-sieving and 23% in resieving, with cofactorization about 1%. The
-readiness check, after every 10% more relations, can also oversieve by
-up to a tenth near the end.
+RSA-140 took twice the model's 30 hours: it needed 16% more relations
+than the RSA-120 ratio predicted, its 10 threads sieved at about half
+the rate the one-thread slices implied, and the matrix took hours rather
+than minutes. A profile of the running sieve put 40% of the time in
+each special-q's prime setup and bucket fill, 37% in sieving and 23% in
+resieving, with cofactorization about 1%.
+
+It also sieved 9% more relations than it needed. The readiness check
+ran after every 10% more relations, and missed the point at 35.6M to
+pass at 39.2M. Replaying the saved relations showed the surplus of rows
+over columns after pruning climbing steadily once any rows survive,
+from −2.0M at 28.5M relations to 0 at 36.0M, and each check taking
+17 s while the sieving threads went on. The check now extrapolates
+from the last two surpluses to when the next should be, between 1% and
+10% more relations, which on that curve stops within 1% of the point:
+about 4 hours less sieving at RSA-140.
 
 The polynomial search's budget doubled every 20 bits, which took
 RSA-130's search 31 minutes on 10 threads; past RSA-110 it now doubles every 30,

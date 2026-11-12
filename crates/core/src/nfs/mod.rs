@@ -156,6 +156,7 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
             // Partial relations only start to combine once there are about
             // as many relations as ideals in the factor bases.
             next_check: self.fb.rational.len() + self.fb.algebraic.len(),
+            last_check: None,
             ready: false,
             released: false,
         }
@@ -171,6 +172,8 @@ pub struct Relations<const LIMBS: usize> {
     seen: Seen,
     matrix: Matrix,
     next_check: usize,
+    /// The relations and surplus at the last check that left any rows.
+    last_check: Option<(usize, isize)>,
     ready: bool,
     /// Whether `seen` and `matrix` were let go of to solve the matrix,
     /// to be rebuilt from `store` if relations are added after all.
@@ -201,15 +204,52 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         self.store.len() == 0
     }
 
-    /// Whether the matrix has more rows than columns after pruning. Only
-    /// checked every 10% more relations.
+    /// Whether the matrix has more rows than columns after pruning.
+    /// Checked every 10% more relations until pruning leaves any rows, then
+    /// when the last two checks' surpluses say it will be, but never more
+    /// often than every 1%.
+    ///
+    /// RSA-140 was ready at 36.0 million relations, but checks every 10%
+    /// missed it at 35.6 million and went on sieving to 39.2 million,
+    /// about 4 h more. The surplus climbs steadily once rows survive, from
+    /// −2.0 million at 28.5 million relations; on that curve this stops
+    /// within 1% of the point. A check took 17 s there, while the sieving
+    /// threads went on.
     pub fn is_ready(&mut self) -> bool {
         if !self.ready && self.len() >= self.next_check {
-            self.restore();
-            self.next_check = self.len() + self.len() / 10;
-            self.ready = self.matrix.ready(CHARACTERS + POST_ROWS, EXTRA);
+            let (len, surplus) = (self.len(), self.surplus());
+            self.ready = surplus >= 0;
+            self.next_check = len + self.check_step(len, surplus);
         }
         self.ready
+    }
+
+    /// How many more relations to wait for before checking again, after a
+    /// check at `len` relations found `surplus`.
+    fn check_step(&mut self, len: usize, surplus: isize) -> usize {
+        let (most, least) = (len / 10, len / 100);
+        // While pruning takes every row, the surplus says nothing.
+        if surplus == -((CHARACTERS + POST_ROWS + EXTRA) as isize) {
+            self.last_check = None;
+            return most;
+        }
+        let step = match self.last_check.replace((len, surplus)) {
+            // Where the line through the two checks reaches 0.
+            Some((then, before)) if surplus > before => {
+                let short = surplus.unsigned_abs() as u64;
+                let gained = (surplus - before) as u64;
+                (short * (len - then) as u64 / gained) as usize + 1
+            }
+            _ => most,
+        };
+        step.clamp(least, most)
+    }
+
+    /// How many more relations than needed are left after pruning:
+    /// negative while too few.
+    pub fn surplus(&mut self) -> isize {
+        self.restore();
+        self.matrix.surplus(CHARACTERS + POST_ROWS, EXTRA)
     }
 
     /// Lets go of the pairs seen and hands over the matrix, which with
