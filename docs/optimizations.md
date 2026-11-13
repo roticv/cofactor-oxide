@@ -113,6 +113,7 @@ number.
 | Root optimization by size and p-adic α, Murphy's E with the large-prime bounds | RSA-110 sieving: about 1.4 → 1.14–1.18 ms a relation |
 | Kleinjung's primes and leading coefficients growing from 125 digits | RSA-140: 1.5–1.75 times the relations a second; RSA-130: 12% more |
 | Kleinjung's collisions in 64-bit arithmetic and a hash table | Same candidates; RSA-140's search 2 h 23 min → 35 min, RSA-130's 20 → 6 min |
+| Kleinjung's special-q and `l = q·ℓ₁·ℓ₂` past 64 bits | RSA-140: Murphy's E 3.67 → 4.68·10⁻¹⁰, 1.3 times the relations a second, level with CADO-NFS's polynomial |
 
 The last two came from measuring against CADO-NFS (see [ways of
 measuring](#ways-of-measuring-that-paid-off)). On RSA-110:
@@ -195,12 +196,13 @@ one thread, 1,500 special-q, relations a second:
 | RSA-130, after | 5.22·10⁻¹⁰ | 20 min (6 min now) | 293 (at 8M) | 239 (at 20M) |
 | RSA-140, before | 2.10·10⁻¹⁰ | 62 min | 58 | 51 |
 | RSA-140, after | 3.67·10⁻¹⁰ | 2 h 23 min (35 min now) | 102 | 77 |
-| RSA-140, CADO-NFS's | 4.58·10⁻¹⁰ | about 2 h | 122 | 105 |
+| RSA-140, special-q past 64 bits | 4.68·10⁻¹⁰ | 38 min | 127 | 98 |
+| RSA-140, CADO-NFS's | 4.58·10⁻¹⁰ | about 2 h | 121 | 103 |
 
 Searches were timed on a fanless laptop after hours of load, so they're
 long. With CADO-NFS's exact settings, the size matched its polynomial's
-(lognorm 42.0 against 41.9) and sieved at 87 and 74; what's left is in
-α, from its far wider root sieve.
+(lognorm 42.0 against 41.9) and sieved at 87 and 74. Most of the gap
+was the special-q, below.
 
 **The collision search's own cost.** The wider search spent all but
 seconds of its time finding collisions: size optimization took 1.5 s
@@ -227,6 +229,21 @@ thirtieth, the third took them from 107–115 s to 60–64 s, of which an
 `i64` inverse alone gave 72–95 s.
 Removing the divisions left in each entry, and halving or doubling the
 table, didn't help.
+
+**Special-q past 64 bits.** A special-q is a product of up to eight
+small primes, those with the most roots first, while `q·(2ℓ)⁴` stays
+below `m̃₀`. At RSA-140 that gives `q` up to 2^48, and
+`l = q·ℓ₁·ℓ₂` past 2^64 once `q` passes about 2^30. The roots modulo
+`q²` were kept in 64 bits, and the expansion gave up on `l ≥ 2^64`, so
+only special-q below 2^29 ever produced a candidate: some leading
+coefficients produced none. Now the roots are built in 128 bits, a
+special-q with `q² ≥ m̃₀` is skipped (nothing it finds is near `m̃₀`),
+and `l` may reach 2^126. With a tenth of the roots, RSA-140 gave 16,574
+candidates rather than 2,877, and its best size went from 62.6 to 59.6.
+In full the polynomial has lognorm 41.66 (CADO-NFS's, 41.87), Murphy's
+E 4.68·10⁻¹⁰, and sieves at 127 and 98 relations a second against
+CADO-NFS's 121 and 103 (and the previous 97 and 76). RSA-100, 110 and
+130 have their special-q below 2^29 and keep the same polynomials.
 
 ### Sieving
 

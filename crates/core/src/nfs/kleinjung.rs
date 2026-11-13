@@ -32,7 +32,7 @@ use crate::primes::Primes;
 /// Special-q primes are taken from below this, as in CADO-NFS.
 const Q_PRIMES: u64 = 272;
 
-/// The most primes in a special-q, which keeps it in a `u64`.
+/// The most primes in a special-q, as in CADO-NFS.
 const Q_FACTORS: usize = 8;
 
 /// A candidate: `f`, `m` and `l`, with `F(m, l) = N`.
@@ -112,6 +112,7 @@ pub fn candidates<const LIMBS: usize>(
                 ell2,
                 e: (r + ell2 - m0_2) % ell2,
                 recip: 1.0 / ell2 as f64,
+                two64: ((1u128 << 64) % u128::from(ell2)) as u64,
             });
         }
     }
@@ -151,44 +152,55 @@ pub fn candidates<const LIMBS: usize>(
             }
         }
         let inv_q2 = &prefix[(k - 1) * nl..];
-        // q, and its roots modulo q² by the CRT.
-        let (mut q, mut rho) = (1u64, vec![0u64]);
+        // q, and its roots modulo q² by the CRT, in u128: the special-q
+        // chosen among the first `lq` primes reach 2^48 at RSA-140. Past
+        // q² ≥ m̃₀, t_ρ alone is about as large as m̃₀, and nothing is near.
+        let mut q = 1u128;
+        let mut rho = vec![0u128];
         for &i in &pick {
             let (p, ref rs) = small[i];
-            let (q2, p2) = (u128::from(q * q), u128::from(p * p));
+            let near = (q * u128::from(p))
+                .checked_mul(q * u128::from(p))
+                .is_some_and(|q2| q2 < m0);
+            if !near {
+                rho.clear();
+                break;
+            }
+            let (q2, p2) = (q * q, u128::from(p * p));
             let q2_inv = u128::from(inverse((q2 % p2) as u64, p2 as u64).unwrap_or(0));
             rho = rho
                 .iter()
                 .flat_map(|&a| {
                     rs.iter().map(move |&r| {
-                        let t = (u128::from(r) + p2 - u128::from(a) % p2) % p2 * q2_inv % p2;
-                        (u128::from(a) + q2 * t) as u64
+                        let t = (u128::from(r) + p2 - a % p2) % p2 * q2_inv % p2;
+                        a + q2 * t
                     })
                 })
                 .collect();
-            q *= p;
+            q *= u128::from(p);
         }
-        let q2 = u128::from(q) * u128::from(q);
+        let q2 = q * q;
         for &rq in &rho {
             if done >= nq {
                 break 'q;
             }
             done += 1;
             // t ≡ ρ − m₀ (mod q²), the smallest such t_ρ.
-            // ρ and q² are only right while q² fits in a u64, as `rho`
-            // assumes: past that, ρ is wrong and its candidates fail in
-            // `expand`, as they did when t_ρ was an i128.
-            let t_rho = ((u128::from(rq) + q2 - m0 % q2) % q2) as i128;
+            let t_rho = ((rq + q2 - m0 % q2) % q2) as i128;
             let t_rho = if t_rho > (q2 / 2) as i128 {
                 t_rho - q2 as i128
             } else {
                 t_rho
-            } as i64;
+            };
+            let narrow = i64::try_from(t_rho).ok();
             table.clear();
             pairs.clear();
             for (l, &inv) in large.iter().zip(inv_q2) {
                 // u ≡ (e − t_ρ)/q² (mod ℓ²), from −u_max up.
-                let t = t_rho.rem_euclid(l.ell2 as i64) as u64;
+                let t = match narrow {
+                    Some(t) => t.rem_euclid(l.ell2 as i64) as u64,
+                    None => reduce_wide(t_rho, l),
+                };
                 let base = if l.e >= t { l.e - t } else { l.e + l.ell2 - t };
                 let res = mul_mod(base, inv, l.ell2, l.recip) as i64;
                 let ell2 = l.ell2 as i64;
@@ -202,9 +214,17 @@ pub fn candidates<const LIMBS: usize>(
                 if ell2 == ell1 {
                     continue;
                 }
-                let t = i128::from(t_rho) + q2 as i128 * i128::from(u);
-                let mt = (m0 as i128 + t) as u128;
-                let l = u128::from(q) * u128::from(ell1) * u128::from(ell2);
+                // m̃ = m̃₀ + t_ρ + q²·u, past i128 only when far from m̃₀.
+                let Some(mt) = (q2 as i128)
+                    .checked_mul(i128::from(u))
+                    .and_then(|x| x.checked_add(t_rho))
+                    .and_then(|t| t.checked_add(m0 as i128))
+                    .filter(|&mt| mt > 0)
+                else {
+                    continue;
+                };
+                let mt = mt as u128;
+                let l = q * u128::from(ell1) * u128::from(ell2);
                 // m̃ = d·a_d·m + a_{d−1}·l with |a_{d−1}| ≤ d·a_d/2.
                 let Some(inv_l) = inverse((l % u128::from(da)) as u64, da) else {
                     continue;
@@ -240,6 +260,16 @@ struct Large {
     ell2: u64,
     e: u64,
     recip: f64,
+    /// 2^64 mod ℓ², for [`reduce_wide`].
+    two64: u64,
+}
+
+/// `t mod ℓ²` for a `t` past an i64, from its 64-bit halves.
+fn reduce_wide(t: i128, l: &Large) -> u64 {
+    let mag = t.unsigned_abs();
+    let (hi, lo) = ((mag >> 64) as u64 % l.ell2, mag as u64 % l.ell2);
+    let r = (mul_mod(hi, l.two64, l.ell2, l.recip) + lo) % l.ell2;
+    if t < 0 && r != 0 { l.ell2 - r } else { r }
 }
 
 /// `a·b mod m` for `a`, `b` below `m < 2^50`, given `recip = 1/m`, without
@@ -410,7 +440,7 @@ fn expand<const LIMBS: usize>(
         }
         pow[i] = lo;
     }
-    let l64 = u64::try_from(l).ok()?;
+    let li = i128::try_from(l).ok()?;
     let mut a = vec![0i128; d + 1];
     a[d] = i128::from(ad);
     let mut r: Signed<LIMBS> = (*n, false);
@@ -434,18 +464,31 @@ fn expand<const LIMBS: usize>(
         // The nearest value to r/m^k that is ≡ r·m^(−k) (mod l).
         let (q, _) = r.0.wrapping_add(&(pow[k] >> 1)).div_rem(&pow[k]);
         let near = small((q, r.1))?;
-        let rl = rem(&r.0, l64);
-        let rl = if r.1 && rl != 0 { l64 - rl } else { rl };
-        let mk = rem(&pow[k], l64);
-        let want = (u128::from(rl) * u128::from(inverse(mk, l64)?) % u128::from(l64)) as i128;
-        let l = i128::from(l64);
-        let mut delta = (want - near).rem_euclid(l);
-        if delta > l / 2 {
-            delta -= l;
+        // l passes 2^64 at RSA-140, where the special-q reach 2^31.
+        let rl = to_u128(&r.0.div_rem(&bl).1)?;
+        let rl = if r.1 && rl != 0 { l - rl } else { rl };
+        let mk = to_u128(&pow[k].div_rem(&bl).1)?;
+        let (want, _) = big::<LIMBS>(rl).widening_mul(&big(inverse_wide(mk, l)?));
+        let want = to_u128(&want.div_rem(&bl).1)? as i128;
+        let mut delta = (want - near).rem_euclid(li);
+        if delta > li / 2 {
+            delta -= li;
         }
         a[k] = near + delta;
     }
     Some(a)
+}
+
+/// [`inverse`] for `k < 2^126`, in `i128`.
+fn inverse_wide(x: u128, k: u128) -> Option<u128> {
+    let (mut r0, mut r1) = (k as i128, x as i128);
+    let (mut t0, mut t1) = (0i128, 1i128);
+    while r1 != 0 {
+        let q = r0 / r1;
+        (r0, r1) = (r1, r0 - q * r1);
+        (t0, t1) = (t1, t0 - q * t1);
+    }
+    (r0 == 1).then(|| t0.rem_euclid(k as i128) as u128)
 }
 
 /// [`inverse`] for `k < 2^62`, in `i64`.

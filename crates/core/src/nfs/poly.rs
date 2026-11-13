@@ -75,9 +75,9 @@ const ROOT_FINALISTS: usize = 32;
 /// to 124,000 at RSA-140 (CADO's 125,000), and the step doubles every 16
 /// bits up to 480. With the old primes of 2^15 and leading coefficients
 /// up to 6,000, RSA-140's polynomial had Murphy's E 2.10e-10 by CADO-NFS;
-/// now it has 3.67e-10 (CADO-NFS's own, 4.58e-10) and sieves 1.5 to 1.75
+/// now it has 4.68e-10 (CADO-NFS's own, 4.58e-10) and sieves 1.3 to 2.2
 /// times as fast. RSA-130's sieves 12% faster. On 10 threads the searches
-/// take 35 and 6 minutes.
+/// take 38 and 6 minutes.
 #[derive(Clone, Copy, Debug)]
 struct Effort {
     nq: usize,
