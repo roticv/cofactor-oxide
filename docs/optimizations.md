@@ -111,6 +111,7 @@ number.
 | A harder search, on all threads | 32% more relations a second at 90 digits, 61% more at RSA-100; 90 digits factored in 365 s instead of 505 s |
 | CADO-NFS's stage 1 and size optimization | RSA-110 sieving: 2.5–2.9 → about 1.4 ms a relation |
 | Root optimization by size and p-adic α, Murphy's E with the large-prime bounds | RSA-110 sieving: about 1.4 → 1.14–1.18 ms a relation |
+| Kleinjung's primes and leading coefficients growing from 125 digits | RSA-140: 1.5–1.75 times the relations a second; RSA-130: 12% more |
 
 The last two came from measuring against CADO-NFS (see [ways of
 measuring](#ways-of-measuring-that-paid-off)). On RSA-110:
@@ -177,6 +178,28 @@ Tried and dropped:
 
 Selection now takes about 3 s at 262 bits, 26 s at 330 and about 2
 minutes at RSA-110, on 10 threads.
+
+**Past 125 digits.** Kleinjung's primes `ℓ` were about `2·m^(1/6)`,
+capped at 2^15, and the leading coefficients the first 100 multiples
+of 60, at every size. CADO-NFS widens both: at c140 its primes are
+about 125,000 and its leading coefficients run from 1,260 to 70,000 in
+steps of 420. Its RSA-140 polynomial sieved twice as fast as ours.
+From 415 bits the primes now double every 25 bits (124,000 at RSA-140)
+and the step every 16 bits, up to 480. Sieving with each polynomial,
+one thread, 1,500 special-q, relations a second:
+
+| Polynomial | Murphy's E, by CADO-NFS | Search, 10 threads | special-q 32M | special-q 60M |
+|---|---|---|---|---|
+| RSA-130, before | 4.85·10⁻¹⁰ | 12 min | 263 (at 8M) | 213 (at 20M) |
+| RSA-130, after | 5.22·10⁻¹⁰ | 20 min | 293 (at 8M) | 239 (at 20M) |
+| RSA-140, before | 2.10·10⁻¹⁰ | 62 min | 58 | 51 |
+| RSA-140, after | 3.67·10⁻¹⁰ | 2 h 23 min | 102 | 77 |
+| RSA-140, CADO-NFS's | 4.58·10⁻¹⁰ | about 2 h | 122 | 105 |
+
+Searches were timed on a fanless laptop after hours of load, so they're
+long. With CADO-NFS's exact settings, the size matched its polynomial's
+(lognorm 42.0 against 41.9) and sieved at 87 and 74; what's left is in
+α, from its far wider root sieve.
 
 ### Sieving
 

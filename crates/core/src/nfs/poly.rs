@@ -45,11 +45,10 @@ const OFFSETS: u64 = 4;
 const FINALISTS: usize = 32;
 
 /// Kleinjung's candidates come from leading coefficients that are the
-/// first `KJ_LEADS` multiples of `KJ_STEP`, as in CADO-NFS, with `u` up
-/// to `KJ_SPREAD·P²`, and as many special-q roots for each as [`Effort`]
-/// says. The `SIZE_KEEP` smallest are size-optimized.
+/// first `KJ_LEADS` multiples of [`Effort`]'s step, as in CADO-NFS, with
+/// `u` up to `KJ_SPREAD·P²`, and as many special-q roots for each as
+/// [`Effort`] says. The `SIZE_KEEP` smallest are size-optimized.
 const KJ_LEADS: usize = 100;
-const KJ_STEP: u64 = 60;
 const KJ_SPREAD: u64 = 4;
 const SIZE_KEEP: usize = 2000;
 
@@ -69,12 +68,30 @@ const ROOT_FINALISTS: usize = 32;
 /// coefficient. The rotations grow from the small settings below 210 bits
 /// to the full ones from 290; at 90 and 100 digits, the full ones made
 /// sieving a third and three fifths faster.
+///
+/// From [`KJ_WIDEN`] bits, about 125 digits, Kleinjung's primes `ℓ` and
+/// leading coefficients grow faster than `m^(1/6)` and the fixed step of
+/// 60 allow, as CADO-NFS's parameters do: the primes double every 25 bits,
+/// to 124,000 at RSA-140 (CADO's 125,000), and the step doubles every 16
+/// bits up to 480. With the old primes of 2^15 and leading coefficients
+/// up to 6,000, RSA-140's polynomial had Murphy's E 2.10e-10 by CADO-NFS;
+/// now it has 3.67e-10 (CADO-NFS's own, 4.58e-10) and sieves 1.5 to 1.75
+/// times as fast, for a search of 2 h 23 min on 10 threads rather than
+/// 62 min. RSA-130's sieves 12% faster, for 20 minutes rather than 12.
 #[derive(Clone, Copy, Debug)]
 struct Effort {
     nq: usize,
     rot1: i64,
     rot0: i64,
+    /// The step between Kleinjung's leading coefficients.
+    lead_step: u64,
+    /// The least size of Kleinjung's primes, if more than `m^(1/6)` says.
+    prime_floor: u64,
 }
+
+/// The size, in bits, from which Kleinjung's search widens past the
+/// settings that suit 90 to 120 digits.
+const KJ_WIDEN: u32 = 415;
 
 impl Effort {
     fn for_bits(bits: u32) -> Self {
@@ -82,10 +99,17 @@ impl Effort {
         let step = (bits.saturating_sub(210) / 20).min(4);
         let b = f64::from(bits);
         let roots = 100_000.0 * exp2((b.min(364.0) - 266.0) / 20.0 + (b - 364.0).max(0.0) / 30.0);
+        let wide = bits.saturating_sub(KJ_WIDEN);
         Self {
             nq: ((roots / KJ_LEADS as f64) as usize).max(64),
             rot1: 4 << step.saturating_sub(2),
             rot0: 1 << (12 + step),
+            lead_step: 60 << (wide / 16).min(3),
+            prime_floor: if wide == 0 {
+                0
+            } else {
+                exp2(15.0 + f64::from(wide) / 25.0) as u64
+            },
         }
     }
 }
@@ -291,13 +315,20 @@ fn finalists<const LIMBS: usize>(
     candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
     candidates.truncate(FINALISTS);
     // Kleinjung's candidates, whose a_{d−1} is small.
-    let p0 = kleinjung_prime(&candidates[0]);
+    let p0 = kleinjung_prime(&candidates[0]).max(effort.prime_floor);
     let u_max = (KJ_SPREAD * p0 * p0) as i64;
     let found = map_dynamic(par, KJ_LEADS, |i| {
-        kleinjung::candidates(n, d, KJ_STEP * (i as u64 + 1), p0, u_max, effort.nq)
-            .into_iter()
-            .map(|(f, m, l)| Small::new(f, m, l))
-            .collect::<Vec<_>>()
+        kleinjung::candidates(
+            n,
+            d,
+            effort.lead_step * (i as u64 + 1),
+            p0,
+            u_max,
+            effort.nq,
+        )
+        .into_iter()
+        .map(|(f, m, l)| Small::new(f, m, l))
+        .collect::<Vec<_>>()
     });
     candidates.extend(found.into_iter().flatten());
     candidates.sort_by(|x, y| x.size.total_cmp(&y.size));
