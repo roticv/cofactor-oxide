@@ -112,6 +112,7 @@ number.
 | CADO-NFS's stage 1 and size optimization | RSA-110 sieving: 2.5–2.9 → about 1.4 ms a relation |
 | Root optimization by size and p-adic α, Murphy's E with the large-prime bounds | RSA-110 sieving: about 1.4 → 1.14–1.18 ms a relation |
 | Kleinjung's primes and leading coefficients growing from 125 digits | RSA-140: 1.5–1.75 times the relations a second; RSA-130: 12% more |
+| Kleinjung's collisions in 64-bit arithmetic and a hash table | Same candidates; RSA-140's search 2 h 23 min → 35 min, RSA-130's 20 → 6 min |
 
 The last two came from measuring against CADO-NFS (see [ways of
 measuring](#ways-of-measuring-that-paid-off)). On RSA-110:
@@ -191,15 +192,41 @@ one thread, 1,500 special-q, relations a second:
 | Polynomial | Murphy's E, by CADO-NFS | Search, 10 threads | special-q 32M | special-q 60M |
 |---|---|---|---|---|
 | RSA-130, before | 4.85·10⁻¹⁰ | 12 min | 263 (at 8M) | 213 (at 20M) |
-| RSA-130, after | 5.22·10⁻¹⁰ | 20 min | 293 (at 8M) | 239 (at 20M) |
+| RSA-130, after | 5.22·10⁻¹⁰ | 20 min (6 min now) | 293 (at 8M) | 239 (at 20M) |
 | RSA-140, before | 2.10·10⁻¹⁰ | 62 min | 58 | 51 |
-| RSA-140, after | 3.67·10⁻¹⁰ | 2 h 23 min | 102 | 77 |
+| RSA-140, after | 3.67·10⁻¹⁰ | 2 h 23 min (35 min now) | 102 | 77 |
 | RSA-140, CADO-NFS's | 4.58·10⁻¹⁰ | about 2 h | 122 | 105 |
 
 Searches were timed on a fanless laptop after hours of load, so they're
 long. With CADO-NFS's exact settings, the size matched its polynomial's
 (lognorm 42.0 against 41.9) and sieved at 87 and 74; what's left is in
 α, from its far wider root sieve.
+
+**The collision search's own cost.** The wider search spent all but
+seconds of its time finding collisions: size optimization took 1.5 s
+and root optimization 5 s at RSA-140. Three things made it slow, and
+removing them leaves the candidates exactly as they were (the same
+polynomials at RSA-100, 110, 130 and 140):
+
+1. **128-bit remainders for each `(ℓ, u)` entry,** which are library
+   calls. The values are below 2^40, so `a·b mod ℓ²` takes a quotient
+   from floating point, off by at most one, and a wrapping remainder.
+2. **Sorting about 42,000 entries per root** to find equal `u`. An
+   open-addressing table, stamped per root so that clearing it is free,
+   reports collisions as entries go in.
+3. **An inverse of `q²` modulo every `ℓ²`, in `i128`, for every
+   special-q.** At RSA-140 each special-q has one root, so this cost as
+   much as the entries. The inverses of the small primes' squares are
+   computed once per leading coefficient, and products over the
+   special-q's first `i` primes are kept, so a special-q whose last prime
+   changed costs one multiplication per `ℓ`.
+
+At RSA-140, with a tenth of the roots, the first two took the
+collisions from 727 s (partly sharing the cores) to 315 s; with a
+thirtieth, the third took them from 107–115 s to 60–64 s, of which an
+`i64` inverse alone gave 72–95 s.
+Removing the divisions left in each entry, and halving or doubling the
+table, didn't help.
 
 ### Sieving
 

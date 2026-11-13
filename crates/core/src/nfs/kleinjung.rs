@@ -99,7 +99,7 @@ pub fn candidates<const LIMBS: usize>(
         lq += 1;
     }
     // The large primes, each root's m₀-relative residue.
-    let mut large: Vec<(u64, u64)> = Vec::new();
+    let mut large: Vec<Large> = Vec::new();
     for ell in Primes::new(p0, 2 * p0) {
         if da.is_multiple_of(ell) {
             continue;
@@ -107,15 +107,50 @@ pub fn candidates<const LIMBS: usize>(
         let ell2 = ell * ell;
         let m0_2 = (m0 % u128::from(ell2)) as u64;
         for r in roots_mod_square(&nt, 1, ell, d) {
-            large.push((ell, (r + ell2 - m0_2) % ell2));
+            large.push(Large {
+                ell,
+                ell2,
+                e: (r + ell2 - m0_2) % ell2,
+                recip: 1.0 / ell2 as f64,
+            });
         }
     }
     let mut found = Vec::new();
-    let mut entries: Vec<(i64, u64)> = Vec::new();
-    let mut inv_q2: Vec<u64> = Vec::new();
+    let mut table = Collisions::new(large.len() * 4);
+    // p⁻² mod ℓ² for the first `lq` small primes and every ℓ, and their
+    // products over the first i + 1 primes of the special-q, so q⁻² mod ℓ²
+    // costs a multiplication when only q's last prime changes, as it
+    // mostly does: at RSA-140 each special-q has one root, and an inverse
+    // for every ℓ took as long as the rest of the search.
+    let nl = large.len();
+    let mut inv_p2: Vec<u64> = Vec::with_capacity(lq * nl);
+    for &(p, _) in &small[..lq] {
+        inv_p2.extend(
+            large
+                .iter()
+                .map(|l| inverse_small(p * p, l.ell2).unwrap_or(0)),
+        );
+    }
+    let mut prefix = vec![0u64; k * nl];
+    let mut changed = 0;
+    let mut pairs: Vec<(i64, u64, u64)> = Vec::new();
     let mut done = 0;
     let mut pick: Vec<usize> = (0..k).collect();
     'q: loop {
+        for i in changed..k {
+            let row = &inv_p2[pick[i] * nl..][..nl];
+            let (before, rest) = prefix.split_at_mut(i * nl);
+            let out = &mut rest[..nl];
+            if i == 0 {
+                out.copy_from_slice(row);
+            } else {
+                let prev = &before[(i - 1) * nl..];
+                for (((o, &a), &b), l) in out.iter_mut().zip(prev).zip(row).zip(&large) {
+                    *o = mul_mod(a, b, l.ell2, l.recip);
+                }
+            }
+        }
+        let inv_q2 = &prefix[(k - 1) * nl..];
         // q, and its roots modulo q² by the CRT.
         let (mut q, mut rho) = (1u64, vec![0u64]);
         for &i in &pick {
@@ -134,71 +169,138 @@ pub fn candidates<const LIMBS: usize>(
             q *= p;
         }
         let q2 = u128::from(q) * u128::from(q);
-        inv_q2.clear();
-        inv_q2.extend(large.iter().map(|&(ell, _)| {
-            let ell2 = ell * ell;
-            inverse((q2 % u128::from(ell2)) as u64, ell2).unwrap_or(0)
-        }));
         for &rq in &rho {
             if done >= nq {
                 break 'q;
             }
             done += 1;
             // t ≡ ρ − m₀ (mod q²), the smallest such t_ρ.
+            // ρ and q² are only right while q² fits in a u64, as `rho`
+            // assumes: past that, ρ is wrong and its candidates fail in
+            // `expand`, as they did when t_ρ was an i128.
             let t_rho = ((u128::from(rq) + q2 - m0 % q2) % q2) as i128;
             let t_rho = if t_rho > (q2 / 2) as i128 {
                 t_rho - q2 as i128
             } else {
                 t_rho
-            };
-            entries.clear();
-            for (&(ell, e), &inv) in large.iter().zip(&inv_q2) {
-                let ell2 = ell * ell;
+            } as i64;
+            table.clear();
+            pairs.clear();
+            for (l, &inv) in large.iter().zip(inv_q2) {
                 // u ≡ (e − t_ρ)/q² (mod ℓ²), from −u_max up.
-                let base = (i128::from(e) - t_rho).rem_euclid(i128::from(ell2)) as u64;
-                let res = (u128::from(base) * u128::from(inv) % u128::from(ell2)) as i64;
-                let ell2 = ell2 as i64;
+                let t = t_rho.rem_euclid(l.ell2 as i64) as u64;
+                let base = if l.e >= t { l.e - t } else { l.e + l.ell2 - t };
+                let res = mul_mod(base, inv, l.ell2, l.recip) as i64;
+                let ell2 = l.ell2 as i64;
                 let mut u = res - ell2 * ((res + u_max) / ell2);
                 while u <= u_max {
-                    entries.push((u, ell));
+                    table.insert(u, l.ell, |ell1| pairs.push((u, ell1, l.ell)));
                     u += ell2;
                 }
             }
-            entries.sort_unstable();
-            for (i, &(u, ell1)) in entries.iter().enumerate() {
-                for &(_, ell2) in entries[i + 1..].iter().take_while(|e| e.0 == u) {
-                    if ell2 == ell1 {
-                        continue;
-                    }
-                    let t = t_rho + q2 as i128 * i128::from(u);
-                    let mt = (m0 as i128 + t) as u128;
-                    let l = u128::from(q) * u128::from(ell1) * u128::from(ell2);
-                    // m̃ = d·a_d·m + a_{d−1}·l with |a_{d−1}| ≤ d·a_d/2.
-                    let Some(inv_l) = inverse((l % u128::from(da)) as u64, da) else {
-                        continue;
-                    };
-                    let mut a1 = (mt % u128::from(da) * u128::from(inv_l) % u128::from(da)) as i128;
-                    if 2 * a1 >= i128::from(da) {
-                        a1 -= i128::from(da);
-                    }
-                    let Some(rest) = (mt as i128).checked_sub(a1 * l as i128) else {
-                        continue;
-                    };
-                    if rest <= 0 || rest % i128::from(da) != 0 {
-                        continue;
-                    }
-                    let m = (rest / i128::from(da)) as u128;
-                    if let Some(f) = expand(n, ad, m, l, d) {
-                        found.push((f, m, l));
-                    }
+            for &(u, ell1, ell2) in &pairs {
+                if ell2 == ell1 {
+                    continue;
+                }
+                let t = i128::from(t_rho) + q2 as i128 * i128::from(u);
+                let mt = (m0 as i128 + t) as u128;
+                let l = u128::from(q) * u128::from(ell1) * u128::from(ell2);
+                // m̃ = d·a_d·m + a_{d−1}·l with |a_{d−1}| ≤ d·a_d/2.
+                let Some(inv_l) = inverse((l % u128::from(da)) as u64, da) else {
+                    continue;
+                };
+                let mut a1 = (mt % u128::from(da) * u128::from(inv_l) % u128::from(da)) as i128;
+                if 2 * a1 >= i128::from(da) {
+                    a1 -= i128::from(da);
+                }
+                let Some(rest) = (mt as i128).checked_sub(a1 * l as i128) else {
+                    continue;
+                };
+                if rest <= 0 || rest % i128::from(da) != 0 {
+                    continue;
+                }
+                let m = (rest / i128::from(da)) as u128;
+                if let Some(f) = expand(n, ad, m, l, d) {
+                    found.push((f, m, l));
                 }
             }
         }
-        if !next_pick(&mut pick, lq) {
-            break;
+        match next_pick(&mut pick, lq) {
+            Some(i) => changed = i,
+            None => break,
         }
     }
     found
+}
+
+/// A prime `ℓ` near `P` with a root of `x^d ≡ Ñ (mod ℓ²)`, as `e`, the
+/// root less `m̃₀`, and `1/ℓ²` for [`mul_mod`].
+struct Large {
+    ell: u64,
+    ell2: u64,
+    e: u64,
+    recip: f64,
+}
+
+/// `a·b mod m` for `a`, `b` below `m < 2^50`, given `recip = 1/m`, without
+/// a `u128` remainder, which is a library call: the quotient from floating
+/// point is off by at most one, which the wrapping remainder corrects.
+fn mul_mod(a: u64, b: u64, m: u64, recip: f64) -> u64 {
+    let q = (a as f64 * b as f64 * recip) as u64;
+    let r = a.wrapping_mul(b).wrapping_sub(q.wrapping_mul(m)) as i64;
+    if r < 0 {
+        (r + m as i64) as u64
+    } else if r as u64 >= m {
+        r as u64 - m
+    } else {
+        r as u64
+    }
+}
+
+/// An open-addressing table of `(u, ℓ)` for one special-q root, which
+/// reports each earlier entry with the same `u` as an entry goes in.
+/// Entries are stamped with the root, so clearing is a counter bump.
+struct Collisions {
+    slots: Vec<(i64, u32, u32)>,
+    stamp: u32,
+    shift: u32,
+}
+
+impl Collisions {
+    fn new(entries: usize) -> Self {
+        let size = (2 * entries).next_power_of_two().max(1 << 10);
+        Self {
+            slots: vec![(0, 0, 0); size],
+            stamp: 0,
+            shift: 64 - size.trailing_zeros(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            self.slots.fill((0, 0, 0));
+            self.stamp = 1;
+        }
+    }
+
+    /// Inserts `(u, ell)`, calling `hit` with the `ℓ` of each entry
+    /// already there with the same `u`.
+    fn insert(&mut self, u: i64, ell: u64, mut hit: impl FnMut(u64)) {
+        let mask = self.slots.len() - 1;
+        let mut i = ((u as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize;
+        loop {
+            let slot = &mut self.slots[i];
+            if slot.2 != self.stamp {
+                *slot = (u, ell as u32, self.stamp);
+                return;
+            }
+            if slot.0 == u {
+                hit(u64::from(slot.1));
+            }
+            i = (i + 1) & mask;
+        }
+    }
 }
 
 /// The number of roots modulo the products of `k` of `primes`: the sum,
@@ -216,8 +318,8 @@ fn combinations(primes: &[(u64, Vec<u64>)], k: usize) -> usize {
 }
 
 /// The next `k`-element subset of `0..n` after `pick` in lexicographic
-/// order, or `false` after the last.
-fn next_pick(pick: &mut [usize], n: usize) -> bool {
+/// order, and the first position that changed, or `None` after the last.
+fn next_pick(pick: &mut [usize], n: usize) -> Option<usize> {
     let k = pick.len();
     for i in (0..k).rev() {
         if pick[i] < n - k + i {
@@ -225,10 +327,10 @@ fn next_pick(pick: &mut [usize], n: usize) -> bool {
             for j in i + 1..k {
                 pick[j] = pick[j - 1] + 1;
             }
-            return true;
+            return Some(i);
         }
     }
-    false
+    None
 }
 
 /// The roots of `a_d·x^d ≡ n (mod p²)` lifted from the simple ones mod `p`.
@@ -344,6 +446,18 @@ fn expand<const LIMBS: usize>(
         a[k] = near + delta;
     }
     Some(a)
+}
+
+/// [`inverse`] for `k < 2^62`, in `i64`.
+fn inverse_small(x: u64, k: u64) -> Option<u64> {
+    let (mut r0, mut r1) = (k as i64, x as i64);
+    let (mut t0, mut t1) = (0i64, 1i64);
+    while r1 != 0 {
+        let q = r0 / r1;
+        (r0, r1) = (r1, r0 - q * r1);
+        (t0, t1) = (t1, t0 - q * t1);
+    }
+    (r0 == 1).then(|| t0.rem_euclid(k as i64) as u64)
 }
 
 /// `x⁻¹ mod k` for any `k`, if `x` is invertible.
