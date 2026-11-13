@@ -338,6 +338,11 @@ Tried and dropped:
   entry of the products took 0.62 ns rather than 0.45.
 - **4-bit tables for the 128-bit vector updates,** 8 KB rather than 64:
   faster alone, but a whole solve took 18 s rather than 14.
+- **Fusing the vector passes** (the three inner products in one pass,
+  the `X` update with the next `V`): slower, 13.8–16.0 s → 17.3–18.7 s at
+  150,000 columns and 195–205 s → 236–250 s at 500,000, on one thread.
+  The fused passes keep 192–256 KB of tables live rather than 64, past
+  L1, and the misses cost more than the vector reads saved.
 - **128 vectors at a time in wasm, in `v128` registers:** about 1.6× slower
   than 64 in Node at 30,000 to 200,000 columns (200,000: 33 s → 54 s).
 
