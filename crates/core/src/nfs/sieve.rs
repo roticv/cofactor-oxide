@@ -484,6 +484,8 @@ pub struct Sieve {
     g_wide: (Wide, Wide),
     g_small: Option<(u128, i128)>,
     marked: Vec<u64>,
+    /// [`Params::algebraic_slack`].
+    algebraic_slack: f64,
 }
 
 const TOO_WIDE: &str = "polynomial coefficients too large";
@@ -521,6 +523,7 @@ impl Sieve {
                 .ok()
                 .zip(i128::try_from(&poly.l).ok()),
             marked: vec![0; slab / 64],
+            algebraic_slack: f64::from(params.algebraic_slack),
         }
     }
 
@@ -589,7 +592,7 @@ impl Sieve {
         self.rational.start(u, v, log_i, log_j);
         self.algebraic.start(u, v, log_i, log_j);
         let r_slack = self.rational.slack();
-        let a_slack = self.algebraic.slack() + log2(q as f64);
+        let a_slack = self.algebraic.slack() + log2(q as f64) + self.algebraic_slack;
         let segment = SEGMENT.min(width);
         let rows_per_slab = (self.marked.len() * 64) >> log_i;
         let mut relations = Vec::new();

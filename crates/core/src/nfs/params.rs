@@ -4,8 +4,8 @@
 /// factor-base bound, `log₂` of the large-prime bound, and `log₂` of the
 /// largest cofactor the sieve keeps, which past the large-prime bound it
 /// splits into two large primes; then `log₂` of the width `I` of the
-/// region sieved for each special-q, and the first special-q. Between
-/// rows, values are interpolated.
+/// region sieved for each special-q, the first special-q, and the extra
+/// algebraic slack. Between rows, values are interpolated.
 ///
 /// Up to 330 bits these are large factor bases with one large prime a
 /// side, of about 10 to 30 times the bound, rounded up to a power of 2.
@@ -48,17 +48,36 @@
 /// 16 million cost more in duplicates than it saved. The rows past 465
 /// bits are guesses.
 ///
+/// The algebraic side's candidates are allowed 8 more bits from 430 bits,
+/// for values with more than their share of the primes below 30, which
+/// aren't sieved. At RSA-140 CADO-NFS's `las`, with the same polynomial
+/// and parameters, found 17% more relations than this siever, nearly all
+/// with two large primes on the algebraic side and a median of 22.7 bits
+/// from the unsieved primes against 14.4 in the ones found. One thread,
+/// 15,000 special-q: at RSA-140, 8 more bits gave 14% more relations and
+/// 6.6% more a second (4 bits: 9% and 5.7%; 12 bits: 17% and 2.8%); at
+/// RSA-130, 16% and 4.6% (4 bits: 10% and 5.2%); at RSA-110, 6.4% more
+/// relations but 17.5% fewer a second, and 4 bits 7% fewer.
+///
 /// `I` stops at 2^13, where the buckets of the largest primes' hits take
 /// a few hundred megabytes for each thread. Past 600 bits the last row
 /// holds, though numbers that large need larger large primes, two or three
 /// of them a side, to be practical. The siever takes large-prime bounds up
 /// to 2^40, below the quadratic characters' primes.
 #[allow(clippy::type_complexity)]
-const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
-    (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250),
-    (160, [60_000, 60_000], [21, 21], [21, 21], 10, 15_000),
-    (200, [500_000, 500_000], [23, 23], [23, 23], 11, 125_000),
-    (260, [2_000_000, 2_000_000], [25, 25], [25, 25], 12, 500_000),
+const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64, u32); 11] = [
+    (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250, 0),
+    (160, [60_000, 60_000], [21, 21], [21, 21], 10, 15_000, 0),
+    (200, [500_000, 500_000], [23, 23], [23, 23], 11, 125_000, 0),
+    (
+        260,
+        [2_000_000, 2_000_000],
+        [25, 25],
+        [25, 25],
+        12,
+        500_000,
+        0,
+    ),
     (
         330,
         [6_000_000, 6_000_000],
@@ -66,6 +85,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [26, 26],
         12,
         1_500_000,
+        0,
     ),
     (
         364,
@@ -74,6 +94,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [54, 54],
         12,
         1_250_000,
+        0,
     ),
     (
         397,
@@ -82,6 +103,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [52, 54],
         12,
         4_000_000,
+        0,
     ),
     (
         430,
@@ -90,6 +112,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [54, 57],
         13,
         8_000_000,
+        8,
     ),
     (
         465,
@@ -98,6 +121,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [58, 58],
         13,
         32_000_000,
+        8,
     ),
     (
         530,
@@ -106,6 +130,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [60, 60],
         13,
         10_000_000,
+        8,
     ),
     (
         600,
@@ -114,6 +139,7 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64); 11] = [
         [62, 62],
         13,
         20_000_000,
+        8,
     ),
 ];
 
@@ -143,22 +169,34 @@ pub struct Params {
     pub log_i: u32,
     /// The first special-q.
     pub qmin: u64,
+    /// Bits beyond the cofactor bound that the algebraic side's candidate
+    /// thresholds allow, for values richer than usual in the primes the
+    /// sieve skips.
+    pub algebraic_slack: u32,
 }
 
 impl Params {
     /// The parameters for an `N` of `bits` bits.
     pub fn for_bits(bits: u32) -> Self {
-        let row =
-            |(_, fb, lpb, mfb, log_i, qmin): (u32, [u32; 2], [u32; 2], [u32; 2], u32, u64)| Self {
-                rational_bound: fb[0],
-                algebraic_bound: fb[1],
-                rational_lpb: lpb[0],
-                algebraic_lpb: lpb[1],
-                rational_mfb: mfb[0],
-                algebraic_mfb: mfb[1],
-                log_i,
-                qmin,
-            };
+        let row = |(_, fb, lpb, mfb, log_i, qmin, slack): (
+            u32,
+            [u32; 2],
+            [u32; 2],
+            [u32; 2],
+            u32,
+            u64,
+            u32,
+        )| Self {
+            rational_bound: fb[0],
+            algebraic_bound: fb[1],
+            rational_lpb: lpb[0],
+            algebraic_lpb: lpb[1],
+            rational_mfb: mfb[0],
+            algebraic_mfb: mfb[1],
+            log_i,
+            qmin,
+            algebraic_slack: slack,
+        };
         let (first, last) = (TABLE[0], TABLE[TABLE.len() - 1]);
         if bits <= first.0 {
             return row(first);
@@ -188,6 +226,7 @@ impl Params {
             algebraic_mfb: side(lo.3, hi.3, 1),
             log_i: lerp(lo.4.into(), hi.4.into()) as u32,
             qmin: lerp(lo.5, hi.5),
+            algebraic_slack: lerp(lo.6.into(), hi.6.into()) as u32,
         }
     }
 }
