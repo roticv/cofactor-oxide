@@ -101,6 +101,34 @@ struct Small {
     rho: u32,
     next: u32,
     log: u8,
+    /// `⌈2^64/p⌉`, for remainders by `p` without dividing: see [`Small::rem`].
+    recip: u64,
+}
+
+impl Small {
+    fn new(p: u32, rho: u32, next: u32, log: u8) -> Self {
+        Self {
+            p,
+            rho,
+            next,
+            log,
+            recip: u64::MAX / u64::from(p) + 1,
+        }
+    }
+
+    /// `x mod p`, by Lemire, Kaser and Kurz's method: the low 64 bits of
+    /// `x·⌈2^64/p⌉` are the fraction `x/p − ⌊x/p⌋` in fixed point, and
+    /// times `p` its top bits are the remainder.
+    fn rem(&self, x: u32) -> u32 {
+        let fraction = self.recip.wrapping_mul(u64::from(x));
+        ((u128::from(fraction) * u128::from(self.p)) >> 64) as u32
+    }
+
+    /// Whether `p` divides `x`: the fraction above is 0, which shows as
+    /// one below `⌈2^64/p⌉`.
+    fn divides(&self, x: u32) -> bool {
+        self.recip.wrapping_mul(u64::from(x)) < self.recip
+    }
 }
 
 /// A prime from `I` up, walked from hit to hit. Its next hit is at `pos`,
@@ -248,22 +276,13 @@ impl Side {
                 let (p, beta) = (u64::from(q.p), betas[l]);
                 if x[l] == 0 {
                     if beta != 0 {
-                        self.rows.push(Small {
-                            p: q.p,
-                            rho: 0,
-                            next: 0,
-                            log: q.log,
-                        });
+                        self.rows.push(Small::new(q.p, 0, 0, q.log));
                     }
                     continue;
                 }
                 if p < width {
-                    self.small.push(Small {
-                        p: q.p,
-                        rho: rhos[l],
-                        next: (width / 2 % p) as u32,
-                        log: q.log,
-                    });
+                    self.small
+                        .push(Small::new(q.p, rhos[l], (width / 2 % p) as u32, q.log));
                 } else if p < 1 << slab_bits {
                     self.walks.push(walk(q, steps[l], log_i));
                 } else {
@@ -347,8 +366,7 @@ impl Side {
         marked: &[u64],
         out: &mut Vec<(u32, u32)>,
     ) {
-        let width = 1u64 << log_i;
-        let half = width / 2;
+        let half = 1u32 << (log_i - 1);
         let mut rest = candidates;
         while let Some(&first) = rest.first() {
             let r = first >> log_i;
@@ -358,10 +376,13 @@ impl Side {
             let j = j0 + u64::from(r);
             let base = r << log_i;
             for s in self.small.iter().filter(|s| s.p >= RESIEVE) {
-                let p = u64::from(s.p);
-                let x0 = ((u64::from(s.rho) * (j % p) + half) % p) as u32;
+                // Below p² + I/2, so within 32 bits for p below I.
+                let x0 = s.rem(s.rho * s.rem(j as u32) + half);
+                // x − base ≡ x0 when p divides x − base + p − x0, which is
+                // positive and below I + p.
+                let shift = s.p.wrapping_sub(x0).wrapping_sub(base);
                 for &x in row {
-                    if (x - base) % s.p == x0 {
+                    if s.divides(x.wrapping_add(shift)) {
                         out.push((x, s.p));
                     }
                 }
@@ -1016,4 +1037,34 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 /// Whether bit `x` of `marked` is set.
 fn is_marked(marked: &[u64], x: u32) -> bool {
     marked[x as usize / 64] >> (x % 64) & 1 != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The resieve's remainders by multiplying agree with `%` over the
+    /// ranges it uses them on: below `p² + I/2` for primes below `I`.
+    #[test]
+    fn remainders_match() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for p in crate::primes::Primes::new(RESIEVE.into(), 1 << 15) {
+            let s = Small::new(p as u32, 0, 0, 0);
+            let p = p as u32;
+            let top = p * p + (1 << 14);
+            for v in [0, 1, p - 1, p, p + 1, 2 * p, top - 1]
+                .into_iter()
+                .chain((0..64).map(|_| (next() % u64::from(top)) as u32))
+            {
+                assert_eq!(s.rem(v), v % p, "{v} mod {p}");
+                assert_eq!(s.divides(v), v % p == 0, "{p} | {v}");
+            }
+        }
+    }
 }

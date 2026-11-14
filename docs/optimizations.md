@@ -284,6 +284,7 @@ Kleinjung's method.
 | Small primes carry their first hit from row to row | Saves two divisions a row |
 | Candidate scan 32 positions at a time | Together with the four rows above, 90 digits: 18.1 s → 10.4 s for the same 138 special-q on one thread; a full matrix in 265 s instead of 559 s on ten |
 | Resieving candidates one by one, with a bitset of marked offsets | 64 KB instead of 512 KB, keeping the bucket scans in L1. RSA-110: 2–3.5% faster |
+| Remainders by multiplying in the resieve, by Lemire, Kaser and Kurz's method | Each row's first hit and each candidate's test took a division per prime from 256 to `I`; now a multiply by `⌈2^64/p⌉`, and a compare for the test. Same relations; one thread: RSA-110 99.4 → 91.5 s a slice, RSA-140 269 → 256 s |
 | Only odd `x` on even rows | Where `i` and `j` are both even, so are `a` and `b`. RSA-110: 3.3% faster |
 
 Tried and dropped:
