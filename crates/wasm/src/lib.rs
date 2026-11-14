@@ -6,7 +6,7 @@ use cofox_core::nfs::{
     Dependencies, Gnfs, Params, Relations, Sieve as NfsSieve, parse_poly, parse_relation,
     poly_text, relation_line,
 };
-use cofox_core::qs::{QsCollector, QsJob, QsSieve, Start};
+use cofox_core::qs::{MatrixPart as Part, PART_TRIES, QsCollector, QsJob, QsSieve, Start};
 use cofox_core::{Config, Progress, QsMode};
 use wasm_bindgen::prelude::*;
 
@@ -219,6 +219,9 @@ pub struct GnfsCollector {
     ideals: u32,
     bits: u32,
     dependencies: Dependencies,
+    /// The matrix's parts from [`GnfsCollector::split_matrix`], until
+    /// taken.
+    parts: Vec<Vec<u32>>,
 }
 
 #[wasm_bindgen]
@@ -228,14 +231,30 @@ impl GnfsCollector {
         let n: Wide = n.trim().parse()?;
         let gnfs = Gnfs::new(&n, &Params::for_bits(n.bits()))
             .ok_or_else(|| JsError::new("too large to choose polynomials for"))?;
+        Ok(Self::from_gnfs(&n, gnfs))
+    }
+
+    /// A collector for `n` with the polynomials in `poly`, in the format
+    /// of [`GnfsCollector::poly`], rather than choosing them: to go on
+    /// from relations found before.
+    pub fn with_poly(n: &str, poly: &str) -> Result<GnfsCollector, JsError> {
+        let n: Wide = n.trim().parse()?;
+        let params = Params::for_bits(n.bits());
+        let poly = parse_poly(&n, poly, &params)
+            .ok_or_else(|| JsError::new("not a polynomial pair for this number"))?;
+        Ok(Self::from_gnfs(&n, Gnfs::with_poly(&n, &params, poly)))
+    }
+
+    fn from_gnfs(n: &Wide, gnfs: Gnfs<16>) -> Self {
         let fb = gnfs.factor_base();
-        Ok(GnfsCollector {
-            poly: poly_text(&n, gnfs.poly()),
+        GnfsCollector {
+            poly: poly_text(n, gnfs.poly()),
             ideals: (fb.rational.len() + fb.algebraic.len()) as u32,
             bits: n.bits(),
             relations: gnfs.relations(),
             dependencies: Dependencies::default(),
-        })
+            parts: Vec::new(),
+        }
     }
 
     /// The polynomials chosen, for each [`GnfsSieve`].
@@ -278,6 +297,28 @@ impl GnfsCollector {
         self.dependencies.len() as u32
     }
 
+    /// Filters the matrix and splits it into `parts` for [`MatrixPart`]s,
+    /// one a worker, to solve together, returning how many there are: none
+    /// if it was small enough to solve at once, in which case
+    /// [`GnfsCollector::finish_matrix`] takes an empty array.
+    pub fn split_matrix(&mut self, parts: u32) -> u32 {
+        self.parts = self.relations.split_matrix(parts.max(1) as usize);
+        self.parts.len() as u32
+    }
+
+    /// Part `i` of the matrix, for [`MatrixPart::new`]. Each can be taken
+    /// once.
+    pub fn matrix_part(&mut self, i: u32) -> Vec<u32> {
+        core::mem::take(&mut self.parts[i as usize])
+    }
+
+    /// Takes the parts' [`MatrixPart::dependencies`], joined in order,
+    /// returning how many dependencies they give.
+    pub fn finish_matrix(&mut self, found: &[u64]) -> u32 {
+        self.dependencies = self.relations.finish_split(found);
+        self.dependencies.len() as u32
+    }
+
     /// The square roots for dependency `i`: a proper factor, or
     /// `undefined` if it gives none.
     pub fn try_dependency(&self, i: u32) -> Option<String> {
@@ -288,4 +329,65 @@ impl GnfsCollector {
         let dep = self.dependencies.get(i);
         self.relations.try_dependency(&dep).map(|f| f.to_string())
     }
+}
+
+/// One worker's part of the GNFS matrix, from
+/// [`GnfsCollector::matrix_part`], solved by block Lanczos with the other
+/// parts in step: each call gives a vector, the workers sum (xor) theirs,
+/// and each passes the sum to its next call. The vectors are 64-bit words
+/// as pairs of 32-bit ones, low first, which JS can xor directly.
+#[wasm_bindgen]
+pub struct MatrixPart {
+    part: Part,
+}
+
+#[wasm_bindgen]
+impl MatrixPart {
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: &[u32]) -> MatrixPart {
+        MatrixPart {
+            part: Part::new(data, PART_TRIES),
+        }
+    }
+
+    /// The first vector to sum.
+    pub fn start(&mut self) -> Vec<u32> {
+        halves(&self.part.start())
+    }
+
+    /// The next vector to sum, from the sum of the last ones, or
+    /// `undefined` once every part is done.
+    pub fn step(&mut self, sum: &[u32]) -> Option<Vec<u32>> {
+        let sum: Vec<u64> = sum
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[lo, hi]| u64::from(lo) | u64::from(hi) << 32)
+            .collect();
+        self.part.step(&sum).map(|v| halves(&v))
+    }
+
+    /// The steps so far.
+    pub fn steps(&self) -> u32 {
+        self.part.progress().0 as u32
+    }
+
+    /// About how many steps the matrix takes.
+    pub fn expected_steps(&self) -> u32 {
+        self.part.progress().1 as u32
+    }
+
+    /// This part's words of the dependencies, for
+    /// [`GnfsCollector::finish_matrix`].
+    pub fn dependencies(&self) -> Vec<u64> {
+        self.part.dependencies().to_vec()
+    }
+}
+
+/// 64-bit words as their 32-bit halves, low first.
+fn halves(words: &[u64]) -> Vec<u32> {
+    words
+        .iter()
+        .flat_map(|&w| [w as u32, (w >> 32) as u32])
+        .collect()
 }

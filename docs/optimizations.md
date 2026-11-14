@@ -484,7 +484,28 @@ threads. Natively the arithmetic is about 3 times as fast.
 | 32-bit limbs | See [arithmetic](#arithmetic) |
 | A second build for the wide-arithmetic proposal | `i64.mul_wide_u` lets wasm use 64-bit limbs. In headless Chrome: ECM on RSA-100 7.75 s → 2.78 s; GNFS sieving 6.99 s → 5.40 s; the quadratic sieve 2%. The worker checks support with a 34-byte module and falls back |
 | SIMD (`simd128`) in that build, which every browser with wide arithmetic has | The compiler vectorizes loops in the sieves. In Node, without wide arithmetic: the quadratic sieve on a 76-digit number 59–60 s → 49 s, GNFS sieving at 90 digits 2.52 → 2.36 s; ECM unchanged |
-| No by-column copy of the matrix | Saves memory; the round-robin order alone took `Bᵀw` from 27.5 to 21.4 ms a step |
+| No by-column copy of the matrix on one worker | Saves memory; the round-robin order alone took `Bᵀw` from 27.5 to 21.4 ms a step |
+| The matrix in parts, one a worker, summing vectors with each other | RSA-100 in Node, 3 million relations: the matrix 335 s on one worker → 120 s on eight (166 s on two, 128 on four), with the collector holding none of it |
+
+**The matrix across workers.** Wasm in the browser has no shared-memory
+threads without cross-origin isolation, and a worker can't wait for a
+message in the middle of a call, so block Lanczos runs as a state machine
+on each worker, over a run of the matrix's columns. A worker keeps its
+columns' entries and its words of every block vector. Each step needs two
+sums over all the workers: `BV`, a word per row, and the three 64 × 64
+inner products. Each worker gives out its share, the workers xor them by
+reduce-scatter then all-gather over a port between each pair, and each
+goes on from the sum, making the same choices as the rest. The random
+start depends on a column's index in the whole matrix, so the answer is
+the same however it is split.
+
+With a part a worker's entries are small enough to keep the by-column
+copy, which alone took one part from the old 335 s to 280 s. On eight
+workers a step takes 26.5 ms: 12 of the worker's own work and 14.5
+summing, of which the summing itself, timed alone, is 5 ms. The rest is
+waiting for the slowest worker: the parts are even over the whole run
+(52–56 s each), but this laptop has four fast cores and six slow, and
+whichever parts run on slow ones that step hold up the others.
 
 ## Ways of measuring that paid off
 

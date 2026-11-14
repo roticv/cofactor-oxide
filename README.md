@@ -104,20 +104,23 @@ number, nothing to install. Expect it to be slower than the native binary:
 - **Limited SIMD.** Wasm SIMD is fixed at 128 bits, while native code can use
   AVX2 or AVX-512.
 - **Threads need extra setup.** Wasm threads rely on `SharedArrayBuffer`, which
-  only works when the page is served with cross-origin isolation headers. Work
-  can also be split across Web Workers.
+  only works when the page is served with cross-origin isolation headers,
+  which GitHub Pages can't send. Work is split across Web Workers instead,
+  which pass messages: the GNFS matrix too, a part on each worker, with the
+  workers summing their vectors directly with each other at every step.
 - **Memory limits.** 32-bit Wasm can address at most 4 GiB. That's plenty for
   ECM and QS. GNFS keeps its relations packed, in chunks rather than one
   growing vector, and lets go of its duplicate check and unfiltered matrix
   before filtering: from RSA-110's 10 million relations the collecting
-  worker reached 2.6 GB, and 3.6 GB through the matrix and square roots.
-  Much past that it won't fit.
+  worker reached 2.6 GB, and 3.6 GB through the square roots. The matrix's
+  entries and vectors are spread over the workers. Much past that it won't
+  fit.
 
 In practice the browser handles trial division, p±1, ECM and QS
 comfortably. It runs GNFS too, from about 105 digits (`?gnfs=BITS` in the
-URL lowers that, to try it on smaller numbers), but with the matrix and
-square roots on one worker and everything about 3× slower, jobs of that
-size take hours: they're a job for the native binary.
+URL lowers that, to try it on smaller numbers), but with the square roots
+on one worker and everything about 3× slower, jobs of that size take hours:
+they're a job for the native binary.
 
 GPUs were measured too: [`experiments/gpu-ecm`](experiments/gpu-ecm)
 benchmarks ECM stage 1 on an Apple M4's GPU through Metal. It runs about 3×

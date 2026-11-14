@@ -270,17 +270,40 @@ struct Sparse<'a, P> {
     par: &'a P,
 }
 
+/// The 64 rows of `B` to pack a bit per column, after the `post`
+/// heaviest, which are left out of `A` until the end: both by weight.
+fn heavy_rows<'c>(
+    cols: impl Iterator<Item = &'c [u32]>,
+    rows: usize,
+    post: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut weight = vec![0usize; rows];
+    for &r in cols.flatten() {
+        weight[r as usize] += 1;
+    }
+    let mut order: Vec<usize> = (0..rows).collect();
+    order.sort_unstable_by_key(|&r| core::cmp::Reverse(weight[r]));
+    order.truncate(post + 64);
+    let dense = order.split_off(post.min(order.len()));
+    (dense, order)
+}
+
 impl<'a, P: Parallel> Sparse<'a, P> {
     fn new(cols: &[Vec<u32>], rows: usize, post: usize, by_column: bool, par: &'a P) -> Self {
-        let mut weight = vec![0usize; rows];
-        for &r in cols.iter().flatten() {
-            weight[r as usize] += 1;
-        }
-        let mut order: Vec<usize> = (0..rows).collect();
-        order.sort_unstable_by_key(|&r| core::cmp::Reverse(weight[r]));
-        order.truncate(post + 64);
-        let dense = order.split_off(post.min(order.len()));
-        let post = order;
+        let (dense, post) = heavy_rows(cols.iter().map(Vec::as_slice), rows, post);
+        Self::with_rows(cols, rows, dense, post, by_column, par)
+    }
+
+    /// `B` with the given dense and post rows, which may be chosen from
+    /// more columns than these.
+    fn with_rows<C: AsRef<[u32]>>(
+        cols: &[C],
+        rows: usize,
+        dense: Vec<usize>,
+        post: Vec<usize>,
+        by_column: bool,
+        par: &'a P,
+    ) -> Self {
         // Bits 0–63 for the dense rows, and 64 on for the post rows.
         let mut bit = vec![u8::MAX; rows];
         for (i, &r) in dense.iter().chain(&post).enumerate() {
@@ -293,7 +316,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
         let block = |r: usize, c: usize| r / BLOCK * col_blocks + c / BLOCK;
         let mut starts = vec![0usize; row_blocks * col_blocks + 1];
         for (c, col) in cols.iter().enumerate() {
-            for r in col.iter().map(|&r| r as usize) {
+            for r in col.as_ref().iter().map(|&r| r as usize) {
                 match bit[r] {
                     u8::MAX => starts[block(r, c) + 1] += 1,
                     b @ 0..64 => masks[c] |= 1 << b,
@@ -308,6 +331,7 @@ impl<'a, P: Parallel> Sparse<'a, P> {
         let mut entries = vec![0u32; starts[starts.len() - 1]];
         for (c, col) in cols.iter().enumerate() {
             for r in col
+                .as_ref()
                 .iter()
                 .map(|&r| r as usize)
                 .filter(|&r| bit[r] == u8::MAX)
@@ -560,102 +584,103 @@ pub fn null_space(
         .find_map(|seed| {
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             if n >= WIDE_COLS {
-                return attempt::<Wide, _>(&b, rows, seed);
+                return attempt::<Wide, _>(&b, seed);
             }
-            attempt::<u64, _>(&b, rows, seed)
+            attempt::<u64, _>(&b, seed)
         })
         .unwrap_or_else(|| vec![0; n])
 }
 
-/// One run of block Lanczos on `b`, `W::BITS` vectors at a time, from the
-/// random start `seed`: for each column, a word whose bit `q` says whether
-/// it is in the `q`th vector found, or `None` if this seed fails or finds
-/// nothing.
-fn attempt<W: Word, P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> Option<Vec<u64>> {
-    let n = b.cols;
-    let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    // xorshift*: the multiply makes successive draws nonlinear in each
-    // other over GF(2), else a wide word's halves would be one linear map
-    // of each other, and Y, so V, would have only 64 independent vectors.
-    let y: Vec<W> = (0..n)
-        .map(|_| {
-            W::draw(|| {
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                rng.wrapping_mul(0x2545_F491_4F6C_DD1D)
-            })
-        })
-        .collect();
-    let v0 = b.mul_a(&y);
+/// What the recurrence carries from step to step: the last two steps'
+/// `W⁻¹`, the last one's `VᵀAV` and `VᵀA²V`, and its `S`.
+struct Recurrence<W: Word> {
+    winv1: Small<W>,
+    winv2: Small<W>,
+    vav1: Small<W>,
+    va2v1: Small<W>,
+    s1: W,
+}
 
-    // V for this step and the two before, and the previous steps' W⁻¹,
-    // VᵀAV, VᵀA²V and S.
-    let zero = || vec![W::ZERO; W::BITS];
-    let mut v = v0.clone();
-    let (mut v1, mut v2) = (vec![W::ZERO; n], vec![W::ZERO; n]);
-    let (mut winv1, mut winv2) = (zero(), zero());
-    let (mut vav1, mut va2v1) = (zero(), zero());
-    let mut s1 = W::ONES;
-    let mut x = vec![W::ZERO; n];
-    // Each step uses all but about one of the dimensions on average.
-    let max_steps = n / (W::BITS - 4) + 20;
-    let mut steps = 0;
-    loop {
-        let av = b.mul_a(&v);
-        let vav = b.inner(&v, &av);
-        if vav.iter().all(|&w| w == W::ZERO) {
-            break;
+/// A step's `W⁻¹` and `S`, and tables for `D`, `E` and `F` in
+/// `V' = AV·SSᵀ + V·D + V₁·E + V₂·F`.
+struct Coefficients<W: Word> {
+    winv: Small<W>,
+    s: W,
+    d: Vec<[W; 256]>,
+    e: Vec<[W; 256]>,
+    f: Vec<[W; 256]>,
+}
+
+impl<W: Word> Recurrence<W> {
+    fn new() -> Self {
+        let zero = || vec![W::ZERO; W::BITS];
+        Self {
+            winv1: zero(),
+            winv2: zero(),
+            vav1: zero(),
+            va2v1: zero(),
+            s1: W::ONES,
         }
-        steps += 1;
-        if steps > max_steps {
-            return None;
-        }
-        let va2v = b.inner(&av, &av);
-        let (winv, s) = choose(&vav, s1);
+    }
+
+    /// The coefficients for the step with `VᵀAV = vav` and `VᵀA²V = va2v`,
+    /// which make `V'` A-orthogonal to `V`, `V₁` and `V₂`, and so to every
+    /// earlier block; `None` if no columns can be used.
+    fn advance(&mut self, vav: Small<W>, va2v: Small<W>) -> Option<Coefficients<W>> {
+        let (winv, s) = choose(&vav, self.s1);
         if s == W::ZERO {
             return None;
         }
-        // X += V·W⁻¹·VᵀV₀.
-        let t = tables(&mul(&winv, &b.inner(&v, &v0)));
-        x = b.each(|i| x[i] ^ mul_word(&t, v[i]));
-
-        // V' = AV·SSᵀ + V·D + V₁·E + V₂·F, which makes V' A-orthogonal to
-        // V, V₁ and V₂, and so to every earlier block.
         let d = add(&identity(), &mul(&winv, &add(&keep_cols(&va2v, s), &vav)));
-        let e = mul(&winv1, &keep_cols(&vav, s));
+        let e = mul(&self.winv1, &keep_cols(&vav, s));
         let f = mul(
-            &mul(&winv2, &add(&identity(), &mul(&vav1, &winv1))),
-            &keep_cols(&add(&keep_cols(&va2v1, s1), &vav1), s),
+            &mul(
+                &self.winv2,
+                &add(&identity(), &mul(&self.vav1, &self.winv1)),
+            ),
+            &keep_cols(&add(&keep_cols(&self.va2v1, self.s1), &self.vav1), s),
         );
-        let (d, e, f) = (tables(&d), tables(&e), tables(&f));
-        let next =
-            b.each(|i| av[i] & s ^ mul_word(&d, v[i]) ^ mul_word(&e, v1[i]) ^ mul_word(&f, v2[i]));
-
-        v2 = core::mem::replace(&mut v1, core::mem::replace(&mut v, next));
-        winv2 = core::mem::replace(&mut winv1, winv);
-        vav1 = vav;
-        va2v1 = va2v;
-        s1 = s;
+        self.winv2 = core::mem::replace(&mut self.winv1, winv.clone());
+        self.vav1 = vav;
+        self.va2v1 = va2v;
+        self.s1 = s;
+        Some(Coefficients {
+            winv,
+            s,
+            d: tables(&d),
+            e: tables(&e),
+            f: tables(&f),
+        })
     }
+}
 
-    // A(X − Y) = 0 now, give or take the last V, and B maps the vectors of
-    // [X − Y | V] into a space of small dimension. Find the combinations
-    // that B maps to 0.
-    for (xi, &yi) in x.iter_mut().zip(&y) {
-        *xi = *xi ^ yi;
+impl<W: Word> Coefficients<W> {
+    /// Word `i` of `V'`, from those of `AV`, `V`, `V₁` and `V₂`.
+    fn next(&self, av: W, v: W, v1: W, v2: W) -> W {
+        av & self.s ^ mul_word(&self.d, v) ^ mul_word(&self.e, v1) ^ mul_word(&self.f, v2)
     }
-    let (bx, bv) = (b.mul_full(&x), b.mul_full(&v));
-    let words = rows.div_ceil(64);
+}
+
+/// Each step uses all but about one of the dimensions on average.
+fn max_steps<W: Word>(n: usize) -> usize {
+    n / (W::BITS - 4) + 20
+}
+
+/// The combinations of the vectors of `[X − Y | V]`, up to 64, that `B`
+/// maps to 0, from their images `bx` and `bv`: `A(X − Y) = 0` once the
+/// iterations end, give or take the last `V`, and `B` maps these vectors
+/// into a space of small dimension.
+fn combinations<W: Word>(bx: &[W], bv: &[W]) -> Vec<(W, W)> {
+    let words = bx.len().div_ceil(64);
     // Each of the images as a bit string over the rows of B, reduced
     // against the earlier ones, with the combination it stands for.
     let mut pivots: Vec<(usize, Vec<u64>, (W, W))> = Vec::new();
     let mut combos: Vec<(W, W)> = Vec::new();
     for lane in 0..2 * W::BITS {
         let (src, bit, mut combo) = if lane < W::BITS {
-            (&bx, lane, (W::unit(lane), W::ZERO))
+            (bx, lane, (W::unit(lane), W::ZERO))
         } else {
-            (&bv, lane - W::BITS, (W::ZERO, W::unit(lane - W::BITS)))
+            (bv, lane - W::BITS, (W::ZERO, W::unit(lane - W::BITS)))
         };
         let mut image = vec![0u64; words];
         for (r, &w) in src.iter().enumerate() {
@@ -677,21 +702,329 @@ fn attempt<W: Word, P: Parallel>(b: &Sparse<'_, P>, rows: usize, seed: u64) -> O
             None => combos.push(combo),
         }
     }
-
-    // Apply them, up to 64 at once, and keep the nonzero results.
     combos.truncate(64);
-    let deps: Vec<u64> = x
-        .iter()
-        .zip(&v)
+    combos
+}
+
+/// The `combos` applied to each column's words of `X − Y` and `V`.
+fn apply<W: Word>(x: &[W], v: &[W], combos: &[(W, W)]) -> Vec<u64> {
+    x.iter()
+        .zip(v)
         .map(|(&xw, &vw)| {
             combos.iter().enumerate().fold(0, |acc, (q, &(cx, cv))| {
                 let parity = ((xw & cx).count_ones() + (vw & cv).count_ones()) & 1;
                 acc | u64::from(parity) << q
             })
         })
+        .collect()
+}
+
+/// One run of block Lanczos on `b`, `W::BITS` vectors at a time, from the
+/// random start `seed`: for each column, a word whose bit `q` says whether
+/// it is in the `q`th vector found, or `None` if this seed fails or finds
+/// nothing.
+fn attempt<W: Word, P: Parallel>(b: &Sparse<'_, P>, seed: u64) -> Option<Vec<u64>> {
+    let n = b.cols;
+    let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    // xorshift*: the multiply makes successive draws nonlinear in each
+    // other over GF(2), else a wide word's halves would be one linear map
+    // of each other, and Y, so V, would have only 64 independent vectors.
+    let y: Vec<W> = (0..n)
+        .map(|_| {
+            W::draw(|| {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng.wrapping_mul(0x2545_F491_4F6C_DD1D)
+            })
+        })
         .collect();
+    let v0 = b.mul_a(&y);
+
+    // V for this step and the two before.
+    let mut v = v0.clone();
+    let (mut v1, mut v2) = (vec![W::ZERO; n], vec![W::ZERO; n]);
+    let mut recurrence = Recurrence::new();
+    let mut x = vec![W::ZERO; n];
+    let mut steps = 0;
+    loop {
+        let av = b.mul_a(&v);
+        let vav = b.inner(&v, &av);
+        if vav.iter().all(|&w| w == W::ZERO) {
+            break;
+        }
+        steps += 1;
+        if steps > max_steps::<W>(n) {
+            return None;
+        }
+        let va2v = b.inner(&av, &av);
+        let c = recurrence.advance(vav, va2v)?;
+        // X += V·W⁻¹·VᵀV₀.
+        let t = tables(&mul(&c.winv, &b.inner(&v, &v0)));
+        x = b.each(|i| x[i] ^ mul_word(&t, v[i]));
+        let next = b.each(|i| c.next(av[i], v[i], v1[i], v2[i]));
+        v2 = core::mem::replace(&mut v1, core::mem::replace(&mut v, next));
+    }
+
+    for (xi, &yi) in x.iter_mut().zip(&y) {
+        *xi = *xi ^ yi;
+    }
+    let combos = combinations(&b.mul_full(&x), &b.mul_full(&v));
+    let deps = apply(&x, &v, &combos);
     debug_assert!(b.mul_full(&deps).iter().all(|&w| w == 0), "Bx ≠ 0");
     deps.iter().any(|&w| w != 0).then_some(deps)
+}
+
+/// Splits `B`, given by its columns, into `parts` runs of columns with
+/// about as many entries each, for [`MatrixPart`]s that solve it together,
+/// as [`null_space`] would. Each run is packed into one buffer, and the
+/// columns are let go of as they are.
+pub fn split_matrix(
+    mut cols: Vec<Vec<u32>>,
+    rows: usize,
+    post: usize,
+    parts: usize,
+) -> Vec<Vec<u32>> {
+    let (dense, post) = heavy_rows(cols.iter().map(Vec::as_slice), rows, post);
+    let bounds = split(cols.iter().map(|c| c.len() + 1), parts);
+    let n = cols.len();
+    bounds
+        .windows(2)
+        .map(|w| {
+            let run = &mut cols[w[0]..w[1]];
+            let mut data = vec![
+                rows as u32,
+                n as u32,
+                w[0] as u32,
+                run.len() as u32,
+                dense.len() as u32,
+                post.len() as u32,
+            ];
+            data.extend(dense.iter().chain(&post).map(|&r| r as u32));
+            let mut end = 0u32;
+            data.extend(run.iter().map(|c| {
+                end += c.len() as u32;
+                end
+            }));
+            for c in run {
+                data.extend_from_slice(&core::mem::take(c));
+            }
+            data
+        })
+        .collect()
+}
+
+/// What a [`MatrixPart`] waits on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// `BY`, to start from `V₀ = AY`.
+    Start,
+    /// `BV`, for `AV`.
+    Product,
+    /// `VᵀAV`, `VᵀA²V` and `VᵀV₀`.
+    Inner,
+    /// `B(X − Y)` and `BV`.
+    Images,
+    Done,
+}
+
+/// One of several workers that run block Lanczos together on a matrix from
+/// [`Relations::split_matrix`](crate::nfs::Relations::split_matrix), each
+/// with a run of its columns, so its share of the entries and of the block
+/// vectors: those are a word per column, and each worker keeps only its
+/// columns' words.
+///
+/// Each step needs `BV`, a word per row of `B`, which is the sum of every
+/// worker's product over its columns, and three `64 × 64` inner products,
+/// sums likewise. So the workers take turns: each gives out a vector, the
+/// caller sums (xors) the vectors of all the workers and hands every one
+/// the sum, and each goes on to its next vector. They make the same
+/// choices from the same sums, so they stay in step, and when they are
+/// done each has its columns' words of the dependencies.
+pub struct MatrixPart {
+    b: Sparse<'static, crate::parallel::Serial>,
+    /// Columns of the whole matrix, and the first of this part's.
+    n: usize,
+    first: usize,
+    seed: u64,
+    tries: u64,
+    phase: Phase,
+    y: Vec<u64>,
+    v0: Vec<u64>,
+    v: Vec<u64>,
+    v1: Vec<u64>,
+    v2: Vec<u64>,
+    x: Vec<u64>,
+    av: Vec<u64>,
+    recurrence: Recurrence<u64>,
+    steps: usize,
+    deps: Vec<u64>,
+}
+
+impl MatrixPart {
+    /// The part in `data`, from
+    /// [`Relations::split_matrix`](crate::nfs::Relations::split_matrix),
+    /// which tries up to `tries` random starts.
+    ///
+    /// # Panics
+    ///
+    /// If `data` isn't such a part.
+    pub fn new(data: &[u32], tries: u64) -> Self {
+        let [rows, n, first, len, dense, post] = [0, 1, 2, 3, 4, 5].map(|i| data[i] as usize);
+        let heavy = &data[6..6 + dense + post];
+        let ends = &data[6 + dense + post..][..len];
+        let entries = &data[6 + dense + post + len..];
+        let cols: Vec<&[u32]> = (0..len)
+            .map(|c| {
+                let start = if c == 0 { 0 } else { ends[c - 1] as usize };
+                &entries[start..ends[c] as usize]
+            })
+            .collect();
+        let b = Sparse::with_rows(
+            &cols,
+            rows,
+            heavy[..dense].iter().map(|&r| r as usize).collect(),
+            heavy[dense..].iter().map(|&r| r as usize).collect(),
+            true,
+            &crate::parallel::Serial,
+        );
+        Self {
+            b,
+            n,
+            first,
+            seed: 0,
+            tries,
+            phase: Phase::Done,
+            y: Vec::new(),
+            v0: Vec::new(),
+            v: Vec::new(),
+            v1: Vec::new(),
+            v2: Vec::new(),
+            x: Vec::new(),
+            av: Vec::new(),
+            recurrence: Recurrence::new(),
+            steps: 0,
+            deps: vec![0; len],
+        }
+    }
+
+    /// The steps so far from this start, and about how many it will take.
+    pub fn progress(&self) -> (usize, usize) {
+        (self.steps, self.n / (u64::BITS as usize - 1))
+    }
+
+    /// The first vector to sum, for the first start.
+    pub fn start(&mut self) -> Vec<u64> {
+        self.seed = 0;
+        self.restart()
+    }
+
+    /// `Y` for the current seed, which depends on each column's index in
+    /// the whole matrix but not on how it is split, and `BY` to sum.
+    fn restart(&mut self) -> Vec<u64> {
+        let seed = self.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.y = (self.first..self.first + self.b.cols)
+            .map(|i| {
+                // splitmix64, which is far from linear over GF(2).
+                let mut z = seed ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ z >> 30).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ z >> 27).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ z >> 31
+            })
+            .collect();
+        self.phase = Phase::Start;
+        self.b.mul(&self.y)
+    }
+
+    /// The next start, or the end if every one has failed.
+    fn retry(&mut self) -> Option<Vec<u64>> {
+        self.seed += 1;
+        if self.seed < self.tries {
+            return Some(self.restart());
+        }
+        self.phase = Phase::Done;
+        self.deps.fill(0);
+        None
+    }
+
+    /// Goes on from the sum of every part's last vector, giving the next
+    /// vector to sum, or `None` once done.
+    ///
+    /// # Panics
+    ///
+    /// If `sum` isn't the length of the sum asked for.
+    pub fn step(&mut self, sum: &[u64]) -> Option<Vec<u64>> {
+        let b = &self.b;
+        let cols = b.cols;
+        match self.phase {
+            Phase::Start => {
+                self.v0 = b.mul_t(sum);
+                self.v.clone_from(&self.v0);
+                self.v1 = vec![0; cols];
+                self.v2 = vec![0; cols];
+                self.x = vec![0; cols];
+                self.recurrence = Recurrence::new();
+                self.steps = 0;
+                self.phase = Phase::Product;
+                Some(b.mul(&self.v))
+            }
+            Phase::Product => {
+                self.av = b.mul_t(sum);
+                let mut out = inner(&self.v, &self.av);
+                out.extend(inner(&self.av, &self.av));
+                out.extend(inner(&self.v, &self.v0));
+                self.phase = Phase::Inner;
+                Some(out)
+            }
+            Phase::Inner => {
+                let (vav, rest) = sum.split_at(64);
+                let (va2v, vv0) = rest.split_at(64);
+                if vav.iter().all(|&w| w == 0) {
+                    for (xi, &yi) in self.x.iter_mut().zip(&self.y) {
+                        *xi ^= yi;
+                    }
+                    self.phase = Phase::Images;
+                    let mut out = b.mul_full(&self.x);
+                    out.extend(b.mul_full(&self.v));
+                    return Some(out);
+                }
+                self.steps += 1;
+                if self.steps > max_steps::<u64>(self.n) {
+                    return self.retry();
+                }
+                let Some(c) = self.recurrence.advance(vav.to_vec(), va2v.to_vec()) else {
+                    return self.retry();
+                };
+                let t = tables(&mul(&c.winv, vv0));
+                for (xi, &vi) in self.x.iter_mut().zip(&self.v) {
+                    *xi ^= mul_word(&t, vi);
+                }
+                let next: Vec<u64> = (0..cols)
+                    .map(|i| c.next(self.av[i], self.v[i], self.v1[i], self.v2[i]))
+                    .collect();
+                self.v2 = core::mem::replace(&mut self.v1, core::mem::replace(&mut self.v, next));
+                self.phase = Phase::Product;
+                Some(self.b.mul(&self.v))
+            }
+            Phase::Images => {
+                let (bx, bv) = sum.split_at(sum.len() / 2);
+                let combos = combinations(bx, bv);
+                if combos.is_empty() {
+                    return self.retry();
+                }
+                self.deps = apply(&self.x, &self.v, &combos);
+                self.phase = Phase::Done;
+                None
+            }
+            Phase::Done => None,
+        }
+    }
+
+    /// For each of this part's columns, a word whose bit `q` says whether
+    /// it is in the `q`th vector found: all zero if every start failed.
+    pub fn dependencies(&self) -> &[u64] {
+        &self.deps
+    }
 }
 
 #[cfg(test)]
@@ -755,6 +1088,63 @@ mod tests {
                     "wide Bᵀw, copy {by_column}"
                 );
             }
+        }
+    }
+
+    /// Parts of a matrix, solved together by summing their vectors as the
+    /// browser's workers do, find vectors in its null space, however many
+    /// parts it is split into.
+    #[test]
+    fn parts_find_dependencies() {
+        let (rows, n, post) = (3000usize, 3130usize, 48);
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let cols: Vec<Vec<u32>> = (0..n)
+            .map(|_| {
+                let mut col: Vec<u32> = (0..6).map(|_| (next() % 200) as u32).collect();
+                col.extend((0..8).map(|_| (next() % rows as u64) as u32));
+                col.sort_unstable();
+                col.dedup();
+                col
+            })
+            .collect();
+        for parts in [1, 3, 5] {
+            let mut ms: Vec<MatrixPart> = split_matrix(cols.clone(), rows, post, parts)
+                .iter()
+                .map(|data| MatrixPart::new(data, 4))
+                .collect();
+            let sum = |outs: Vec<Vec<u64>>| -> Vec<u64> {
+                outs.into_iter()
+                    .reduce(|a, b| a.iter().zip(&b).map(|(x, y)| x ^ y).collect())
+                    .unwrap()
+            };
+            let mut total = sum(ms.iter_mut().map(MatrixPart::start).collect());
+            loop {
+                let outs: Vec<Option<Vec<u64>>> = ms.iter_mut().map(|m| m.step(&total)).collect();
+                if outs.iter().all(Option::is_none) {
+                    break;
+                }
+                assert!(outs.iter().all(Option::is_some), "parts out of step");
+                total = sum(outs.into_iter().map(Option::unwrap).collect());
+            }
+            let deps: Vec<u64> = ms.iter().flat_map(|m| m.dependencies().to_vec()).collect();
+            assert_eq!(deps.len(), n);
+            assert!(
+                deps.iter().any(|&w| w != 0),
+                "{parts} parts: no dependencies"
+            );
+            let mut image = vec![0u64; rows];
+            for (col, &w) in cols.iter().zip(&deps) {
+                for &r in col {
+                    image[r as usize] ^= w;
+                }
+            }
+            assert!(image.iter().all(|&w| w == 0), "{parts} parts: Bx ≠ 0");
         }
     }
 }

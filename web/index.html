@@ -292,7 +292,7 @@
           <li><b>Self-initializing quadratic sieve</b><span class="badge done">done</span>
             <span class="desc">Splits what ECM leaves, up to about 105 digits, with the sieving shared across Web Workers and block Lanczos for the linear algebra. ECM stops sooner when the sieve follows: at about 30% of the composite's digits.</span></li>
           <li><b>Number field sieve</b><span class="badge done">done</span>
-            <span class="desc">The fastest known method beyond about 100 digits, and here for composites from about 105 digits: polynomials from Kleinjung's method, a lattice siever shared across Web Workers, filtering and block Lanczos, and square roots by Newton's method. The matrix and square roots run on one worker. Very slow at these sizes in a browser: hours.</span></li>
+            <span class="desc">The fastest known method beyond about 100 digits, and here for composites from about 105 digits: polynomials from Kleinjung's method, a lattice siever shared across Web Workers, filtering and block Lanczos, and square roots by Newton's method. The matrix is solved by every worker together, each with a part; the square roots run on one. Very slow at these sizes in a browser: hours.</span></li>
         </ul>
         <p style="margin-top: 14px">
           WebAssembly lacks a 64×64→128-bit multiply, so the browser build runs
@@ -335,7 +335,7 @@
     const QS_MIN_BITS = 81;
     // From this size, the number field sieve runs instead: about 105
     // digits, a little past where it overtakes the quadratic sieve
-    // natively, since here its matrix and square roots get one worker.
+    // natively, since here its square roots get one worker.
     // `?gnfs=BITS` in the URL lowers it, down to 130 bits, to try the
     // number field sieve on numbers that take minutes rather than hours.
     const GNFS_MIN_BITS = Math.max(130, Number(new URLSearchParams(location.search).get("gnfs")) || 350);
@@ -472,18 +472,42 @@
     }
 
     // Runs the number field sieve: one more worker chooses the polynomials
-    // and collects the relations that every worker sieves, then solves the
-    // matrix and takes square roots. Resolves with a proper factor of n, or
-    // null if there is none to find.
+    // and collects the relations that every worker sieves, then filters the
+    // matrix, which every worker solves a part of, and takes square roots.
+    // Resolves with a proper factor of n, or null if there is none to find.
     function runGnfs(n) {
       return new Promise((resolve, reject) => {
         const id = nextId++;
         const bits = n.toString(2).length;
         const collector = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+        // Whether the workers are sieving or solving the matrix, and the
+        // matrix parts' answers so far.
         let sieving = false;
+        let matrix = null;
         const stopSieving = () => {
-          if (sieving) for (let i = 0; i < WORKERS; i++) restart(i);
+          if (sieving || matrix) for (let i = 0; i < WORKERS; i++) restart(i);
           sieving = false;
+          matrix = null;
+        };
+        // Gives worker i part i of the matrix, and a port to each other
+        // worker, so that they sum their vectors without the page.
+        const solveMatrix = (parts) => {
+          const k = parts.length;
+          matrix = { words: new Array(k), left: k };
+          const ports = parts.map(() => new Array(k).fill(null));
+          for (let i = 0; i < k; i++) {
+            for (let j = i + 1; j < k; j++) {
+              const channel = new MessageChannel();
+              ports[i][j] = channel.port1;
+              ports[j][i] = channel.port2;
+            }
+          }
+          parts.forEach((data, i) => {
+            workers[i].postMessage(
+              { id, type: "matrix-part", data, index: i, ports: ports[i] },
+              [data.buffer, ...ports[i].filter(Boolean)],
+            );
+          });
         };
         const stop = () => {
           collector.terminate();
@@ -508,7 +532,9 @@
             setLabel(describe([data.progress]));
           } else if (data.solving) {
             stopSieving();
-            setLabel(`Number field sieve: filtering and solving the matrix for a ${bits}-bit composite…`);
+            setLabel(`Number field sieve: filtering the matrix for a ${bits}-bit composite…`);
+          } else if (data.matrixParts) {
+            solveMatrix(data.matrixParts);
           } else if ("found" in data) {
             answer(data.found);
           }
@@ -522,13 +548,22 @@
           onMessage(index, data) {
             if (data.gnfsRelations) {
               collector.postMessage({ type: "gnfs-relations", relations: data.gnfsRelations });
+            } else if (data.progress) {
+              setLabel(describe([{ ...data.progress, bits }]));
+            } else if (data.matrixDeps && matrix) {
+              matrix.words[data.index] = data.matrixDeps;
+              if (--matrix.left === 0) {
+                const words = matrix.words;
+                stopSieving();
+                collector.postMessage({ id, type: "gnfs-matrix-done", parts: words }, words.map((w) => w.buffer));
+              }
             } else if (data.error) {
               stop();
               reject(new Error(data.error));
             }
           },
         };
-        collector.postMessage({ id, type: "gnfs-collect", n: n.toString() });
+        collector.postMessage({ id, type: "gnfs-collect", n: n.toString(), workers: WORKERS });
       });
     }
 
@@ -571,6 +606,9 @@
       }
       if (first?.method === "gnfs") {
         return `Number field sieve: ${first.done} relations for ${first.total} ideals on a ${first.bits}-bit composite…`;
+      }
+      if (first?.method === "gnfs-matrix") {
+        return `Number field sieve: block Lanczos step ${first.done} of about ${first.total}, on ${first.workers} workers, for a ${first.bits}-bit composite…`;
       }
       if (first?.method === "gnfs-sqrt") {
         return `Number field sieve: square roots for dependency ${first.done + 1} of ${first.total}, on a ${first.bits}-bit composite…`;

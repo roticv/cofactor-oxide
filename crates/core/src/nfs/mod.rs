@@ -44,7 +44,7 @@ pub use sieve::{Relation, Sieve, special_qs};
 
 use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, split};
-use crate::qs::dependency_masks;
+use crate::qs::{Pending, dependency_masks, split_masks};
 use matrix::{Matrix, characters};
 use store::{Seen, Store};
 
@@ -159,6 +159,7 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
             last_check: None,
             ready: false,
             solved: false,
+            split: None,
         }
     }
 }
@@ -179,6 +180,10 @@ pub struct Relations<const LIMBS: usize> {
     /// The store has no algebraic primes to rebuild them from, so no
     /// relations can be added after.
     solved: bool,
+    /// The matrix while [`MatrixPart`](crate::qs::MatrixPart)s solve it,
+    /// from [`Relations::split_matrix`]: the relations kept, and each
+    /// filtered row's.
+    split: Option<(Vec<u32>, Vec<Vec<u32>>, Pending)>,
 }
 
 const SOLVED: &str = "the matrix was solved: relations can't be added or checked after";
@@ -306,6 +311,78 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     }
 
     fn solve(&mut self, par: &impl Parallel, spill: Option<&mut impl Spill>) -> Dependencies {
+        let (kept, rows, sets, cols, spill) = self.filtered(par, spill);
+        let masks = dependency_masks(rows, cols, POST_ROWS, par);
+        let deps = Self::combine(&kept, &sets, &masks);
+        drop(sets);
+        if let Some(spill) = spill {
+            drop(kept);
+            spill.read(&mut |words| self.store.push_words(words));
+        }
+        deps
+    }
+
+    /// The matrix split into `parts` for [`MatrixPart`]s to solve
+    /// together, which [`Relations::finish_split`] then takes their answer
+    /// from: each part's [`MatrixPart::dependencies`], joined in order. No
+    /// parts if the matrix is small enough to solve at once, and then
+    /// [`Relations::finish_split`] takes an empty slice.
+    ///
+    /// [`MatrixPart`]: crate::qs::MatrixPart
+    /// [`MatrixPart::dependencies`]: crate::qs::MatrixPart::dependencies
+    ///
+    /// # Panics
+    ///
+    /// If the matrix was solved already.
+    pub fn split_matrix(&mut self, parts: usize) -> Vec<Vec<u32>> {
+        let (kept, rows, sets, cols, _) = self.filtered(&Serial, None::<&mut NoSpill>);
+        let (pending, parts) = split_masks(rows, cols, POST_ROWS, parts);
+        self.split = Some((kept, sets, pending));
+        parts
+    }
+
+    /// The dependencies from the parts of [`Relations::split_matrix`]'s
+    /// answer, joined.
+    ///
+    /// # Panics
+    ///
+    /// If the matrix wasn't split.
+    pub fn finish_split(&mut self, found: &[u64]) -> Dependencies {
+        let (kept, sets, pending) = self.split.take().expect("the matrix wasn't split");
+        Self::combine(&kept, &sets, &pending.finish(found))
+    }
+
+    /// The dependencies among the relations `kept`, from the masks of the
+    /// filtered rows, which are the sums of `sets` of them.
+    fn combine(kept: &[u32], sets: &[Vec<u32>], masks: &[u64]) -> Dependencies {
+        // Each relation is in a dependency if it is in an odd number of
+        // the dependency's rows.
+        let mut of_kept = vec![0u64; kept.len()];
+        for (set, &m) in sets.iter().zip(masks) {
+            if m != 0 {
+                for &i in set {
+                    of_kept[i as usize] ^= m;
+                }
+            }
+        }
+        Dependencies::new(kept, &of_kept)
+    }
+
+    /// The relations kept after pruning, the filtered rows with their
+    /// characters, the relations each is the sum of, and the columns; and
+    /// `spill` if the relations were moved there.
+    #[allow(clippy::type_complexity)]
+    fn filtered<'s, S: Spill>(
+        &mut self,
+        par: &impl Parallel,
+        spill: Option<&'s mut S>,
+    ) -> (
+        Vec<u32>,
+        Vec<Vec<u32>>,
+        Vec<Vec<u32>>,
+        usize,
+        Option<&'s mut S>,
+    ) {
         let (kept, rows, cols) = self.release().into_pruned();
         let fb = &self.gnfs.fb;
         let pieces = split(kept.iter().map(|_| 1), par.threads());
@@ -340,24 +417,7 @@ impl<const LIMBS: usize> Relations<LIMBS> {
             );
         }
         drop(chars);
-        let masks = dependency_masks(rows, cols + fb.characters.len(), POST_ROWS, par);
-        // Each relation is in a dependency if it is in an odd number of
-        // the dependency's rows.
-        let mut of_kept = vec![0u64; kept.len()];
-        for (set, &m) in sets.iter().zip(&masks) {
-            if m != 0 {
-                for &i in set {
-                    of_kept[i as usize] ^= m;
-                }
-            }
-        }
-        drop(sets);
-        let deps = Dependencies::new(&kept, &of_kept);
-        if let Some(spill) = spill {
-            drop((kept, of_kept));
-            spill.read(&mut |words| self.store.push_words(words));
-        }
-        deps
+        (kept, rows, sets, cols + fb.characters.len(), spill)
     }
 
     /// Takes the square roots for the dependency `dep`, returning a proper

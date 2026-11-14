@@ -3,7 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::lanczos::null_space;
+use super::lanczos::{null_space, split_matrix};
 use crate::parallel::{Parallel, Serial};
 
 /// Matrices with more rows than this go to block Lanczos.
@@ -50,25 +50,90 @@ pub(crate) fn dependency_masks(
 ) -> Vec<u64> {
     let n = rows.len();
     if n <= DENSE_ROWS {
-        let rows: Vec<Vec<usize>> = rows
-            .iter()
-            .map(|row| row.iter().map(|&c| c as usize).collect())
-            .collect();
-        let mut masks = vec![0u64; n];
-        for (q, dep) in dense(&rows, cols).iter().take(64).enumerate() {
-            for &r in dep {
-                masks[r] |= 1 << q;
-            }
-        }
-        return masks;
+        return dense_masks(&rows, cols);
     }
     let (kept, pruned, cols) = prune(rows, cols);
     let found = null_space(pruned, cols, post, LANCZOS_TRIES, par);
-    let mut masks = vec![0u64; n];
-    for (&r, &m) in kept.iter().zip(&found) {
-        masks[r as usize] = m;
+    Pending {
+        n,
+        kept,
+        masks: None,
+    }
+    .finish(&found)
+}
+
+/// [`dependency_masks`] for small matrices, by Gaussian elimination.
+fn dense_masks(rows: &[Vec<u32>], cols: usize) -> Vec<u64> {
+    let rows: Vec<Vec<usize>> = rows
+        .iter()
+        .map(|row| row.iter().map(|&c| c as usize).collect())
+        .collect();
+    let mut masks = vec![0u64; rows.len()];
+    for (q, dep) in dense(&rows, cols).iter().take(64).enumerate() {
+        for &r in dep {
+            masks[r] |= 1 << q;
+        }
     }
     masks
+}
+
+/// Block Lanczos starts that [`MatrixPart`](super::MatrixPart)s try.
+pub const PART_TRIES: u64 = LANCZOS_TRIES;
+
+/// A matrix from [`split_masks`] being solved elsewhere.
+#[derive(Clone, Debug)]
+pub(crate) struct Pending {
+    /// Rows before pruning, and those kept.
+    n: usize,
+    kept: Vec<u32>,
+    /// The answer, if the matrix was small enough to find it at once.
+    masks: Option<Vec<u64>>,
+}
+
+impl Pending {
+    /// [`dependency_masks`]'s answer, from the words for the kept rows
+    /// that block Lanczos found.
+    pub(crate) fn finish(self, found: &[u64]) -> Vec<u64> {
+        if let Some(masks) = self.masks {
+            return masks;
+        }
+        let mut masks = vec![0u64; self.n];
+        for (&r, &m) in self.kept.iter().zip(found) {
+            masks[r as usize] = m;
+        }
+        masks
+    }
+}
+
+/// [`dependency_masks`] split into `parts` for
+/// [`MatrixPart`](super::MatrixPart)s, which find its words for the kept
+/// rows, in order, for [`Pending::finish`]. No parts if the matrix is small
+/// enough to solve at once.
+pub(crate) fn split_masks(
+    rows: Vec<Vec<u32>>,
+    cols: usize,
+    post: usize,
+    parts: usize,
+) -> (Pending, Vec<Vec<u32>>) {
+    let n = rows.len();
+    if n <= DENSE_ROWS {
+        let masks = Some(dense_masks(&rows, cols));
+        return (
+            Pending {
+                n,
+                kept: Vec::new(),
+                masks,
+            },
+            Vec::new(),
+        );
+    }
+    let (kept, pruned, cols) = prune(rows, cols);
+    let pending = Pending {
+        n,
+        kept,
+        masks: None,
+    };
+    (pending, split_matrix(pruned, cols, post, parts))
 }
 
 /// The dependencies in `masks`, from [`dependency_masks`], as lists of

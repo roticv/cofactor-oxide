@@ -12,7 +12,14 @@
 // - "gnfs-collect", "gnfs-sieve" and "gnfs-relations": the same for the
 //   number field sieve. The collector chooses the polynomials, which the
 //   page passes to the sieving workers, and once there are enough
-//   relations it solves the matrix and tries dependencies one at a time.
+//   relations it filters the matrix and splits it into parts, one for each
+//   worker.
+// - "matrix-part": one part of that matrix, solved by block Lanczos in step
+//   with the other workers' parts, summing vectors with them directly over
+//   the message ports the page gives each pair of workers. Each worker
+//   sends back its part's words of the dependencies.
+// - "gnfs-matrix-done": the parts' words, joined, for the collector, which
+//   tries the dependencies one at a time.
 
 // Browsers with the wide-arithmetic proposal get a build that uses its
 // 64×64→128-bit multiply, i64.mul_wide_u, which this tiny module tests for:
@@ -23,13 +30,13 @@ const WIDE = new Uint8Array([
   0, 97, 115, 109, 1, 0, 0, 0, 1, 8, 1, 96, 2, 126, 126, 2, 126, 126, 3, 2, 1, 0,
   10, 10, 1, 8, 0, 32, 0, 32, 1, 252, 22, 11,
 ]);
-let Collector, GnfsCollector, GnfsSieve, Sieve, factor;
+let Collector, GnfsCollector, GnfsSieve, MatrixPart, Sieve, factor;
 const ready = (
   WebAssembly.validate(WIDE)
     ? import("./pkg-wide/cofox_wasm.js").catch(() => import("./pkg/cofox_wasm.js"))
     : import("./pkg/cofox_wasm.js")
 ).then((pkg) => {
-  ({ Collector, GnfsCollector, GnfsSieve, Sieve, factor } = pkg);
+  ({ Collector, GnfsCollector, GnfsSieve, MatrixPart, Sieve, factor } = pkg);
   return pkg.default();
 });
 
@@ -40,6 +47,8 @@ const BATCH_MS = 100;
 
 let collector = null;
 let solving = false;
+// The workers that solve the matrix together, one part each.
+let matrixWorkers = 1;
 let sent = 0;
 
 self.onmessage = async (event) => {
@@ -62,11 +71,16 @@ self.onmessage = async (event) => {
         return addRelations(message);
       case "gnfs-collect":
         collector = new GnfsCollector(message.n);
+        matrixWorkers = message.workers ?? 1;
         return self.postMessage({ id, poly: collector.poly() });
       case "gnfs-sieve":
         return runGnfsSieve(message);
       case "gnfs-relations":
         return addGnfsRelations(message);
+      case "matrix-part":
+        return runMatrixPart(message);
+      case "gnfs-matrix-done":
+        return tryDependencies(id, message.parts);
     }
   } catch (err) {
     self.postMessage({ id, error: String(err?.message ?? err) });
@@ -145,11 +159,87 @@ function addGnfsRelations({ id, relations }) {
   if (!ready) return;
   solving = true;
   self.postMessage({ id, solving: true });
-  const dependencies = collector.solve();
+  const count = collector.split_matrix(matrixWorkers);
+  if (count === 0) return tryDependencies(id, []);
+  const parts = [];
+  for (let i = 0; i < count; i++) parts.push(collector.matrix_part(i));
+  self.postMessage({ id, matrixParts: parts }, parts.map((p) => p.buffer));
+}
+
+// Takes the matrix parts' words of the dependencies and tries each
+// dependency's square roots.
+function tryDependencies(id, parts) {
+  const bits = collector.bits();
+  const words = new BigUint64Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    words.set(p, at);
+    at += p.length;
+  }
+  const dependencies = collector.finish_matrix(words);
   for (let i = 0; i < dependencies; i++) {
     self.postMessage({ id, progress: { method: "gnfs-sqrt", bits, done: i, total: dependencies } });
     const found = collector.try_dependency(i);
     if (found !== undefined) return self.postMessage({ id, found });
   }
   self.postMessage({ id, found: null });
+}
+
+// Solves one part of the matrix with the other workers' parts: each step
+// gives a vector to sum with theirs, and goes on from the sum.
+async function runMatrixPart({ id, data, index, ports }) {
+  const part = new MatrixPart(data);
+  const inboxes = ports.map((port) => port && inbox(port));
+  let vector = part.start();
+  for (;;) {
+    const sum = await sumWithPeers(vector, index, ports, inboxes);
+    const next = part.step(sum);
+    if (next === undefined) break;
+    vector = next;
+    const now = performance.now();
+    if (index === 0 && now - sent >= PROGRESS_MS) {
+      sent = now;
+      self.postMessage({ id, progress: { method: "gnfs-matrix", done: part.steps(), total: part.expected_steps(), workers: ports.length } });
+    }
+  }
+  const words = part.dependencies();
+  part.free();
+  self.postMessage({ id, matrixDeps: words, index }, [words.buffer]);
+}
+
+// The messages from a port, in order, as promises.
+function inbox(port) {
+  const queue = [];
+  const waiting = [];
+  port.onmessage = (event) => (waiting.length > 0 ? waiting.shift()(event.data) : queue.push(event.data));
+  return () => (queue.length > 0 ? Promise.resolve(queue.shift()) : new Promise((resolve) => waiting.push(resolve)));
+}
+
+// The xor of `vector` with every peer's, by reduce-scatter then all-gather:
+// worker j sums the jth of k slices from everyone and sends the sum back to
+// all, so each sends and receives about two vectors' worth whatever k is.
+// A port's messages arrive in order, and a peer can't send its next slice
+// before it has this step's sums, so the next message from each peer is
+// always the one wanted.
+async function sumWithPeers(vector, me, ports, inboxes) {
+  const k = ports.length;
+  if (k === 1) return vector;
+  const bound = (j) => Math.floor((j * vector.length) / k);
+  for (let j = 0; j < k; j++) {
+    if (j === me) continue;
+    const slice = vector.slice(bound(j), bound(j + 1));
+    ports[j].postMessage(slice, [slice.buffer]);
+  }
+  const mine = vector.subarray(bound(me), bound(me + 1));
+  for (const slice of await Promise.all(inboxes.map((next, j) => (j === me ? null : next())))) {
+    if (slice) for (let i = 0; i < slice.length; i++) mine[i] ^= slice[i];
+  }
+  for (let j = 0; j < k; j++) {
+    if (j === me) continue;
+    const copy = mine.slice();
+    ports[j].postMessage(copy, [copy.buffer]);
+  }
+  const sums = await Promise.all(inboxes.map((next, j) => (j === me ? null : next())));
+  sums.forEach((slice, j) => slice && vector.set(slice, bound(j)));
+  return vector;
 }

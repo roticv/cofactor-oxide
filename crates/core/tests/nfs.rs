@@ -815,3 +815,53 @@ fn relations_cannot_be_added_after_solving() {
     relations.dependencies();
     relations.add(sieve.special_q(q, r));
 }
+
+/// The matrix split into parts that solve it together, as the browser's
+/// workers do, gives dependencies that factor `n`.
+#[test]
+fn split_matrix_factors() {
+    use cofox_core::qs::{MatrixPart, PART_TRIES};
+    let n = u("59858698299029333151760743317766029830337454377407");
+    let gnfs = Gnfs::new(&n, &Params::for_bits(n.bits())).unwrap();
+    let mut sieve = gnfs.sieve();
+    let mut relations = gnfs.relations();
+    'sieve: for k in 0.. {
+        for (q, r) in gnfs.special_qs(k) {
+            relations.add(sieve.special_q(q, r));
+            if relations.is_ready() {
+                break 'sieve;
+            }
+        }
+    }
+    let mut parts: Vec<MatrixPart> = relations
+        .split_matrix(3)
+        .iter()
+        .map(|data| MatrixPart::new(data, PART_TRIES))
+        .collect();
+    assert_eq!(parts.len(), 3);
+    let sum = |outs: Vec<Vec<u64>>| -> Vec<u64> {
+        outs.into_iter()
+            .reduce(|a, b| a.iter().zip(&b).map(|(x, y)| x ^ y).collect())
+            .unwrap()
+    };
+    let mut total = sum(parts.iter_mut().map(MatrixPart::start).collect());
+    loop {
+        // Every part takes every step, so no short-circuiting collect.
+        let outs: Vec<Option<Vec<u64>>> = parts.iter_mut().map(|m| m.step(&total)).collect();
+        if outs.iter().all(Option::is_none) {
+            break;
+        }
+        total = sum(outs.into_iter().map(Option::unwrap).collect());
+    }
+    let found: Vec<u64> = parts
+        .iter()
+        .flat_map(|m| m.dependencies().to_vec())
+        .collect();
+    let deps = relations.finish_split(&found);
+    assert!(!deps.is_empty());
+    let d = deps
+        .iter()
+        .find_map(|dep| relations.try_dependency(&dep))
+        .unwrap();
+    assert!(n.div_rem(&d).1 == Uint::ZERO && d != Uint::ONE && d != n);
+}
