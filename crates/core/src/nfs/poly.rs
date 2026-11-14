@@ -78,6 +78,12 @@ const ROOT_FINALISTS: usize = 32;
 /// now it has 4.68e-10 (CADO-NFS's own, 4.58e-10) and sieves 1.3 to 2.2
 /// times as fast. RSA-130's sieves 12% faster. On 10 threads the searches
 /// take 38 and 6 minutes.
+///
+/// From there too, `j₀` reaches 2^20 rather than 2^16, in about 20 s on 10
+/// threads. RSA-130's polynomial sieves 5 to 7% faster. RSA-140's Murphy's
+/// E rose by a tenth, to 5.16e-10 (what CADO-NFS's root sieve gets from the
+/// same polynomial), but it sieves no faster. At RSA-100 to 120 it found the
+/// same polynomials, and 2^23 nothing more.
 #[derive(Clone, Copy, Debug)]
 struct Effort {
     nq: usize,
@@ -103,7 +109,7 @@ impl Effort {
         Self {
             nq: ((roots / KJ_LEADS as f64) as usize).max(64),
             rot1: 4 << step.saturating_sub(2),
-            rot0: 1 << (12 + step),
+            rot0: if wide == 0 { 1 << (12 + step) } else { 1 << 20 },
             lead_step: 60 << (wide / 16).min(3),
             prime_floor: if wide == 0 {
                 0
@@ -116,6 +122,9 @@ impl Effort {
 
 /// Rotations with the best estimated size plus α kept for scoring exactly.
 const ROOT_CELLS: usize = 32;
+
+/// Cells of a row the root sieve works on at a time: 64 KB.
+const ROOT_BLOCK: usize = 1 << 14;
 
 /// The root sieve uses prime powers up to this, and estimates the size
 /// along each row from this many points.
@@ -621,12 +630,13 @@ fn descend(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u128) {
     (f, m)
 }
 
-/// A power of a small prime for the root sieve: its weight in α, and the
-/// pairs `(x, t)` with `f + t·g ≡ 0` at `x` modulo it.
-struct RootPower {
-    pk: u64,
+/// A progression of the root sieve: for a power `pk` of a small prime and
+/// an `x` modulo it, `f + t·g ≡ 0` at `x`, which lowers α by `w`.
+struct RootHit {
+    pk: u32,
     w: f32,
-    roots: Vec<(u64, u64)>,
+    x: u64,
+    t: u64,
 }
 
 /// Sieves rotations `f + (j₁·x + j₀)·g` for the smallest size plus α, and
@@ -639,50 +649,41 @@ struct RootPower {
 /// summed over `k` these are α's average valuations. The
 /// rotations also grow the size, so each cell is scored by the size after
 /// translation, interpolated along its row from `ROOT_GRID` points, less
-/// its gain.
+/// its gain. Rows are sieved `ROOT_BLOCK` cells at a time, so that wide
+/// ones stay in cache.
 fn root_optimize(f: &[i128], m: u128, l: u128, effort: Effort) -> Vec<(Vec<i128>, u128)> {
     let d = f.len() - 1;
     let rot1 = if d >= 4 { effort.rot1 } else { 0 };
     let rot0 = effort.rot0;
     let width = 2 * rot0 as usize;
-    let mut powers: Vec<RootPower> = Vec::new();
+    let mut hits: Vec<RootHit> = Vec::new();
     for p in Primes::new(2, ROOT_PRIMES) {
         let (mut pk, mut below) = (p, 1u64);
         while pk <= ROOT_POWER {
             let w = (log2(p as f64) / (below as f64 * (p + 1) as f64)) as f32;
             let fp = reduce(f, pk);
             let (mp, lp) = ((m % u128::from(pk)) as u64, (l % u128::from(pk)) as u64);
-            let roots = (0..pk)
-                .filter_map(|x| {
-                    let gx = (lp * x % pk + pk - mp) % pk;
-                    (gx % p != 0).then(|| (x, (pk - eval(&fp, x, pk)) % pk * inv(gx, pk) % pk))
+            hits.extend((0..pk).filter_map(|x| {
+                let gx = (lp * x % pk + pk - mp) % pk;
+                (gx % p != 0).then(|| RootHit {
+                    pk: pk as u32,
+                    w,
+                    x,
+                    t: (pk - eval(&fp, x, pk)) % pk * inv(gx, pk) % pk,
                 })
-                .collect();
-            powers.push(RootPower { pk, w, roots });
+            }));
             below = pk;
             pk *= p;
         }
     }
-    // One row of j₀ at a time, so that it stays in cache, keeping the best
-    // cells of all rows seen as (score, j₁, index of j₀).
+    // The best cells of all rows seen, as (score, j₁, index of j₀), and
+    // where each progression next hits the row.
     let mut best: Vec<(f32, i64, usize)> = Vec::new();
-    let mut row = vec![0f32; width];
-    let mut order: Vec<u32> = (0..width as u32).collect();
+    let mut next = vec![0u32; hits.len()];
+    let mut block = vec![0f32; ROOT_BLOCK];
+    let mut order: Vec<u32> = Vec::with_capacity(ROOT_BLOCK);
     let step = width / ROOT_GRID;
     for j1 in -rot1..=rot1 {
-        row.fill(0.0);
-        for &RootPower { pk, w, ref roots } in &powers {
-            for &(x, t) in roots {
-                // j₀ ≡ t − j₁·x, at index j₀ + rot0.
-                let r = (t as i64 - j1 * x as i64).rem_euclid(pk as i64) as u64;
-                let mut i = ((r + rot0 as u64) % pk) as usize;
-                while i < width {
-                    row[i] -= w;
-                    i += pk as usize;
-                }
-            }
-        }
-        // Add the size, interpolated between grid points.
         let Some(rotated) = rotate(f, m, l, 1, i128::from(j1)) else {
             continue;
         };
@@ -702,20 +703,43 @@ fn root_optimize(f: &[i128], m: u128, l: u128, effort: Effort) -> Vec<(Vec<i128>
                 lognorm(&g).1 as f32
             })
             .collect();
-        for (i, cell) in row.iter_mut().enumerate() {
-            let (k, frac) = (i / step, (i % step) as f32 / step as f32);
-            *cell += sizes[k] + (sizes[(k + 1).min(ROOT_GRID)] - sizes[k]) * frac;
+        for (n, h) in next.iter_mut().zip(&hits) {
+            // j₀ ≡ t − j₁·x, at index j₀ + rot0.
+            let pk = i64::from(h.pk);
+            let r = (h.t as i64 - j1 * h.x as i64).rem_euclid(pk);
+            *n = ((r + rot0) % pk) as u32;
         }
-        let by_score = |a: &u32, b: &u32| row[*a as usize].total_cmp(&row[*b as usize]);
-        order.select_nth_unstable_by(ROOT_CELLS - 1, by_score);
-        best.extend(
-            order[..ROOT_CELLS]
-                .iter()
-                .map(|&i| (row[i as usize], j1, i as usize)),
-        );
-        if best.len() > ROOT_CELLS {
-            best.select_nth_unstable_by(ROOT_CELLS - 1, |a, b| a.0.total_cmp(&b.0));
-            best.truncate(ROOT_CELLS);
+        for start in (0..width).step_by(ROOT_BLOCK) {
+            // The size, interpolated between grid points, less the gains.
+            let cells = &mut block[..ROOT_BLOCK.min(width - start)];
+            for (i, cell) in (start..).zip(cells.iter_mut()) {
+                let (k, frac) = (i / step, (i % step) as f32 / step as f32);
+                *cell = sizes[k] + (sizes[(k + 1).min(ROOT_GRID)] - sizes[k]) * frac;
+            }
+            let end = (start + cells.len()) as u32;
+            for (n, h) in next.iter_mut().zip(&hits) {
+                let mut i = *n;
+                while i < end {
+                    cells[i as usize - start] -= h.w;
+                    i += h.pk;
+                }
+                *n = i;
+            }
+            order.clear();
+            order.extend(0..cells.len() as u32);
+            let keep = ROOT_CELLS.min(cells.len());
+            order.select_nth_unstable_by(keep - 1, |a, b| {
+                cells[*a as usize].total_cmp(&cells[*b as usize])
+            });
+            best.extend(
+                order[..keep]
+                    .iter()
+                    .map(|&i| (cells[i as usize], j1, start + i as usize)),
+            );
+            if best.len() > ROOT_CELLS {
+                best.select_nth_unstable_by(ROOT_CELLS - 1, |a, b| a.0.total_cmp(&b.0));
+                best.truncate(ROOT_CELLS);
+            }
         }
     }
     let mut rotated: Vec<(f64, Vec<i128>, u128)> = best

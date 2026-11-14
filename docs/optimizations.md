@@ -114,6 +114,7 @@ number.
 | Kleinjung's primes and leading coefficients growing from 125 digits | RSA-140: 1.5–1.75 times the relations a second; RSA-130: 12% more |
 | Kleinjung's collisions in 64-bit arithmetic and a hash table | Same candidates; RSA-140's search 2 h 23 min → 35 min, RSA-130's 20 → 6 min |
 | Kleinjung's special-q and `l = q·ℓ₁·ℓ₂` past 64 bits | RSA-140: Murphy's E 3.67 → 4.68·10⁻¹⁰, 1.3 times the relations a second, level with CADO-NFS's polynomial |
+| Root sieve in cached blocks, `j₀` to 2^20 from 125 digits | Same polynomials 11 times as fast at ±2^20; RSA-130 sieves 5–7% faster, RSA-140 level |
 
 The last two came from measuring against CADO-NFS (see [ways of
 measuring](#ways-of-measuring-that-paid-off)). On RSA-110:
@@ -244,6 +245,28 @@ In full the polynomial has lognorm 41.66 (CADO-NFS's, 41.87), Murphy's
 E 4.68·10⁻¹⁰, and sieves at 127 and 98 relations a second against
 CADO-NFS's 121 and 103 (and the previous 97 and 76). RSA-100, 110 and
 130 have their special-q below 2^29 and keep the same polynomials.
+
+**A wider root sieve.** CADO-NFS's root sieve took our RSA-140
+polynomial from Murphy's E 4.68 to 5.17·10⁻¹⁰, rotating by
+`j₀ = −1,044,120`; ours stopped at `|j₀| < 2^16`. Over the same 32
+finalists, `j₀` to 2^18 gave 4.91·10⁻¹⁰, and 2^20 gave 5.16·10⁻¹⁰; 2^23,
+or `|j₁|` to 64, or keeping four times the cells, gave nothing more.
+RSA-130 went from 5.22 to 5.78·10⁻¹⁰, and RSA-100 to 120 kept their
+polynomials. Each row had been sieved whole, so at 2^20 rows of 8 MB per
+thread left the cache and the sieve took 206 s rather than the 70 its
+width predicts; sieved 16,384 cells at a time, with each progression's
+next hit carried over, it takes 18 s and finds the same cells. From 415
+bits `j₀` now reaches 2^20. Sieving 15,000 special-q on one thread,
+relations a second:
+
+| | Before | After |
+|---|---|---|
+| RSA-130 at 8M / 20M | 320 / 254 | 344 / 268 |
+| RSA-140 at 16M / 32M / 60M / 100M | 166 / 137 / 116 / 101 | 167 / 136 / 115 / 100 |
+
+RSA-140's better E doesn't show in the sieve. Slices of 1,500
+special-q varied by ±6% between the two polynomials here; they hold too
+few special-q to measure gains under 10%.
 
 ### Sieving
 
