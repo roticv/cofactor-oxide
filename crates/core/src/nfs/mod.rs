@@ -84,7 +84,7 @@ pub struct Gnfs<const LIMBS: usize> {
 
 impl<const LIMBS: usize> Gnfs<LIMBS> {
     /// Chooses the polynomial and builds the factor bases for `n`, an odd
-    /// composite that isn't a prime power. `None` past about 480 bits,
+    /// composite that isn't a prime power. `None` past about 570 bits,
     /// where [`Poly::select`] can't: there, [`Gnfs::with_poly`] takes
     /// polynomials from elsewhere.
     pub fn new(n: &Uint<LIMBS>, params: &Params) -> Option<Self> {

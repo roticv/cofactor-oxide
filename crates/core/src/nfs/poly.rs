@@ -159,7 +159,7 @@ const ROOT_PRIMES: u64 = 200;
 /// `m/l` is a common root modulo `N`.
 ///
 /// The coefficients are of any size: those [`Poly::select`] chooses fit
-/// in 128 bits, but past about 480 bits polynomials come from other
+/// in 128 bits, but past about 160 digits polynomials come from other
 /// programs, through [`parse_poly`](super::parse_poly).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Poly {
@@ -216,8 +216,11 @@ impl Poly {
     /// others are `n`'s digits in base `m`, centered on 0. The smallest are
     /// size-optimized and root-optimized, and the best by Murphy's E wins.
     ///
-    /// `None` if `m` doesn't fit in 96 bits, which happens past about 480
-    /// bits: numbers that large need polynomials from elsewhere.
+    /// Valid pairs came out at 150, 155 and 160 digits (497 to 530 bits),
+    /// with coefficients of up to 127 bits; candidates whose arithmetic
+    /// would overflow 128 bits are dropped, so near there the search loses
+    /// some. `None` once base-m's `m` passes 112 bits, about 570 bits:
+    /// numbers that large need polynomials from elsewhere.
     pub fn select<const LIMBS: usize>(n: &Uint<LIMBS>) -> Option<Self> {
         Self::select_with(n, &Serial)
     }
@@ -356,7 +359,7 @@ fn finalists<const LIMBS: usize>(
 
 /// [`Poly::base_m`], as a candidate for selection.
 fn base_m<const LIMBS: usize>(n: &Uint<LIMBS>, m: &Uint<LIMBS>, d: usize) -> Option<Small> {
-    let m128 = to_u128(m).filter(|&m| m < 1 << 96 && m > 1)?;
+    let m128 = to_u128(m).filter(|&m| m < 1 << 112 && m > 1)?;
     let mut digits = Vec::with_capacity(d + 1);
     let mut rest = *n;
     for _ in 0..d {
@@ -364,7 +367,7 @@ fn base_m<const LIMBS: usize>(n: &Uint<LIMBS>, m: &Uint<LIMBS>, d: usize) -> Opt
         digits.push(to_u128(&r)? as i128);
         rest = q;
     }
-    let lead = to_u128(&rest).filter(|&c| c > 0 && c < 1 << 96)?;
+    let lead = to_u128(&rest).filter(|&c| c > 0 && c < 1 << 112)?;
     digits.push(lead as i128);
     // Center the digits: c − m with a carry keeps f(m) the same.
     let m = m128 as i128;

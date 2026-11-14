@@ -44,8 +44,8 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
                 merge relations sieved on several machines
   --poly FILE   with --gnfs, use the polynomials in FILE, choosing them and
                 writing them there first if it doesn't exist, so that
-                machines sieving one number share them; past about 480
-                bits, FILE must hold ones from CADO-NFS or msieve
+                machines sieving one number share them; past about 160
+                digits, FILE must hold ones from CADO-NFS or msieve
   --special-q START:END
                 with --gnfs and --save-relations, only sieve the special-q
                 from START to END and save the relations, as one machine's
@@ -515,8 +515,8 @@ const Q_RANGE_BLOCK: u64 = 64;
 fn select(n: &Wide, threads: usize) -> Poly {
     Poly::select_with(n, &Threads(threads)).unwrap_or_else(|| {
         eprintln!(
-            "cofox: GNFS can't choose polynomials past about 480 bits; give it ones from \
-             CADO-NFS or msieve with --poly"
+            "cofox: GNFS can't choose polynomials for a number this large; give it ones \
+             from CADO-NFS or msieve with --poly"
         );
         std::process::exit(1);
     })

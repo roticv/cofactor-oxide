@@ -202,15 +202,16 @@ The first line GNFS prints on stderr says where its special-q start, for
 this size of number; ranges from there up are the most productive, as
 smaller special-q give smaller values to factor.
 
-cofox chooses polynomials for numbers up to about 480 bits (145 digits),
+cofox chooses polynomials for numbers up to about 160 digits (530 bits),
 searching as CADO-NFS does: Kleinjung's method over many special-q, size
 optimization by LLL reduction, then a root sieve over prime powers that
 weighs each rotation's size against its roots. For RSA-110 its
 polynomial's Murphy E, by CADO-NFS's measure, is 5.74·10⁻⁶, against
 3.34·10⁻⁶ for the one it chose before and 5.89·10⁻⁶ for CADO-NFS's own;
 sieving with the earlier of these improvements alone took 1.4 ms a
-relation instead of 2.5 to 2.9. The search takes about 2 minutes on 10
-threads. Past 480 bits, give it
+relation instead of 2.5 to 2.9. For RSA-110 the search takes about 2
+minutes on 10 threads; at 150 digits its full budget would take about 8
+hours, and a twentieth of it 25 minutes. Past 160 digits, give it
 ones chosen by CADO-NFS or msieve with `--poly`, in either's format, of
 degree up to 6 with coefficients of any size below 2^256. The sieve's
 parameters run to 600 bits (180 digits), measured up to 130 digits and

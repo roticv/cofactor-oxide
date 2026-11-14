@@ -456,8 +456,9 @@ pub struct Sieve {
     f: Vec<f64>,
     g: (f64, f64),
     /// `f`'s coefficients, and `g`'s as `(m, l)`, exactly, for checking
-    /// candidates: `g`'s also in 128 bits when they fit, as they do below
-    /// about 480 bits, for speed.
+    /// candidates: `g`'s also in 128 bits when they fit, as they do for
+    /// the polynomials [`Poly::select`](super::Poly::select) chooses, for
+    /// speed.
     f_wide: Vec<(Wide, bool)>,
     g_wide: (Wide, Wide),
     g_small: Option<(u128, i128)>,

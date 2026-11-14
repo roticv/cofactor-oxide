@@ -27,7 +27,7 @@ From [Weis's write-up](https://saweis.net/posts/rsa-896.html):
 
 | Stage | RSA-896 | This code's limit |
 |---|---|---|
-| Polynomial | Degree 6, α −11.12, Murphy's E 5.3·10⁻¹⁰, 14.9 h on 128 nodes | Selection stops at about 480 bits (`m` in 96 bits, coefficients in `i128`); `--poly` reads degree 6 with 256-bit coefficients |
+| Polynomial | Degree 6, α −11.12, Murphy's E 5.3·10⁻¹⁰, 14.9 h on 128 nodes | Selection stops at about 160 digits (coefficients in `i128`, `m` in 112 bits); `--poly` reads degree 6 with 256-bit coefficients |
 | Factor bases | 2³² − 1 both sides | `Prime.p` is a `u32`: exactly the ceiling |
 | Large primes | 37 bits rational, 40 algebraic | 40 is the siever's cap, where the character primes start |
 | Cofactors | 74 bits (two primes) and 120 (three) | 128-bit cofactor type fits; the splitter past 2⁶² runs one P−1 and no ECM curves |
