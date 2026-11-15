@@ -14,7 +14,7 @@ use cofox_core::nfs::{
     Gnfs, Params, Poly, Relations, Spill, parse_poly, parse_relation, poly_text, relation_line,
 };
 use cofox_core::parallel::Parallel;
-use cofox_core::qs::{QsJob, Start};
+use cofox_core::qs::{Checkpoint, QsJob, Start};
 use cofox_core::{Config, Factor, Progress, QS_MAX_BITS, QsMode, Uint, factor_str_with};
 
 const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs]
@@ -35,7 +35,9 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
   --save-relations FILE
                 with --gnfs, append the relations found to FILE, in the
                 format msieve, GGNFS and CADO-NFS use, and write the
-                polynomials to FILE.poly
+                polynomials to FILE.poly; while the matrix is solved,
+                save its state every 10 minutes to FILE.lanczos, for
+                --load-relations FILE to go on from
   --load-relations FILE
                 with --gnfs, start from the relations in FILE, with the
                 polynomials in FILE.poly if there is one, skipping the
@@ -58,6 +60,9 @@ type Wide = Uint<16>;
 /// The smallest composite `--gnfs` takes; the quadratic sieve takes the
 /// rest.
 const GNFS_MIN_BITS: u32 = 130;
+
+/// How often block Lanczos saves its state, with `--save-relations`.
+const LANCZOS_SAVE: Duration = Duration::from_secs(600);
 
 /// How often relations being saved are flushed to the file.
 const SAVE_FLUSH: Duration = Duration::from_secs(10);
@@ -347,9 +352,16 @@ fn gnfs_parallel(
     if show_status {
         status.show("Number field sieve: filtering and solving the matrix");
     }
-    let deps = match FileSpill::new() {
-        Some(mut spill) => relations.dependencies_spilling(&Threads(threads), &mut spill),
-        None => relations.dependencies_with(&Threads(threads)),
+    let deps = match (FileSpill::new(), &files.save) {
+        (Some(mut spill), Some(save)) => {
+            let mut checkpoint = FileCheckpoint::new(save, &mut status);
+            let deps =
+                relations.dependencies_resuming(&Threads(threads), &mut spill, &mut checkpoint);
+            checkpoint.remove();
+            deps
+        }
+        (Some(mut spill), None) => relations.dependencies_spilling(&Threads(threads), &mut spill),
+        (None, _) => relations.dependencies_with(&Threads(threads)),
     };
     status.stage(&format!("GNFS: {} dependencies", deps.len()));
     if show_status {
@@ -375,6 +387,85 @@ fn gnfs_parallel(
     }
     status.clear();
     Ok(found.map(|f| f.to_string()))
+}
+
+/// Block Lanczos's state, every [`LANCZOS_SAVE`], in `FILE.lanczos` next to
+/// `--save-relations FILE`: a run resumed with `--load-relations FILE`
+/// filters the same relations into the same matrix and goes on from it.
+/// Each state is written beside the last and then renamed over it, so a
+/// crash while saving leaves the one before.
+struct FileCheckpoint<'a> {
+    path: PathBuf,
+    saved: Instant,
+    reader: Option<BufReader<File>>,
+    status: &'a mut Status,
+}
+
+impl<'a> FileCheckpoint<'a> {
+    fn new(save: &Path, status: &'a mut Status) -> Self {
+        let mut path = save.as_os_str().to_owned();
+        path.push(".lanczos");
+        Self {
+            path: path.into(),
+            saved: Instant::now(),
+            reader: None,
+            status,
+        }
+    }
+
+    /// Lets the state go once the solve is done.
+    fn remove(self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Checkpoint for FileCheckpoint<'_> {
+    fn due(&mut self) -> bool {
+        self.saved.elapsed() >= LANCZOS_SAVE
+    }
+
+    fn save(&mut self, bytes: &mut dyn Iterator<Item = Vec<u8>>) {
+        self.saved = Instant::now();
+        let mut next = self.path.as_os_str().to_owned();
+        next.push(".new");
+        let next = PathBuf::from(next);
+        let written = File::create(&next).and_then(|file| {
+            let mut writer = BufWriter::with_capacity(1 << 20, file);
+            for piece in bytes {
+                writer.write_all(&piece)?;
+            }
+            writer.into_inner()?.sync_all()?;
+            std::fs::rename(&next, &self.path)
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&next);
+            self.status.stage(&format!(
+                "GNFS: can't save block Lanczos's state to {}: {e}",
+                self.path.display()
+            ));
+        }
+    }
+
+    fn open(&mut self) -> bool {
+        self.reader = File::open(&self.path)
+            .ok()
+            .map(|file| BufReader::with_capacity(1 << 20, file));
+        self.reader.is_some()
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> bool {
+        self.reader
+            .as_mut()
+            .is_some_and(|reader| reader.read_exact(buf).is_ok())
+    }
+
+    fn resumed(&mut self, steps: usize) {
+        self.reader = None;
+        self.status.stage(&format!(
+            "GNFS: block Lanczos goes on from step {steps}, saved in {}",
+            self.path.display()
+        ));
+    }
 }
 
 /// A temporary file the relations wait in while the matrix is solved,

@@ -44,7 +44,7 @@ pub use sieve::{Relation, Sieve, special_qs};
 
 use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, split};
-use crate::qs::{Pending, dependency_masks, split_masks};
+use crate::qs::{Checkpoint, NoCheckpoint, Pending, dependency_masks, split_masks};
 use matrix::{Matrix, characters};
 use store::{Seen, Store};
 
@@ -295,7 +295,20 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         par: &impl Parallel,
         spill: &mut impl Spill,
     ) -> Dependencies {
-        self.solve(par, Some(spill))
+        self.solve(par, Some(spill), &mut NoCheckpoint)
+    }
+
+    /// [`Relations::dependencies_spilling`], with block Lanczos keeping
+    /// its state in `checkpoint`, and going on from the state there if it
+    /// was saved for the same matrix: filtering the same relations gives
+    /// the same one.
+    pub fn dependencies_resuming(
+        &mut self,
+        par: &impl Parallel,
+        spill: &mut impl Spill,
+        checkpoint: &mut impl Checkpoint,
+    ) -> Dependencies {
+        self.solve(par, Some(spill), checkpoint)
     }
 
     /// [`Relations::dependencies`], with block Lanczos's products split by
@@ -307,12 +320,17 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// characters are added to the filtered rows in place, and block
     /// Lanczos lets go of the rows once it has packed them.
     pub fn dependencies_with(&mut self, par: &impl Parallel) -> Dependencies {
-        self.solve(par, None::<&mut NoSpill>)
+        self.solve(par, None::<&mut NoSpill>, &mut NoCheckpoint)
     }
 
-    fn solve(&mut self, par: &impl Parallel, spill: Option<&mut impl Spill>) -> Dependencies {
+    fn solve(
+        &mut self,
+        par: &impl Parallel,
+        spill: Option<&mut impl Spill>,
+        checkpoint: &mut impl Checkpoint,
+    ) -> Dependencies {
         let (kept, rows, sets, cols, spill) = self.filtered(par, spill);
-        let masks = dependency_masks(rows, cols, POST_ROWS, par);
+        let masks = dependency_masks(rows, cols, POST_ROWS, par, checkpoint);
         let deps = Self::combine(&kept, &sets, &masks);
         drop(sets);
         if let Some(spill) = spill {

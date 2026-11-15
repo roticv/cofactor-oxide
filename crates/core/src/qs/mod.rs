@@ -36,7 +36,7 @@ use cycles::Cycles;
 
 pub use base::{FactorBase, Prime, multiplier};
 pub use job::{QsCollector, QsJob, QsSieve, Start};
-pub use lanczos::MatrixPart;
+pub use lanczos::{Checkpoint, MatrixPart, NoCheckpoint};
 pub use linalg::PART_TRIES;
 pub(crate) use linalg::{Pending, dependency_masks, split_masks};
 pub use linalg::{dependencies, dependencies_with};

@@ -182,7 +182,10 @@ cofox --gnfs --load-relations rsa100.rels --save-relations rsa100.rels 152260502
 ```
 
 Relations are flushed to the file every 10 seconds, so an interruption
-loses at most the last few seconds' worth.
+loses at most the last few seconds' worth. While the matrix is solved,
+block Lanczos saves its state to `FILE.lanczos` every 10 minutes, and a
+resumed run, which filters the same relations into the same matrix, goes
+on from there rather than starting the solve again.
 
 Sieving can also be split across machines. `--poly FILE` makes every
 machine use the same polynomials: the first run to find `FILE` missing

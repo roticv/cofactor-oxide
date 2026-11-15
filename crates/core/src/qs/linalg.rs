@@ -3,7 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::lanczos::{null_space, split_matrix};
+use super::lanczos::{Checkpoint, NoCheckpoint, null_space, split_matrix};
 use crate::parallel::{Parallel, Serial};
 
 /// Matrices with more rows than this go to block Lanczos.
@@ -32,7 +32,7 @@ pub fn dependencies_with(rows: &[Vec<usize>], cols: usize, par: &impl Parallel) 
         .iter()
         .map(|row| row.iter().map(|&c| c as u32).collect())
         .collect();
-    lists(&dependency_masks(rows, cols, 0, par))
+    lists(&dependency_masks(rows, cols, 0, par, &mut NoCheckpoint))
 }
 
 /// [`dependencies_with`] as words: for each row, a word whose bit `q` says
@@ -41,19 +41,21 @@ pub fn dependencies_with(rows: &[Vec<usize>], cols: usize, par: &impl Parallel) 
 /// each. Block Lanczos leaves the `post` densest columns out of its
 /// iterations, to be satisfied at the end, so `rows` should have at least
 /// `post + 64` more rows than columns after pruning. The rows are taken so
-/// that each copy can be let go of as soon as the next is made.
+/// that each copy can be let go of as soon as the next is made. Block
+/// Lanczos keeps its state in `checkpoint`, as [`null_space`] says.
 pub(crate) fn dependency_masks(
     rows: Vec<Vec<u32>>,
     cols: usize,
     post: usize,
     par: &impl Parallel,
+    checkpoint: &mut impl Checkpoint,
 ) -> Vec<u64> {
     let n = rows.len();
     if n <= DENSE_ROWS {
         return dense_masks(&rows, cols);
     }
     let (kept, pruned, cols) = prune(rows, cols);
-    let found = null_space(pruned, cols, post, LANCZOS_TRIES, par);
+    let found = null_space(pruned, cols, post, LANCZOS_TRIES, par, checkpoint);
     Pending {
         n,
         kept,

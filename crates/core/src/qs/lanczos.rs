@@ -44,6 +44,9 @@ pub(crate) trait Word:
     fn trailing_zeros(self) -> u32;
     /// A word from 64-bit pieces drawn from `next`.
     fn draw(next: impl FnMut() -> u64) -> Self;
+    /// The word's bits, low first, for saving it.
+    fn to_bits(self) -> u128;
+    fn from_bits(x: u128) -> Self;
 }
 
 impl Word for u64 {
@@ -67,6 +70,12 @@ impl Word for u64 {
     }
     fn draw(mut next: impl FnMut() -> u64) -> Self {
         next()
+    }
+    fn to_bits(self) -> u128 {
+        self.into()
+    }
+    fn from_bits(x: u128) -> Self {
+        x as u64
     }
 }
 
@@ -151,6 +160,12 @@ impl Word for Wide {
     }
     fn draw(mut next: impl FnMut() -> u64) -> Self {
         Self::new(u128::from(next()) | u128::from(next()) << 64)
+    }
+    fn to_bits(self) -> u128 {
+        self.get()
+    }
+    fn from_bits(x: u128) -> Self {
+        Self::new(x)
     }
 }
 
@@ -567,28 +582,200 @@ const WIDE_COLS: usize = 20_000;
 /// makes each cheaper, and the vectors found are combined at the end to
 /// satisfy them as well, as in msieve. That leaves fewer dependencies, so
 /// `B` should have at least `post + 64` more columns than rows.
+///
+/// The iterations save their state to `checkpoint` when it says, and go
+/// on from the state it holds if that was saved for the same matrix.
 pub fn null_space(
     cols: Vec<Vec<u32>>,
     rows: usize,
     post: usize,
     tries: u64,
     par: &impl Parallel,
+    checkpoint: &mut impl Checkpoint,
 ) -> Vec<u64> {
-    let n = cols.len();
+    let print = fingerprint(&cols, rows, post);
     // The second copy of the entries where memory isn't as tight as the
     // browser's. The columns themselves aren't needed once the entries
     // are packed.
     let b = Sparse::new(&cols, rows, post, !cfg!(target_arch = "wasm32"), par);
     drop(cols);
-    (0..tries)
-        .find_map(|seed| {
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-            if n >= WIDE_COLS {
-                return attempt::<Wide, _>(&b, seed);
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    if b.cols >= WIDE_COLS {
+        return solve::<Wide, _>(&b, tries, print, checkpoint);
+    }
+    solve::<u64, _>(&b, tries, print, checkpoint)
+}
+
+/// [`null_space`]'s tries, from the state in `checkpoint` if it has one
+/// for the matrix with fingerprint `print`.
+fn solve<W: Word, P: Parallel>(
+    b: &Sparse<'_, P>,
+    tries: u64,
+    print: u64,
+    checkpoint: &mut impl Checkpoint,
+) -> Vec<u64> {
+    let mut saved = State::<W>::load(checkpoint, print, b.cols);
+    if let Some(state) = &saved {
+        checkpoint.resumed(state.steps);
+    }
+    let first = saved.as_ref().map_or(0, |state| state.seed);
+    (first..tries)
+        .find_map(|seed| attempt(b, seed, saved.take(), print, checkpoint))
+        .unwrap_or_else(|| vec![0; b.cols])
+}
+
+/// Somewhere to keep block Lanczos's state while it runs, such as a file,
+/// so that a solve that is stopped can go on from there rather than
+/// start again: at 150 digits it takes about a day.
+pub trait Checkpoint {
+    /// Whether to save the state now: asked after each step.
+    fn due(&mut self) -> bool;
+
+    /// Replaces the state kept with the one whose bytes `bytes` gives, in
+    /// pieces.
+    fn save(&mut self, bytes: &mut dyn Iterator<Item = Vec<u8>>);
+
+    /// Starts reading the state kept back: false if there is none.
+    fn open(&mut self) -> bool;
+
+    /// The next `buf.len()` bytes of the state being read: false if it
+    /// ends first.
+    fn read(&mut self, buf: &mut [u8]) -> bool;
+
+    /// Told that the solve goes on from a state saved after `steps` steps.
+    fn resumed(&mut self, _steps: usize) {}
+}
+
+/// No checkpoints: every solve starts from the beginning.
+pub struct NoCheckpoint;
+
+impl Checkpoint for NoCheckpoint {
+    fn due(&mut self) -> bool {
+        false
+    }
+
+    fn save(&mut self, _: &mut dyn Iterator<Item = Vec<u8>>) {}
+
+    fn open(&mut self) -> bool {
+        false
+    }
+
+    fn read(&mut self, _: &mut [u8]) -> bool {
+        false
+    }
+}
+
+/// A hash of the matrix, so that a state saved for another is ignored.
+fn fingerprint(cols: &[Vec<u32>], rows: usize, post: usize) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |x: u64| h = (h ^ x).wrapping_mul(0x1000_0000_01b3).rotate_left(23);
+    mix(rows as u64);
+    mix(post as u64);
+    mix(cols.len() as u64);
+    for col in cols {
+        mix(col.len() as u64);
+        col.iter().for_each(|&r| mix(r.into()));
+    }
+    h
+}
+
+/// The start of a saved state, and its version.
+const MAGIC: &[u8; 8] = b"cofoxBL1";
+
+/// Block vectors' words are saved this many at a time.
+const SAVE_WORDS: usize = 1 << 16;
+
+/// Block Lanczos's state at the start of a step: enough to go on from
+/// there, since `Y` comes again from the seed, and `V₀ = AY` from `Y`.
+struct State<W: Word> {
+    seed: u64,
+    steps: usize,
+    recurrence: Recurrence<W>,
+    v: Vec<W>,
+    v1: Vec<W>,
+    v2: Vec<W>,
+    x: Vec<W>,
+}
+
+impl<W: Word> State<W> {
+    /// Saves the state, for the matrix with fingerprint `print`.
+    fn save(&self, print: u64, checkpoint: &mut impl Checkpoint) {
+        let word = W::BITS / 8;
+        let bytes = |words: &[W]| -> Vec<u8> {
+            words
+                .iter()
+                .flat_map(|w| w.to_bits().to_le_bytes().into_iter().take(word))
+                .collect()
+        };
+        let r = &self.recurrence;
+        let mut head = MAGIC.to_vec();
+        for x in [
+            print,
+            W::BITS as u64,
+            self.v.len() as u64,
+            self.seed,
+            self.steps as u64,
+        ] {
+            head.extend_from_slice(&x.to_le_bytes());
+        }
+        let small = [&r.winv1, &r.winv2, &r.vav1, &r.va2v1]
+            .into_iter()
+            .flat_map(|m| bytes(m))
+            .chain(bytes(&[r.s1]))
+            .collect();
+        let vectors = [&self.v, &self.v1, &self.v2, &self.x]
+            .into_iter()
+            .flat_map(|v| v.chunks(SAVE_WORDS))
+            .map(bytes);
+        checkpoint.save(&mut [head, small].into_iter().chain(vectors));
+    }
+
+    /// The state in `checkpoint`, if it was saved for the matrix with
+    /// fingerprint `print`, of `n` columns, at this word size.
+    fn load(checkpoint: &mut impl Checkpoint, print: u64, n: usize) -> Option<Self> {
+        if !checkpoint.open() {
+            return None;
+        }
+        let mut head = [0u8; 48];
+        if !checkpoint.read(&mut head) || &head[..8] != MAGIC {
+            return None;
+        }
+        let field = |i: usize| u64::from_le_bytes(head[8 * i..8 * i + 8].try_into().unwrap());
+        if [field(1), field(2), field(3)] != [print, W::BITS as u64, n as u64] {
+            return None;
+        }
+        let word = W::BITS / 8;
+        let mut words = |len: usize| -> Option<Vec<W>> {
+            let mut out = Vec::with_capacity(len);
+            let mut buf = vec![0u8; word * len.min(SAVE_WORDS)];
+            while out.len() < len {
+                let k = (len - out.len()).min(SAVE_WORDS);
+                checkpoint.read(&mut buf[..word * k]).then_some(())?;
+                out.extend(buf[..word * k].chunks(word).map(|b| {
+                    let mut x = [0u8; 16];
+                    x[..word].copy_from_slice(b);
+                    W::from_bits(u128::from_le_bytes(x))
+                }));
             }
-            attempt::<u64, _>(&b, seed)
+            Some(out)
+        };
+        let recurrence = Recurrence {
+            winv1: words(W::BITS)?,
+            winv2: words(W::BITS)?,
+            vav1: words(W::BITS)?,
+            va2v1: words(W::BITS)?,
+            s1: words(1)?[0],
+        };
+        Some(Self {
+            seed: field(4),
+            steps: field(5) as usize,
+            recurrence,
+            v: words(n)?,
+            v1: words(n)?,
+            v2: words(n)?,
+            x: words(n)?,
         })
-        .unwrap_or_else(|| vec![0; n])
+    }
 }
 
 /// What the recurrence carries from step to step: the last two steps'
@@ -723,7 +910,13 @@ fn apply<W: Word>(x: &[W], v: &[W], combos: &[(W, W)]) -> Vec<u64> {
 /// random start `seed`: for each column, a word whose bit `q` says whether
 /// it is in the `q`th vector found, or `None` if this seed fails or finds
 /// nothing.
-fn attempt<W: Word, P: Parallel>(b: &Sparse<'_, P>, seed: u64) -> Option<Vec<u64>> {
+fn attempt<W: Word, P: Parallel>(
+    b: &Sparse<'_, P>,
+    seed: u64,
+    resume: Option<State<W>>,
+    print: u64,
+    checkpoint: &mut impl Checkpoint,
+) -> Option<Vec<u64>> {
     let n = b.cols;
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     // xorshift*: the multiply makes successive draws nonlinear in each
@@ -742,12 +935,44 @@ fn attempt<W: Word, P: Parallel>(b: &Sparse<'_, P>, seed: u64) -> Option<Vec<u64
     let v0 = b.mul_a(&y);
 
     // V for this step and the two before.
-    let mut v = v0.clone();
-    let (mut v1, mut v2) = (vec![W::ZERO; n], vec![W::ZERO; n]);
-    let mut recurrence = Recurrence::new();
-    let mut x = vec![W::ZERO; n];
-    let mut steps = 0;
+    let State {
+        mut steps,
+        mut recurrence,
+        mut v,
+        mut v1,
+        mut v2,
+        mut x,
+        ..
+    } = resume.unwrap_or_else(|| State {
+        seed,
+        steps: 0,
+        recurrence: Recurrence::new(),
+        v: v0.clone(),
+        v1: vec![W::ZERO; n],
+        v2: vec![W::ZERO; n],
+        x: vec![W::ZERO; n],
+    });
     loop {
+        if steps > 0 && checkpoint.due() {
+            let state = State {
+                seed,
+                steps,
+                recurrence,
+                v,
+                v1,
+                v2,
+                x,
+            };
+            state.save(print, checkpoint);
+            State {
+                recurrence,
+                v,
+                v1,
+                v2,
+                x,
+                ..
+            } = state;
+        }
         let av = b.mul_a(&v);
         let vav = b.inner(&v, &av);
         if vav.iter().all(|&w| w == W::ZERO) {
@@ -1145,6 +1370,95 @@ mod tests {
                 }
             }
             assert!(image.iter().all(|&w| w == 0), "{parts} parts: Bx ≠ 0");
+        }
+    }
+
+    /// Saves in memory every `every` steps, and gives back `load`.
+    struct Memory {
+        every: usize,
+        count: usize,
+        saves: Vec<Vec<u8>>,
+        load: Option<Vec<u8>>,
+        at: usize,
+        resumed: Option<usize>,
+    }
+
+    impl Memory {
+        fn new(every: usize, load: Option<Vec<u8>>) -> Self {
+            Self {
+                every,
+                count: 0,
+                saves: Vec::new(),
+                load,
+                at: 0,
+                resumed: None,
+            }
+        }
+    }
+
+    impl Checkpoint for Memory {
+        fn due(&mut self) -> bool {
+            self.count += 1;
+            self.count.is_multiple_of(self.every)
+        }
+        fn save(&mut self, bytes: &mut dyn Iterator<Item = Vec<u8>>) {
+            self.saves.push(bytes.flatten().collect());
+        }
+        fn open(&mut self) -> bool {
+            self.at = 0;
+            self.load.is_some()
+        }
+        fn read(&mut self, buf: &mut [u8]) -> bool {
+            let Some(load) = &self.load else { return false };
+            let Some(src) = load.get(self.at..self.at + buf.len()) else {
+                return false;
+            };
+            buf.copy_from_slice(src);
+            self.at += buf.len();
+            true
+        }
+        fn resumed(&mut self, steps: usize) {
+            self.resumed = Some(steps);
+        }
+    }
+
+    /// A solve that goes on from a state saved part way gives what the
+    /// whole solve gives, with 64- and 128-bit words, and a state saved
+    /// for another matrix is ignored.
+    #[test]
+    fn checkpoints_resume() {
+        for n in [3000usize, 21_000] {
+            let rows = n - 130;
+            let mut x = 0x2545_f491_4f6c_dd1du64 ^ n as u64;
+            let mut next = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            };
+            let cols: Vec<Vec<u32>> = (0..n)
+                .map(|_| {
+                    let mut col: Vec<u32> = (0..6).map(|_| (next() % 200) as u32).collect();
+                    col.extend((0..8).map(|_| (next() % rows as u64) as u32));
+                    col.sort_unstable();
+                    col.dedup();
+                    col
+                })
+                .collect();
+            let mut first = Memory::new(7, None);
+            let whole = null_space(cols.clone(), rows, 16, 4, &Serial, &mut first);
+            assert!(whole.iter().any(|&w| w != 0), "{n}: no dependencies");
+            assert!(first.saves.len() >= 2, "{n}: {} saves", first.saves.len());
+            let mut again = Memory::new(7, Some(first.saves[1].clone()));
+            let resumed = null_space(cols.clone(), rows, 16, 4, &Serial, &mut again);
+            assert_eq!(again.resumed, Some(14), "{n}: resumed at");
+            assert!(resumed == whole, "{n}: resumed differently");
+            // Another matrix: the same with one entry moved.
+            let mut other = cols.clone();
+            other[0][0] ^= 1;
+            let mut wrong = Memory::new(7, Some(first.saves[1].clone()));
+            null_space(other, rows, 16, 4, &Serial, &mut wrong);
+            assert_eq!(wrong.resumed, None, "{n}: used another matrix's state");
         }
     }
 }

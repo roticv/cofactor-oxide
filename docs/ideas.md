@@ -36,7 +36,7 @@ From [Weis's write-up](https://saweis.net/posts/rsa-896.html):
 | Special-q | 6.0·10⁹ to 4.9·10¹⁰, 1.77 billion of them, 21 relations each | `u64`, fine |
 | Relations | 37.8 G found, 29.1 G unique, 23% duplicates removed in the siever | Everything in one process's memory: a packed store, a 64-bit fingerprint table, a `BTreeMap` of large ideals |
 | Matrix columns | 20.1 G before purge | Column indices are `u32`: five times over |
-| Matrix | 1.48 G rows and columns, 296.5 G nonzeros after merging to 200 a row, the 32 heaviest columns held out dense | Single-node block Lanczos in memory, no checkpoint; the densest-rows trick is already here |
+| Matrix | 1.48 G rows and columns, 296.5 G nonzeros after merging to 200 a row, the 32 heaviest columns held out dense | Single-node block Lanczos in memory, checkpointed every 10 minutes; the densest-rows trick is already here |
 | Linear algebra | Block Wiedemann, 56 sequences of width 64, 827,234 iterations, 99 h | — |
 | Compute | 10 days wall, about 178,000 H100-hours | Weis's CPU reference: 163 to 334 core-seconds per special-q with stock `las`, so 10,000 to 19,000 core-years of sieving |
 
@@ -173,9 +173,9 @@ practical.
 Needed past about 150 digits, where the solve takes days: it lets the
 Krylov sequences run on separate machines and survive a crash. The
 sparse product is the one block Lanczos already has. Lingen is the hard
-part, and the CADO-NFS papers on it are thorough. Checkpointing the
-current block Lanczos is the smaller first step and is worth doing on
-its own.
+part, and the CADO-NFS papers on it are thorough. Block Lanczos already
+saves its state every 10 minutes, so a crash costs at most that much of
+a solve on one machine.
 
 ### Distributed relation collection
 
