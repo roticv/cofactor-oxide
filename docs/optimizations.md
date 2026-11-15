@@ -293,6 +293,16 @@ Tried and dropped:
 - **Leaving even-even positions out of the buckets too:** slower, as the
   branch mispredicts.
 - **4-byte bucket entries:** 2–3% slower than 8-byte ones.
+- **The resieve finding primes from 30 rather than 256,** so that
+  trial division tries only the 10 unsieved primes directly: under 1%
+  faster (RSA-140 109.0 → 108.7 s a 6,000-wide slice, RSA-110 91.9 →
+  91.3 s), the same relations with their primes in another order. From
+  64: the same.
+- **Plain byte adds** in the sieve rather than saturating ones: no
+  difference, with the same relations; the loops wait on memory, not
+  on the adds.
+- **Eight lanes** in the batched root and step setup rather than four:
+  5–7% slower.
 
 **Compared with CADO-NFS's `las`.** On the same RSA-110 polynomial and
 settings, one thread, special-q 6.5M to 6.503M: cofox found 7,654
@@ -536,8 +546,6 @@ whichever parts run on slow ones that step hold up the others.
 
 - **The quadratic sieve against msiqs:** direct one-hit and two-hit loops
   for large primes, smaller factor bases, and an unrolled two-root loop.
-- **Plain byte adds** in the GNFS small sieve, where the log sums can't
-  overflow, instead of saturating ones.
 - **The default thread count:** the efficiency cores add little to
   sieving, and 4 threads may do as well as 10.
 - **Batch cofactorization with three large primes** past 130 digits, if
