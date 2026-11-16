@@ -137,6 +137,50 @@ rather than 0.55.
 for runs with different bounds at one size, and see whether the share
 follows from a count of the ideals the relations actually touch.
 
+### Sieve accuracy: prime powers and finer logs
+
+Each factor-base prime adds `log₂ p` rounded to a whole bit, powers of a
+prime count once, and the thresholds allow 4 bits more (`FUDGE` in
+`sieve.rs`) to cover both. CADO-NFS's `las` and Kleinjung's `lasieve4`
+also sieve the powers of small primes (CADO's `powlim`), and CADO scales
+the logs to use the whole byte rather than one unit a bit. The slack
+lets through candidates that trial division then rejects, and may still
+miss some whose norm is mostly a high power of 2 or 3.
+
+*First experiment:* candidates and relations on one RSA-120 slice with
+`FUDGE` at 4, 3 and 2. If 2 loses few relations and many candidates,
+inaccuracy is costing time, and sieving prime powers would let the
+slack shrink.
+
+### Test-sieving the best polynomials
+
+Murphy's E misranked twice at RSA-110: the polynomial after the overflow
+fix had 7% lower E and sieved 4–12% faster, and degree 5 had 29% lower
+E than degree 4 and won a full run, 32 min against 39 min 43 s. E counts
+smooth values over a fixed area with Dickman's ρ, without the special-q
+dividing the algebraic norm, without large primes, and without the
+relations each polynomial needs. YAFU test-sieves its best few
+polynomials before choosing.
+
+*First experiment:* keep the top 3 to 5 by E at RSA-110, sieve each for
+10 to 20 s on all threads with the `--tune` slice code, and check that
+the fastest is the one that wins full runs; it should cost under a
+minute.
+
+### ECM-friendly curves for cofactors
+
+The 64-bit ECM that splits two-large-prime cofactors uses Suyama's
+curves. CADO-NFS uses curves with rational torsion of order 12 or 16
+(Barbulescu, Bos, Bouvier, Kleinjung and Montgomery, 2012), whose orders
+are more often smooth, in Edwards form where it is cheaper, and a fixed
+chain of methods for each pair of cofactor sizes that gives up early on
+hopeless ones. In `las` at RSA-110, cofactorization was about 5% of the
+time (0.9 of 17 s), so the gain is bounded by this siever's share.
+
+*First experiment:* time the cofactor splitting on a one-thread RSA-120
+slice; only if it is well over 5% compare curves per split with a
+torsion-16 family.
+
 ## Worth trying: engineering
 
 Known to pay; the question is only the order.
@@ -165,6 +209,25 @@ removal by bit arrays indexed by prime, clique removal and merging in
 passes over files. The in-memory `Seen`, `Store` and `Matrix` cap the
 run by RAM before anything else does. CADO-NFS's `dup1`, `dup2`, `purge`
 and `merge` are the reference design.
+
+A first step that stays in memory, after msieve and CADO-NFS: keep each
+relation as its list of 32-bit ideal numbers rather than its primes,
+and find duplicates by a hash of `(a, b)`. RSA-140 peaked at 14.8 GB
+against an estimate of 7 to 9.
+
+### Faster ECM stages, after GMP-ECM
+
+ECM's stage 1 is a Montgomery ladder and its stage 2 a baby-step
+giant-step search with `B2 = 100·B1`. GMP-ECM's stage 2 evaluates a
+polynomial by FFTs, which makes `B2` hundreds to thousands of times `B1`
+affordable, so each level needs fewer curves; PRAC chains, or twisted
+Edwards curves as in Bernstein, Birkner, Lange and Peters's EECM-MPFQ,
+take fewer multiplications in stage 1 than the ladder. This helps
+numbers with factors of 20 to 40 digits, not GNFS on RSA-type numbers.
+
+*First experiment:* expected curves and time per level at 30 and 35
+digits with GMP-ECM's default `B1` and `B2`, against the current levels,
+from the same success-probability model that sets the curve counts.
 
 ### Two-level bucket sieving
 
