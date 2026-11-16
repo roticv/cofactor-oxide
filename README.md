@@ -208,12 +208,12 @@ smaller special-q give smaller values to factor.
 cofox chooses polynomials for numbers up to about 160 digits (530 bits),
 searching as CADO-NFS does: Kleinjung's method over many special-q, size
 optimization by LLL reduction, then a root sieve over prime powers that
-weighs each rotation's size against its roots. For RSA-110 its
-polynomial's Murphy E, by CADO-NFS's measure, is 5.74·10⁻⁶, against
-3.34·10⁻⁶ for the one it chose before and 5.89·10⁻⁶ for CADO-NFS's own;
-sieving with the earlier of these improvements alone took 1.4 ms a
-relation instead of 2.5 to 2.9. For RSA-110 the search takes about 2
-minutes on 10 threads; at 150 digits its full budget would take about 8
+weighs each rotation's size against its roots. Sieving RSA-110 with the
+first of these improvements alone took 1.4 ms a relation instead of 2.5
+to 2.9. Polynomials are of degree 4 up to 360 bits and 5 from there:
+RSA-110's degree-5 polynomial has a lower Murphy E than its best of
+degree 4 but sieves faster. For RSA-110 the search takes about 25
+seconds on 10 threads; at 150 digits its full budget would take about 8
 hours, and a twentieth of it 25 minutes. Past 160 digits, give it
 ones chosen by CADO-NFS or msieve with `--poly`, in either's format, of
 degree up to 6 with coefficients of any size below 2^256. The sieve's
@@ -226,7 +226,11 @@ there cost far more than the relations they added, and dropping them
 gave 3 to 4 times as many relations a second. Up to 330 bits the parameter table keeps
 one large prime a side, as at 90 digits two a side took 2.5 times as
 long; from 364 bits it uses smaller factor bases with two a side, which
-factored RSA-110 in 3 h 19 min on 6 threads against 4 h 56 min. The rows
+factored RSA-110 in 3 h 19 min on 6 threads against 4 h 56 min. With
+the polynomials, sieving and linear algebra since, RSA-110 takes 32 min
+on 10 threads: 24 s choosing the polynomial, 28 min 22 s sieving 8.4
+million relations, 2 min 47 s filtering and solving the matrix, and 24 s
+for square roots, in 2.2 GB. The rows
 for 120 and 130 digits come from timing slices of special-q with each
 candidate and counting the duplicates a range of special-q gives:
 RSA-120 should take about 10 core-hours of sieving and RSA-130 about 37.

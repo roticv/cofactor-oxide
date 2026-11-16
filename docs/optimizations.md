@@ -115,6 +115,7 @@ number.
 | Kleinjung's collisions in 64-bit arithmetic and a hash table | Same candidates; RSA-140's search 2 h 23 min → 35 min, RSA-130's 20 → 6 min |
 | Kleinjung's special-q and `l = q·ℓ₁·ℓ₂` past 64 bits | RSA-140: Murphy's E 3.67 → 4.68·10⁻¹⁰, 1.3 times the relations a second, level with CADO-NFS's polynomial |
 | Root sieve in cached blocks, `j₀` to 2^20 from 125 digits | Same polynomials 11 times as fast at ±2^20; RSA-130 sieves 5–7% faster, RSA-140 level |
+| Degree 5 from 360 bits rather than 370 | RSA-110: 39 min 43 s → 32 min 04 s on 10 threads |
 | Size optimization redone in `BigInt` where 128 bits overflow | RSA-110 sieves 4–12% faster; RSA-130 and RSA-140 keep their polynomials; with a short search, Murphy's E 20–49% higher at 140–160 digits |
 
 The last two came from measuring against CADO-NFS (see [ways of
@@ -169,10 +170,13 @@ Tried and dropped:
   stayed 3 bits behind CADO-NFS, because it can't multiply `f`.
 - **Translations from the roots of `f`'s derivatives** as starting
   points: no better than 0.
-- **Degree 5 below 370 bits.** CADO-NFS switches at about 100 digits.
+- **Degree 5 below 360 bits.** CADO-NFS switches at about 100 digits.
   With the old search our degree-5 polynomials were worse; with the new
-  one, RSA-110's degree 4 and 5 tie (5.74 and 5.65·10⁻⁶; 1.15 and 1.14
-  ms a relation on average), so the switch stays.
+  one, RSA-110's degree 4 and 5 first tied (5.74 and 5.65·10⁻⁶; 1.15 and
+  1.14 ms a relation on average). Below 360 bits degree 4 still wins:
+  degree 5 sieved 54–61% slower at RSA-100 and 16–29% slower at 105
+  digits, over 1 to 2 times each one's first special-q. From 360 bits
+  degree 5 is used; see [Degree 5 at RSA-110](#degree-5-at-rsa-110).
 - **Nonlinear pairs**, two cubics or two quadratics, built by Coxon's
   and Montgomery's methods in a Python experiment and scored with the
   same Murphy's E: 12 times worse than our linear pair at RSA-100, 29 at
@@ -286,6 +290,33 @@ within 0.5%. A search of 1/640 the size gained more: Murphy's E rose
 from 4.80 to 6.18·10⁻¹⁰ at RSA-140, 1.61 to 1.94·10⁻¹⁰ at 150 digits
 and 2.45 to 3.64·10⁻¹¹ at 160. A full search at 150 and 160 digits, 8
 hours or more, hasn't been run. The search takes no longer.
+
+#### Degree 5 at RSA-110
+
+Degree 5 started at 370 bits, just above RSA-110's 364. With the
+current search, RSA-110's degree-5 polynomial has a lower Murphy's E
+than its degree-4 one (5.96 against 8.44·10⁻⁹, by CADO-NFS), but more of
+its values split at the small special-q the run needs. One thread,
+15,000 special-q, relations a second:
+
+| special-q | 1.25M | 1.5M | 2M | 3M | 6M |
+|---|---|---|---|---|---|
+| Degree 4 | 1,287 | 1,285 | 1,273 | 1,236 | 1,157 |
+| Degree 5 | 1,440 | 1,391 | 1,308 | 1,176 | 1,018 |
+
+Whole runs on 10 threads, the same build otherwise:
+
+| | Degree 4 | Degree 5 |
+|---|---|---|
+| Polynomial | 63 s | 24 s |
+| Sieving | 32 min 54 s, 9.29 million relations to special-q 2.44M | 28 min 22 s, 8.39 million to 2.14M |
+| Filtering and matrix | 5 min 26 s | 2 min 47 s |
+| Square roots | 13 s | 24 s (the first dependency gave no factor) |
+| Total | 39 min 43 s | 32 min 04 s |
+| Peak memory | 2.49 GB | 2.20 GB |
+
+At 105 digits (348 bits) degree 4 sieved 16–29% faster and at RSA-100
+54–61%, so degree 5 now starts at 360 bits.
 
 ### Sieving
 

@@ -202,10 +202,14 @@ impl Small {
 }
 
 /// The degree of `f` for a composite of `bits` bits.
+///
+/// Degree 5 sieved 16–29% slower than 4 at 105 digits (348 bits), but
+/// 3–12% faster at RSA-110 (364 bits) over the special-q it needs, despite
+/// a lower Murphy's E; RSA-110 took 32 min rather than 40 on 10 threads.
 pub fn degree(bits: u32) -> usize {
     match bits {
         ..260 => 3,
-        260..370 => 4,
+        260..360 => 4,
         _ => 5,
     }
 }
