@@ -487,6 +487,65 @@ fn gnfs_factors_with_relations_spilled() {
     }
 }
 
+/// Keeps the rows in a vector, as the command line keeps them in a file.
+#[derive(Default)]
+struct VecRows(Vec<Vec<u32>>);
+
+impl cofox_core::nfs::Rows for VecRows {
+    fn append(&mut self, words: &[u32]) {
+        self.0.push(words.to_vec());
+    }
+
+    fn read(&mut self, f: &mut dyn FnMut(&[u32])) {
+        self.0.iter().for_each(|w| f(w));
+    }
+}
+
+#[test]
+fn gnfs_factors_with_rows_outside_memory() {
+    // With the rows outside memory, the checks find the same surplus at
+    // the same points, and the matrix the same dependencies, as in memory.
+    let (n, p, q) = (
+        u("1176217249472123917871099760550263221639"),
+        u("98936812917358800691"),
+        u("11888570237800257629"),
+    );
+    let gnfs = cofox_core::nfs::Gnfs::new(&n, &Params::for_bits(n.bits())).unwrap();
+    let mut sieve = gnfs.sieve();
+    let mut memory = gnfs.relations();
+    let mut disk = gnfs.disk_relations();
+    let mut rows = VecRows::default();
+    for k in 0.. {
+        let mut found = Vec::new();
+        for (q, r) in gnfs.special_qs(k) {
+            found.extend(sieve.special_q(q, r));
+        }
+        memory.add(found.clone());
+        disk.add(found, &mut rows);
+        let ready = memory.is_ready();
+        assert_eq!(
+            disk.is_ready(&mut rows),
+            ready,
+            "at {} relations",
+            memory.len()
+        );
+        if ready {
+            break;
+        }
+    }
+    assert_eq!(disk.len(), memory.len());
+    assert_eq!(rows.0.len(), disk.len());
+    assert_eq!(disk.surplus(&mut rows), memory.surplus());
+    let in_memory: Vec<Vec<usize>> = memory.dependencies_with(&Pieces(3)).iter().collect();
+    let deps = disk.dependencies(&mut rows, &Pieces(3), &mut cofox_core::qs::NoCheckpoint);
+    assert_eq!(deps.iter().collect::<Vec<_>>(), in_memory);
+    let f = deps
+        .iter()
+        .find_map(|dep| disk.try_dependency_with(&mut rows, &dep, &Pieces(3)))
+        .expect("no factor");
+    assert!(f == p || f == q, "{n} gave {f}");
+}
+
 #[test]
 fn relations_as_text() {
     use cofox_core::nfs::{parse_relation, relation_line};

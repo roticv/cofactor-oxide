@@ -19,6 +19,7 @@
 mod base;
 mod bigmul;
 mod cofactor;
+mod disk;
 mod filter;
 mod format;
 mod kleinjung;
@@ -37,6 +38,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 pub use base::{CHARACTER_PRIMES, Character, FactorBase, Prime};
+pub use disk::{DiskRelations, Rows};
 pub use format::{parse_poly, parse_relation, poly_text, relation_line};
 pub use params::{CHARACTERS, Params};
 pub use poly::{Poly, alpha, degree};
@@ -153,14 +155,72 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
             store: Store::new(),
             seen: Seen::default(),
             matrix: Matrix::new(&self.fb),
-            // Partial relations only start to combine once there are about
-            // as many relations as ideals in the factor bases.
-            next_check: self.fb.rational.len() + self.fb.algebraic.len(),
-            last_check: None,
-            ready: false,
+            schedule: Schedule::new(&self.fb),
             solved: false,
             split: None,
         }
+    }
+}
+
+/// When to check whether there are enough relations: every 10% more
+/// until pruning leaves any rows, then when the last two checks'
+/// surpluses say there will be, but never more often than every 1%.
+///
+/// RSA-140 was ready at 36.0 million relations, but checks every 10%
+/// missed it at 35.6 million and went on sieving to 39.2 million, about
+/// 4 h more. The surplus climbs steadily once rows survive, from −2.0
+/// million at 28.5 million relations; on that curve this stops within 1%
+/// of the point. A check took 17 s there, while the sieving threads went
+/// on.
+#[derive(Clone, Debug)]
+struct Schedule {
+    next_check: usize,
+    /// The relations and surplus at the last check that left any rows.
+    last_check: Option<(usize, isize)>,
+    ready: bool,
+}
+
+impl Schedule {
+    fn new(fb: &FactorBase) -> Self {
+        Self {
+            // Partial relations only start to combine once there are about
+            // as many relations as ideals in the factor bases.
+            next_check: fb.rational.len() + fb.algebraic.len(),
+            last_check: None,
+            ready: false,
+        }
+    }
+
+    /// Whether to check at `len` relations.
+    fn due(&self, len: usize) -> bool {
+        !self.ready && len >= self.next_check
+    }
+
+    /// Notes a check at `len` relations that found `surplus`.
+    fn record(&mut self, len: usize, surplus: isize) {
+        self.ready = surplus >= 0;
+        self.next_check = len + self.step(len, surplus);
+    }
+
+    /// How many more relations to wait for before checking again, after a
+    /// check at `len` relations found `surplus`.
+    fn step(&mut self, len: usize, surplus: isize) -> usize {
+        let (most, least) = (len / 10, len / 100);
+        // While pruning takes every row, the surplus says nothing.
+        if surplus == -((CHARACTERS + POST_ROWS + EXTRA) as isize) {
+            self.last_check = None;
+            return most;
+        }
+        let step = match self.last_check.replace((len, surplus)) {
+            // Where the line through the two checks reaches 0.
+            Some((then, before)) if surplus > before => {
+                let short = surplus.unsigned_abs() as u64;
+                let gained = (surplus - before) as u64;
+                (short * (len - then) as u64 / gained) as usize + 1
+            }
+            _ => most,
+        };
+        step.clamp(least, most)
     }
 }
 
@@ -172,10 +232,7 @@ pub struct Relations<const LIMBS: usize> {
     /// The pairs `(a, b)` so far, since special-q lattices overlap.
     seen: Seen,
     matrix: Matrix,
-    next_check: usize,
-    /// The relations and surplus at the last check that left any rows.
-    last_check: Option<(usize, isize)>,
-    ready: bool,
+    schedule: Schedule,
     /// Whether `seen` and `matrix` were let go of to solve the matrix.
     /// The store has no algebraic primes to rebuild them from, so no
     /// relations can be added after.
@@ -220,41 +277,12 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// Checked every 10% more relations until pruning leaves any rows, then
     /// when the last two checks' surpluses say it will be, but never more
     /// often than every 1%.
-    ///
-    /// RSA-140 was ready at 36.0 million relations, but checks every 10%
-    /// missed it at 35.6 million and went on sieving to 39.2 million,
-    /// about 4 h more. The surplus climbs steadily once rows survive, from
-    /// −2.0 million at 28.5 million relations; on that curve this stops
-    /// within 1% of the point. A check took 17 s there, while the sieving
-    /// threads went on.
     pub fn is_ready(&mut self) -> bool {
-        if !self.ready && self.len() >= self.next_check {
+        if self.schedule.due(self.len()) {
             let (len, surplus) = (self.len(), self.surplus());
-            self.ready = surplus >= 0;
-            self.next_check = len + self.check_step(len, surplus);
+            self.schedule.record(len, surplus);
         }
-        self.ready
-    }
-
-    /// How many more relations to wait for before checking again, after a
-    /// check at `len` relations found `surplus`.
-    fn check_step(&mut self, len: usize, surplus: isize) -> usize {
-        let (most, least) = (len / 10, len / 100);
-        // While pruning takes every row, the surplus says nothing.
-        if surplus == -((CHARACTERS + POST_ROWS + EXTRA) as isize) {
-            self.last_check = None;
-            return most;
-        }
-        let step = match self.last_check.replace((len, surplus)) {
-            // Where the line through the two checks reaches 0.
-            Some((then, before)) if surplus > before => {
-                let short = surplus.unsigned_abs() as u64;
-                let gained = (surplus - before) as u64;
-                (short * (len - then) as u64 / gained) as usize + 1
-            }
-            _ => most,
-        };
-        step.clamp(least, most)
+        self.schedule.ready
     }
 
     /// How many more relations than needed are left after pruning:
@@ -331,7 +359,7 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     ) -> Dependencies {
         let (kept, rows, sets, cols, spill) = self.filtered(par, spill);
         let masks = dependency_masks(rows, cols, POST_ROWS, par, checkpoint);
-        let deps = Self::combine(&kept, &sets, &masks);
+        let deps = combine(&kept, &sets, &masks);
         drop(sets);
         if let Some(spill) = spill {
             drop(kept);
@@ -367,23 +395,7 @@ impl<const LIMBS: usize> Relations<LIMBS> {
     /// If the matrix wasn't split.
     pub fn finish_split(&mut self, found: &[u64]) -> Dependencies {
         let (kept, sets, pending) = self.split.take().expect("the matrix wasn't split");
-        Self::combine(&kept, &sets, &pending.finish(found))
-    }
-
-    /// The dependencies among the relations `kept`, from the masks of the
-    /// filtered rows, which are the sums of `sets` of them.
-    fn combine(kept: &[u32], sets: &[Vec<u32>], masks: &[u64]) -> Dependencies {
-        // Each relation is in a dependency if it is in an odd number of
-        // the dependency's rows.
-        let mut of_kept = vec![0u64; kept.len()];
-        for (set, &m) in sets.iter().zip(masks) {
-            if m != 0 {
-                for &i in set {
-                    of_kept[i as usize] ^= m;
-                }
-            }
-        }
-        Dependencies::new(kept, &of_kept)
+        combine(&kept, &sets, &pending.finish(found))
     }
 
     /// The relations kept after pruning, the filtered rows with their
@@ -423,19 +435,9 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         if spill.is_some() {
             self.store = Store::new();
         }
-        let filter::Filtered { mut rows, sets } =
-            filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
-        for (row, set) in rows.iter_mut().zip(&sets) {
-            let mask = set.iter().fold(0, |m, &i| m ^ chars[i as usize]);
-            row.reserve_exact(mask.count_ones() as usize);
-            row.extend(
-                (0..fb.characters.len())
-                    .filter(|i| mask >> i & 1 == 1)
-                    .map(|i| (cols + i) as u32),
-            );
-        }
+        let (rows, sets, cols) = filter_rows(fb, rows, cols, &chars);
         drop(chars);
-        (kept, rows, sets, cols + fb.characters.len(), spill)
+        (kept, rows, sets, cols, spill)
     }
 
     /// Takes the square roots for the dependency `dep`, returning a proper
@@ -458,6 +460,45 @@ impl<const LIMBS: usize> Relations<LIMBS> {
         }
         sqrt::factor(&self.gnfs.n, &self.gnfs.poly, &pairs, &rational, par)
     }
+}
+
+/// The dependencies among the relations `kept`, from the masks of the
+/// filtered rows, which are the sums of `sets` of them.
+fn combine(kept: &[u32], sets: &[Vec<u32>], masks: &[u64]) -> Dependencies {
+    // Each relation is in a dependency if it is in an odd number of the
+    // dependency's rows.
+    let mut of_kept = vec![0u64; kept.len()];
+    for (set, &m) in sets.iter().zip(masks) {
+        if m != 0 {
+            for &i in set {
+                of_kept[i as usize] ^= m;
+            }
+        }
+    }
+    Dependencies::new(kept, &of_kept)
+}
+
+/// Filters the pruned `rows`, with columns below `cols`, and adds the
+/// quadratic characters to the rows left from `chars`, each pruned row's.
+/// Returns the rows, the pruned rows each is the sum of, and the columns.
+fn filter_rows(
+    fb: &FactorBase,
+    rows: Vec<Vec<u32>>,
+    cols: usize,
+    chars: &[u64],
+) -> (Vec<Vec<u32>>, Vec<Vec<u32>>, usize) {
+    let filter::Filtered { mut rows, sets } =
+        filter::filter(rows, cols, fb.characters.len() + POST_ROWS + EXTRA);
+    for (row, set) in rows.iter_mut().zip(&sets) {
+        let mask = set.iter().fold(0, |m, &i| m ^ chars[i as usize]);
+        row.reserve_exact(mask.count_ones() as usize);
+        row.extend(
+            (0..fb.characters.len())
+                .filter(|i| mask >> i & 1 == 1)
+                .map(|i| (cols + i) as u32),
+        );
+    }
+    (rows, sets, cols + fb.characters.len())
 }
 
 /// Somewhere other than memory to keep the relations, such as a file,

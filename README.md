@@ -187,6 +187,16 @@ block Lanczos saves its state to `FILE.lanczos` every 10 minutes, and a
 resumed run, which filters the same relations into the same matrix, goes
 on from there rather than starting the solve again.
 
+With `--save-relations`, the matrix's rows also wait on disk, in
+`FILE.rows`, about 130 bytes a relation, rather than in memory: while
+sieving, memory holds only the pairs seen and a column number for each
+large prime, the checks for enough relations prune in passes over the
+file, and only the rows that survive pruning are read back to be solved.
+RSA-120 from its 11.6 million saved relations peaks at 3.8 GB resident rather
+than 5.0, in the square roots, and loading them takes 0.6 GB rather than
+2.0. The file is removed once the matrix is solved, and written again by
+a resumed run.
+
 Sieving can also be split across machines. `--poly FILE` makes every
 machine use the same polynomials: the first run to find `FILE` missing
 chooses them and writes them there, and the others read them, so copy

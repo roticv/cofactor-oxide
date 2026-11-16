@@ -202,18 +202,22 @@ walk and bucket fill come second.
 The record's factor base is `2³² − 1` and its column count 20 billion.
 None of the rest can be tested at scale until these move.
 
-### Disk-based filtering
+### Disk-based filtering, the rest
 
-Duplicate removal by hashing `(a, b)` into files by range, singleton
-removal by bit arrays indexed by prime, clique removal and merging in
-passes over files. The in-memory `Seen`, `Store` and `Matrix` cap the
-run by RAM before anything else does. CADO-NFS's `dup1`, `dup2`, `purge`
-and `merge` are the reference design.
+With `--save-relations`, the matrix's rows already wait in a file while
+sieving, the checks prune singletons in passes over it, and only the
+rows that survive are read back, which took RSA-120's loading from 2.0
+to 0.6 GB. What is left in memory is CADO-NFS's next steps: the
+duplicate check, 8 bytes a pair (0.5 GB at RSA-140), which `dup1` and
+`dup2` replace by hashing `(a, b)` into files by range; the column of
+each large prime, 12 bytes a slot, which a renumbering table computed
+from the primes would replace; and clique removal and merging, still
+done on the pruned rows in memory. The square roots, which read the
+whole dependency's relations and multiply them out, are now the peak
+at RSA-120.
 
-A first step that stays in memory, after msieve and CADO-NFS: keep each
-relation as its list of 32-bit ideal numbers rather than its primes,
-and find duplicates by a hash of `(a, b)`. RSA-140 peaked at 14.8 GB
-against an estimate of 7 to 9.
+*First experiment:* the peak of each stage at RSA-130, with the rows on
+disk, to see which of these comes first.
 
 ### Faster ECM stages, after GMP-ECM
 

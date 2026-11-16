@@ -9,15 +9,17 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod rows;
 mod tune;
 
 use cofox_core::arith::ParseUintError;
 use cofox_core::nfs::{
-    Gnfs, Params, Poly, Relations, Spill, parse_poly, parse_relation, poly_text, relation_line,
+    Gnfs, Params, Poly, Spill, parse_poly, parse_relation, poly_text, relation_line,
 };
 use cofox_core::parallel::Parallel;
 use cofox_core::qs::{Checkpoint, QsJob, Start};
 use cofox_core::{Config, Factor, Progress, QS_MAX_BITS, QsMode, Uint, factor_str_with};
+use rows::{Collection, RowFile};
 
 const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs]
              [--poly FILE] [--save-relations FILE] [--load-relations FILE]...
@@ -37,9 +39,11 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
   --save-relations FILE
                 with --gnfs, append the relations found to FILE, in the
                 format msieve, GGNFS and CADO-NFS use, and write the
-                polynomials to FILE.poly; while the matrix is solved,
-                save its state every 10 minutes to FILE.lanczos, for
-                --load-relations FILE to go on from
+                polynomials to FILE.poly; keep the matrix's rows in
+                FILE.rows rather than in memory until it is solved, which
+                takes about 130 bytes a relation on disk; while it is
+                solved, save its state every 10 minutes to FILE.lanczos,
+                for --load-relations FILE to go on from
   --load-relations FILE
                 with --gnfs, start from the relations in FILE, with the
                 polynomials in FILE.poly if there is one, skipping the
@@ -173,7 +177,7 @@ fn main() -> ExitCode {
             }
         };
         let mut status = Status::new(1);
-        let (gnfs, _, _) = gnfs_start(&n, threads, &files, &mut status);
+        let (gnfs, _, _) = gnfs_start(&n, threads, &files, false, &mut status);
         status.clear();
         tune::tune(&gnfs, &n, threads);
         return ExitCode::SUCCESS;
@@ -347,7 +351,7 @@ fn gnfs_parallel(
 ) -> Result<Option<String>, ParseUintError> {
     let n = n.parse::<Wide>()?;
     let mut status = Status::new(1);
-    let (gnfs, relations, done_qs) = gnfs_start(&n, threads, files, &mut status);
+    let (gnfs, relations, done_qs) = gnfs_start(&n, threads, files, true, &mut status);
     let save = files
         .save
         .as_deref()
@@ -379,16 +383,27 @@ fn gnfs_parallel(
     if show_status {
         status.show("Number field sieve: filtering and solving the matrix");
     }
-    let deps = match (FileSpill::new(), &files.save) {
-        (Some(mut spill), Some(save)) => {
+    let deps = match &mut relations {
+        Collection::Memory(relations) => match (FileSpill::new(), &files.save) {
+            (Some(mut spill), Some(save)) => {
+                let mut checkpoint = FileCheckpoint::new(save, &mut status);
+                let deps =
+                    relations.dependencies_resuming(&Threads(threads), &mut spill, &mut checkpoint);
+                checkpoint.remove();
+                deps
+            }
+            (Some(mut spill), None) => {
+                relations.dependencies_spilling(&Threads(threads), &mut spill)
+            }
+            (None, _) => relations.dependencies_with(&Threads(threads)),
+        },
+        Collection::Disk(relations, rows) => {
+            let save = files.save.as_deref().expect("rows go beside the relations");
             let mut checkpoint = FileCheckpoint::new(save, &mut status);
-            let deps =
-                relations.dependencies_resuming(&Threads(threads), &mut spill, &mut checkpoint);
+            let deps = relations.dependencies(rows, &Threads(threads), &mut checkpoint);
             checkpoint.remove();
             deps
         }
-        (Some(mut spill), None) => relations.dependencies_spilling(&Threads(threads), &mut spill),
-        (None, _) => relations.dependencies_with(&Threads(threads)),
     };
     status.stage(&format!("GNFS: {} dependencies", deps.len()));
     if show_status {
@@ -398,7 +413,12 @@ fn gnfs_parallel(
     // probability about ½, so few are needed.
     let mut found = None;
     for (i, dep) in deps.iter().enumerate() {
-        found = relations.try_dependency_with(&dep, &Threads(threads));
+        found = match &mut relations {
+            Collection::Memory(relations) => relations.try_dependency_with(&dep, &Threads(threads)),
+            Collection::Disk(relations, rows) => {
+                relations.try_dependency_with(rows, &dep, &Threads(threads))
+            }
+        };
         let outcome = if found.is_some() {
             "a factor"
         } else {
@@ -583,7 +603,7 @@ fn gnfs_range(
 ) -> Result<(), ParseUintError> {
     let n = n.parse::<Wide>()?;
     let mut status = Status::new(1);
-    let (gnfs, relations, done_qs) = gnfs_start(&n, threads, files, &mut status);
+    let (gnfs, relations, done_qs) = gnfs_start(&n, threads, files, false, &mut status);
     let path = files.save.as_deref().expect("checked given");
     let save = open_save(path, &n, &gnfs, &mut status);
     let before = relations.len();
@@ -612,7 +632,7 @@ fn gnfs_range(
 /// The relations of a GNFS run, the special-q done, and where new
 /// relations are saved.
 struct Collected {
-    relations: Relations<16>,
+    relations: Collection,
     done_qs: HashSet<(u64, u64)>,
     save: Option<BufWriter<File>>,
 }
@@ -643,14 +663,16 @@ fn select(n: &Wide, threads: usize) -> Poly {
 /// GNFS for `n`, with the polynomials from `--poly`, which are chosen and
 /// written there first if the file doesn't exist; or else from the first
 /// file loaded with a `.poly` beside it; or else chosen. Then the
-/// relations in each file loaded, and the special-q they record as done.
+/// relations in each file loaded, and the special-q they record as done,
+/// with the matrix's rows in a file beside `--save-relations` if `disk`.
 /// Exits if `--poly` can't be used.
 fn gnfs_start(
     n: &Wide,
     threads: usize,
     files: &Files,
+    disk: bool,
     status: &mut Status,
-) -> (Gnfs<16>, Relations<16>, HashSet<(u64, u64)>) {
+) -> (Gnfs<16>, Collection, HashSet<(u64, u64)>) {
     let bits = n.bits();
     let params = Params::for_bits(bits);
     let (poly, how) = if let Some(path) = &files.poly {
@@ -692,7 +714,25 @@ fn gnfs_start(
         fb.rational.len() + fb.algebraic.len(),
         gnfs.params().qmin
     ));
-    let mut relations = gnfs.relations();
+    let mut relations = match files.save.as_deref().filter(|_| disk) {
+        Some(save) => match RowFile::create(save) {
+            Ok(rows) => {
+                status.stage(&format!(
+                    "GNFS: the matrix's rows go to {} until it is solved",
+                    rows.path().display()
+                ));
+                Collection::Disk(gnfs.disk_relations(), rows)
+            }
+            Err(e) => {
+                status.stage(&format!(
+                    "GNFS: can't write the matrix's rows beside {}, so they stay in memory: {e}",
+                    save.display()
+                ));
+                Collection::Memory(gnfs.relations())
+            }
+        },
+        None => Collection::Memory(gnfs.relations()),
+    };
     let mut done_qs = HashSet::new();
     for path in &files.load {
         let (mut read, mut rejected, before) = (0, 0, relations.len());

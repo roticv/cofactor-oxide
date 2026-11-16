@@ -45,28 +45,9 @@ impl Store {
     /// Adds `rel`, unless its rational prime count doesn't fit, below
     /// 2^15.
     pub fn push(&mut self, rel: &Relation) -> bool {
-        let r = rel.rational.len();
-        if r >= 1 << 15 {
-            return false;
-        }
-        let primes = rel.rational.iter();
-        let wide = primes.clone().any(|&p| p >> 32 != 0);
-        let (ua, b) = (rel.a as u64, rel.b);
-        let counts =
-            r as u32 | if wide { WIDE } else { 0 } | if rel.negative { NEGATIVE } else { 0 };
         self.words.clear();
-        self.words.extend([
-            ua as u32,
-            (ua >> 32) as u32,
-            b as u32,
-            (b >> 32) as u32,
-            counts,
-        ]);
-        if wide {
-            self.words
-                .extend(primes.flat_map(|&p| [p as u32, (p >> 32) as u32]));
-        } else {
-            self.words.extend(primes.map(|&p| p as u32));
+        if !encode(rel, &mut self.words) {
+            return false;
         }
         self.records.push(&self.words);
         true
@@ -84,21 +65,60 @@ impl Store {
 
     /// Relation `i`'s `(a, b)`.
     pub fn ab(&self, i: usize) -> (i64, u64) {
-        let w = self.words(i);
-        let a = u64::from(w[0]) | u64::from(w[1]) << 32;
-        (a as i64, u64::from(w[2]) | u64::from(w[3]) << 32)
+        record_ab(self.words(i))
     }
 
     /// Relation `i`'s rational primes, without unpacking the rest.
     pub fn rational(&self, i: usize) -> impl Iterator<Item = u64> + '_ {
-        let w = self.words(i);
-        let r = (w[4] & 0x7fff) as usize;
-        let wide = w[4] & WIDE != 0;
-        let step = if wide { 2 } else { 1 };
-        w[HEADER..HEADER + r * step]
-            .chunks(step)
-            .map(|p| u64::from(p[0]) | p.get(1).map_or(0, |&h| u64::from(h) << 32))
+        record_rational(self.words(i))
     }
+}
+
+/// Appends `rel`'s words, as a [`Store`] keeps them, to `out`, unless its
+/// rational prime count doesn't fit, below 2^15.
+pub(super) fn encode(rel: &Relation, out: &mut Vec<u32>) -> bool {
+    let r = rel.rational.len();
+    if r >= 1 << 15 {
+        return false;
+    }
+    let primes = rel.rational.iter();
+    let wide = primes.clone().any(|&p| p >> 32 != 0);
+    let (ua, b) = (rel.a as u64, rel.b);
+    let counts = r as u32 | if wide { WIDE } else { 0 } | if rel.negative { NEGATIVE } else { 0 };
+    out.extend([
+        ua as u32,
+        (ua >> 32) as u32,
+        b as u32,
+        (b >> 32) as u32,
+        counts,
+    ]);
+    if wide {
+        out.extend(primes.flat_map(|&p| [p as u32, (p >> 32) as u32]));
+    } else {
+        out.extend(primes.map(|&p| p as u32));
+    }
+    true
+}
+
+/// How many of the words from the start of `w` are a relation's, as
+/// [`encode`] wrote them: anything after is someone else's.
+pub(super) fn record_len(w: &[u32]) -> usize {
+    let step = if w[4] & WIDE != 0 { 2 } else { 1 };
+    HEADER + (w[4] & 0x7fff) as usize * step
+}
+
+/// The `(a, b)` of the relation whose words start `w`.
+pub(super) fn record_ab(w: &[u32]) -> (i64, u64) {
+    let a = u64::from(w[0]) | u64::from(w[1]) << 32;
+    (a as i64, u64::from(w[2]) | u64::from(w[3]) << 32)
+}
+
+/// The rational primes of the relation whose words start `w`.
+pub(super) fn record_rational(w: &[u32]) -> impl Iterator<Item = u64> + '_ {
+    let step = if w[4] & WIDE != 0 { 2 } else { 1 };
+    w[HEADER..record_len(w)]
+        .chunks(step)
+        .map(|p| u64::from(p[0]) | p.get(1).map_or(0, |&h| u64::from(h) << 32))
 }
 
 /// Records of words, kept in chunks of a fixed size rather than one
@@ -268,6 +288,59 @@ fn fingerprint(a: i64, b: u64) -> u64 {
         x ^ (x >> 31)
     };
     mix(mix(a as u64) ^ b.rotate_left(32)).max(1)
+}
+
+/// The column of each ideal past the factor bases, by a 64-bit
+/// fingerprint of the ideal, in an open-addressing table: 12 bytes a slot,
+/// where a `BTreeMap` of the ideals took about 28 an ideal, 1.1 GB at
+/// RSA-140. Two ideals with the same fingerprint would share a column,
+/// which with tens of millions of them happens with probability around
+/// 10⁻⁴, and spoils the dependencies that use it.
+#[derive(Clone, Debug, Default)]
+pub struct Ideals {
+    /// Fingerprints, 0 for an empty slot; the length is a power of 2.
+    keys: Vec<u64>,
+    columns: Vec<u32>,
+    len: usize,
+}
+
+impl Ideals {
+    /// The column of the ideal `(p, k)`, or a new one from `next` if it
+    /// has none yet.
+    pub fn column(&mut self, (p, k): (u64, u64), next: impl FnOnce() -> u32) -> u32 {
+        if 4 * (self.len + 1) > 3 * self.keys.len() {
+            self.grow();
+        }
+        let key = fingerprint(p as i64, k);
+        let mask = self.keys.len() - 1;
+        let mut i = key as usize & mask;
+        loop {
+            match self.keys[i] {
+                0 => {
+                    let column = next();
+                    (self.keys[i], self.columns[i]) = (key, column);
+                    self.len += 1;
+                    return column;
+                }
+                k if k == key => return self.columns[i],
+                _ => i = (i + 1) & mask,
+            }
+        }
+    }
+
+    fn grow(&mut self) {
+        let size = (2 * self.keys.len()).max(1 << 10);
+        let keys = core::mem::replace(&mut self.keys, vec![0; size]);
+        let columns = core::mem::replace(&mut self.columns, vec![0; size]);
+        let mask = size - 1;
+        for (key, column) in keys.into_iter().zip(columns).filter(|&(k, _)| k != 0) {
+            let mut i = key as usize & mask;
+            while self.keys[i] != 0 {
+                i = (i + 1) & mask;
+            }
+            (self.keys[i], self.columns[i]) = (key, column);
+        }
+    }
 }
 
 #[cfg(test)]

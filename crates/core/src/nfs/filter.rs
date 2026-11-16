@@ -65,9 +65,13 @@ struct State {
     alive: Vec<bool>,
     /// Each column's number of live rows.
     weight: Vec<u32>,
-    /// For each column, rows that have it, and possibly others that once
-    /// did: [`State::rows_of`] checks.
+    /// For each column [`listed`](Self::listed), rows that have it, and
+    /// possibly others that once did: [`State::rows_of`] checks.
     by_col: Vec<Vec<u32>>,
+    /// Whether each column's rows are kept in `by_col`: not for columns
+    /// too heavy to merge, such as the one in every row, whose lists would
+    /// be most of the index.
+    listed: Vec<bool>,
     live_rows: usize,
     live_cols: usize,
     /// The total weight of the live rows.
@@ -89,24 +93,66 @@ impl State {
             rows,
             weight,
             by_col: vec![Vec::new(); cols],
+            listed: vec![false; cols],
         };
         m.index();
         m
     }
 
-    /// Rebuilds the lists of each column's rows from the live rows alone,
-    /// each list its exact size: merging only ever adds to them, and at
-    /// RSA-140 they had grown from 2.6 to 4.2 GB.
+    /// Rebuilds the lists of the rows of each column light enough to
+    /// merge from the live rows alone, each list its exact size: merging
+    /// only ever adds to them, and at RSA-140 they had grown from 2.6 to
+    /// 4.2 GB.
     fn index(&mut self) {
-        for (list, &w) in self.by_col.iter_mut().zip(&self.weight) {
+        for ((list, listed), &w) in self
+            .by_col
+            .iter_mut()
+            .zip(&mut self.listed)
+            .zip(&self.weight)
+        {
+            *listed = w <= MAX_MERGE;
             list.clear();
-            list.shrink_to(w as usize);
-            list.reserve_exact(w as usize);
+            if *listed {
+                list.shrink_to(w as usize);
+                list.reserve_exact(w as usize);
+            } else {
+                list.shrink_to(0);
+            }
         }
         for (r, row) in self.rows.iter().enumerate() {
             if self.alive[r] {
                 for &c in row {
-                    self.by_col[c as usize].push(r as u32);
+                    if self.listed[c as usize] {
+                        self.by_col[c as usize].push(r as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Lists the rows of those of `cols` not listed yet, in one pass over
+    /// the live rows: columns that were too heavy and have become light.
+    fn list(&mut self, cols: &[u32]) {
+        let mut fresh: Vec<u32> = cols
+            .iter()
+            .copied()
+            .filter(|&c| !self.listed[c as usize])
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        fresh.sort_unstable();
+        fresh.dedup();
+        for &c in &fresh {
+            self.listed[c as usize] = true;
+            self.by_col[c as usize] = Vec::with_capacity(self.weight[c as usize] as usize);
+        }
+        for (r, row) in self.rows.iter().enumerate() {
+            if self.alive[r] {
+                for &c in row {
+                    if fresh.binary_search(&c).is_ok() {
+                        self.by_col[c as usize].push(r as u32);
+                    }
                 }
             }
         }
@@ -130,6 +176,7 @@ impl State {
 
     /// The live rows with column `c`, which also become its list.
     fn rows_of(&mut self, c: u32) -> Vec<u32> {
+        self.list(&[c]);
         let (rows, alive) = (&self.rows, &self.alive);
         let list = &mut self.by_col[c as usize];
         list.retain(|&r| alive[r as usize] && rows[r as usize].binary_search(&c).is_ok());
@@ -162,6 +209,7 @@ impl State {
         let mut singles: Vec<u32> = (0..self.weight.len() as u32)
             .filter(|&c| self.weight[c as usize] == 1)
             .collect();
+        self.list(&singles);
         while let Some(c) = singles.pop() {
             if self.weight[c as usize] != 1 {
                 continue;
@@ -195,12 +243,14 @@ impl State {
                 }
                 x
             };
-            for c in 0..self.weight.len() as u32 {
-                if self.weight[c as usize] == 2 {
-                    let rs = self.rows_of(c);
-                    let (a, b) = (find(&mut parent, rs[0]), find(&mut parent, rs[1]));
-                    parent[a as usize] = b;
-                }
+            let pairs: Vec<u32> = (0..self.weight.len() as u32)
+                .filter(|&c| self.weight[c as usize] == 2)
+                .collect();
+            self.list(&pairs);
+            for c in pairs {
+                let rs = self.rows_of(c);
+                let (a, b) = (find(&mut parent, rs[0]), find(&mut parent, rs[1]));
+                parent[a as usize] = b;
             }
             let mut size = vec![0u32; n];
             for r in 0..n as u32 {
@@ -238,6 +288,7 @@ impl State {
             let light: Vec<u32> = (0..self.weight.len() as u32)
                 .filter(|&c| (2..=w).contains(&self.weight[c as usize]))
                 .collect();
+            self.list(&light);
             for c in light {
                 if self.total > DENSITY * self.live_rows {
                     return;
@@ -313,7 +364,9 @@ impl State {
                     if *w == 1 {
                         self.live_cols += 1;
                     }
-                    self.by_col[col as usize].push(r);
+                    if self.listed[col as usize] {
+                        self.by_col[col as usize].push(r);
+                    }
                 }
             }
             self.total = self.total - self.rows[r as usize].len() + row.len();

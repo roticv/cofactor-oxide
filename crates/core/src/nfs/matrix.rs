@@ -50,57 +50,21 @@ impl Matrix {
     pub fn new(fb: &FactorBase) -> Self {
         Self {
             rows: Records::default(),
-            cols: FIXED + fb.rational.len() + fb.algebraic.len(),
+            cols: base_columns(fb),
             large: BTreeMap::new(),
         }
     }
 
     /// Adds the row for `rel`, with each column once, sorted.
     pub fn push(&mut self, fb: &FactorBase, rel: &Relation) {
-        let a_base = FIXED + fb.rational.len();
-        let r_max = fb.rational.last().map_or(0, |q| u64::from(q.p));
-        let a_max = fb.algebraic.last().map_or(0, |q| u64::from(q.p));
-        let mut row = Vec::with_capacity(rel.rational.len() + rel.algebraic.len() + 2);
-        row.push(0);
-        if rel.negative {
-            row.push(1);
-        }
-        let mut column = |key| {
-            *self.large.entry(key).or_insert_with(|| {
-                self.cols += 1;
-                (self.cols - 1) as u32
+        let (large, cols) = (&mut self.large, &mut self.cols);
+        let row = columns(fb, rel, |key| {
+            *large.entry(key).or_insert_with(|| {
+                *cols += 1;
+                (*cols - 1) as u32
             })
-        };
-        for &p in &rel.rational {
-            row.push(if p <= r_max {
-                let i = fb.rational.partition_point(|q| u64::from(q.p) < p);
-                (FIXED + i) as u32
-            } else {
-                column((p, 0))
-            });
-        }
-        for &p in &rel.algebraic {
-            let r = root_of(rel, p);
-            row.push(if p <= a_max {
-                let key = |q: &Prime| (u64::from(q.p), u64::from(q.r));
-                let i = fb.algebraic.partition_point(|q| key(q) < (p, r));
-                debug_assert_eq!(key(&fb.algebraic[i]), (p, r));
-                (a_base + i) as u32
-            } else {
-                column((p, 1 + r))
-            });
-        }
-        row.sort_unstable();
-        // Columns an even number of times cancel.
-        let mut odd: Vec<u32> = Vec::with_capacity(row.len());
-        for c in row {
-            if odd.last() == Some(&c) {
-                odd.pop();
-            } else {
-                odd.push(c);
-            }
-        }
-        self.rows.push(&odd);
+        });
+        self.rows.push(&row);
     }
 
     fn len(&self) -> usize {
@@ -181,6 +145,60 @@ impl Matrix {
         });
         (kept, rows, used as usize)
     }
+}
+
+/// The columns `rel` has an odd number of times, sorted: the fixed ones,
+/// its factor-base primes and ideals by their place, and the others by
+/// `large`, which numbers each prime `(p, 0)` and ideal `(p, 1 + r)` past
+/// the factor bases, rational primes first, in order.
+pub fn columns(
+    fb: &FactorBase,
+    rel: &Relation,
+    mut large: impl FnMut((u64, u64)) -> u32,
+) -> Vec<u32> {
+    let a_base = FIXED + fb.rational.len();
+    let r_max = fb.rational.last().map_or(0, |q| u64::from(q.p));
+    let a_max = fb.algebraic.last().map_or(0, |q| u64::from(q.p));
+    let mut row = Vec::with_capacity(rel.rational.len() + rel.algebraic.len() + 2);
+    row.push(0);
+    if rel.negative {
+        row.push(1);
+    }
+    for &p in &rel.rational {
+        row.push(if p <= r_max {
+            let i = fb.rational.partition_point(|q| u64::from(q.p) < p);
+            (FIXED + i) as u32
+        } else {
+            large((p, 0))
+        });
+    }
+    for &p in &rel.algebraic {
+        let r = root_of(rel, p);
+        row.push(if p <= a_max {
+            let key = |q: &Prime| (u64::from(q.p), u64::from(q.r));
+            let i = fb.algebraic.partition_point(|q| key(q) < (p, r));
+            debug_assert_eq!(key(&fb.algebraic[i]), (p, r));
+            (a_base + i) as u32
+        } else {
+            large((p, 1 + r))
+        });
+    }
+    row.sort_unstable();
+    // Columns an even number of times cancel.
+    let mut odd: Vec<u32> = Vec::with_capacity(row.len());
+    for c in row {
+        if odd.last() == Some(&c) {
+            odd.pop();
+        } else {
+            odd.push(c);
+        }
+    }
+    odd
+}
+
+/// The columns before any past the factor bases.
+pub fn base_columns(fb: &FactorBase) -> usize {
+    FIXED + fb.rational.len() + fb.algebraic.len()
 }
 
 /// The quadratic characters of the pair `(a, b)`, a bit for each of
