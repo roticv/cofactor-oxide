@@ -432,8 +432,7 @@ fn size_optimize(f: &[i128], m: u128, l: u128, rotations: bool) -> (Vec<i128>, u
     // then search from the best few.
     let mut scanned: Vec<(f64, Vec<i128>, u128)> = translation_scan()
         .filter_map(|k| {
-            let (g, gm) = translate(f, m, l, k)?;
-            let (g, s) = rotated(&g, gm, l)?;
+            let (g, gm, s) = shifted(f, m, l, k)?;
             Some((s, g, gm))
         })
         .collect();
@@ -472,10 +471,7 @@ fn translation_search(
         for _ in 0..SIZE_PASSES {
             let mut improved = false;
             for k in [step, -step] {
-                let Some((g, gm)) = translate(&f, m, l, k) else {
-                    continue;
-                };
-                let Some((g, s)) = rotated(&g, gm, l) else {
+                let Some((g, gm, s)) = shifted(&f, m, l, k) else {
                     continue;
                 };
                 if s < size - 1e-6 {
@@ -491,15 +487,94 @@ fn translation_search(
     (f, m, size)
 }
 
+/// `f` translated by `k` and then [`rotated`], with the new `m` and the
+/// size: in `i128`, or if that overflows in [`BigInt`], keeping the result
+/// if it fits in `i128` again.
+///
+/// The best translations grow with the skew, and `f(x + k)` or the
+/// lattice reduction of it often passes 2^127 on the way to a polynomial
+/// that fits: over half the reductions overflowed even at RSA-110. With
+/// 1/640 of the search, keeping those raised Murphy's E (by CADO-NFS) from
+/// 4.80 to 6.18·10⁻¹⁰ at RSA-140, 1.61 to 1.94·10⁻¹⁰ at 150 digits and
+/// 2.45 to 3.64·10⁻¹¹ at 160. With the full search RSA-130 and RSA-140
+/// end on the same polynomials, and RSA-110 on one that sieves 4–12%
+/// faster; the search takes no longer.
+fn shifted(f: &[i128], m: u128, l: u128, k: i128) -> Option<(Vec<i128>, u128, f64)> {
+    if let Some((g, gm)) = translate(f, m, l, k)
+        && let Some((g, s)) = rotated(&g, gm, l)
+    {
+        return Some((g, gm, s));
+    }
+    let (bk, bl) = (BigInt::from(k), BigInt::from(l));
+    let gm = u128::try_from(BigInt::from(m) - &bl * &bk)
+        .ok()
+        .filter(|&gm| gm > 1)?;
+    // Horner's rule with x + k for x, as in `translate`.
+    let mut g: Vec<BigInt> = Vec::with_capacity(f.len());
+    for &c in f.iter().rev() {
+        g.push(BigInt::ZERO);
+        for i in (1..g.len()).rev() {
+            g[i] = &g[i - 1] + &g[i] * &bk;
+        }
+        g[0] = &g[0] * &bk + c;
+    }
+    let bm = BigInt::from(gm);
+    for _ in 0..2 {
+        g = reduced(&g, &bm, &bl, lognorm(&g).0)?;
+    }
+    let g: Vec<i128> = g
+        .iter()
+        .map(|c| i128::try_from(c).ok())
+        .collect::<Option<_>>()?;
+    let size = lognorm(&g).1;
+    Some((g, gm, size))
+}
+
 /// `f` replaced by [`reduced`] at its skew, done twice since the skew moves
 /// with it, and its size; or `None` on overflow.
 fn rotated(f: &[i128], m: u128, l: u128) -> Option<(Vec<i128>, f64)> {
+    let (m, l) = (i128::try_from(m).ok()?, i128::try_from(l).ok()?);
     let mut g = f.to_vec();
     for _ in 0..2 {
-        g = reduced(&g, m, l, lognorm(&g).0)?;
+        g = reduced(&g, &m, &l, lognorm(&g).0)?;
     }
     let size = lognorm(&g).1;
     Some((g, size))
+}
+
+/// The integers [`reduced`] and [`lll`] work in: `i128`, checked, or
+/// [`BigInt`] where that overflows.
+trait Lattice: Coeff + Clone + Sized {
+    const ZERO: Self;
+
+    /// `self − r·x`, or `None` on overflow.
+    fn sub_mul(&self, x: &Self, r: i128) -> Option<Self>;
+
+    fn neg(&self) -> Option<Self>;
+}
+
+impl Lattice for i128 {
+    const ZERO: Self = 0;
+
+    fn sub_mul(&self, x: &Self, r: i128) -> Option<Self> {
+        self.checked_sub(x.checked_mul(r)?)
+    }
+
+    fn neg(&self) -> Option<Self> {
+        self.checked_neg()
+    }
+}
+
+impl Lattice for BigInt {
+    const ZERO: Self = BigInt::ZERO;
+
+    fn sub_mul(&self, x: &Self, r: i128) -> Option<Self> {
+        Some(self - x * r)
+    }
+
+    fn neg(&self) -> Option<Self> {
+        Some(-self)
+    }
 }
 
 /// The smallest polynomial of degree `d` at skew `s` of the form
@@ -508,27 +583,27 @@ fn rotated(f: &[i128], m: u128, l: u128) -> Option<(Vec<i128>, f64)> {
 /// lattice that `f` and the `xⁱ·g` span, with the coefficient of `xʲ`
 /// weighted by `s^j`. Each still has the root `m/l` modulo `N`, and a
 /// resultant with `g` of `c·N`. This is CADO-NFS's size optimization.
-fn reduced(f: &[i128], m: u128, l: u128, s: f64) -> Option<Vec<i128>> {
+fn reduced<T: Lattice>(f: &[T], m: &T, l: &T, s: f64) -> Option<Vec<T>> {
     let d = f.len() - 1;
     let ls = log2(s);
     let scale: Vec<f64> = (0..=d).map(|j| exp2(ls * j as f64)).collect();
     let mut basis = vec![f.to_vec()];
     for i in 0..d - 1 {
-        let mut v = vec![0i128; d + 1];
-        v[i] = -i128::try_from(m).ok()?;
-        v[i + 1] = i128::try_from(l).ok()?;
+        let mut v = vec![T::ZERO; d + 1];
+        v[i] = m.neg()?;
+        v[i + 1] = l.clone();
         basis.push(v);
     }
     lll(&mut basis, &scale)?;
-    let norm = |v: &[i128]| -> f64 {
+    let norm = |v: &[T]| -> f64 {
         v.iter()
             .zip(&scale)
-            .map(|(&c, &x)| (c as f64 * x) * (c as f64 * x))
+            .map(|(c, &x)| (c.to_f64() * x) * (c.to_f64() * x))
             .sum()
     };
     basis
         .into_iter()
-        .filter(|v| v[d] != 0)
+        .filter(|v| v[d].to_f64() != 0.0)
         .min_by(|x, y| norm(x).total_cmp(&norm(y)))
 }
 
@@ -536,14 +611,14 @@ fn reduced(f: &[i128], m: u128, l: u128, s: f64) -> Option<Vec<i128>> {
 /// weighted by `scale[j]`, with δ = 0.99: exactly in integers, with the
 /// Gram–Schmidt vectors in floating point, which is plenty for so few
 /// dimensions. `None` on overflow.
-fn lll(basis: &mut [Vec<i128>], scale: &[f64]) -> Option<()> {
+fn lll<T: Lattice>(basis: &mut [Vec<T>], scale: &[f64]) -> Option<()> {
     let n = basis.len();
     let dot = |x: &[f64], y: &[f64]| -> f64 { x.iter().zip(y).map(|(a, b)| a * b).sum() };
     // The Gram–Schmidt vectors' squared lengths, and the μ.
-    let gram_schmidt = |basis: &[Vec<i128>]| -> (Vec<f64>, Vec<Vec<f64>>) {
+    let gram_schmidt = |basis: &[Vec<T>]| -> (Vec<f64>, Vec<Vec<f64>>) {
         let b: Vec<Vec<f64>> = basis
             .iter()
-            .map(|v| v.iter().zip(scale).map(|(&c, &x)| c as f64 * x).collect())
+            .map(|v| v.iter().zip(scale).map(|(c, &x)| c.to_f64() * x).collect())
             .collect();
         let mut star: Vec<Vec<f64>> = Vec::with_capacity(n);
         let mut len = vec![0.0; n];
@@ -581,8 +656,7 @@ fn lll(basis: &mut [Vec<i128>], scale: &[f64]) -> Option<()> {
             let r = (r + if r < 0.0 { -0.5 } else { 0.5 }) as i128;
             if r != 0 {
                 for c in 0..basis[k].len() {
-                    let t = basis[j][c].checked_mul(r)?;
-                    basis[k][c] = basis[k][c].checked_sub(t)?;
+                    basis[k][c] = basis[k][c].sub_mul(&basis[j][c], r)?;
                 }
             }
         }

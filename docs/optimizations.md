@@ -115,6 +115,7 @@ number.
 | Kleinjung's collisions in 64-bit arithmetic and a hash table | Same candidates; RSA-140's search 2 h 23 min → 35 min, RSA-130's 20 → 6 min |
 | Kleinjung's special-q and `l = q·ℓ₁·ℓ₂` past 64 bits | RSA-140: Murphy's E 3.67 → 4.68·10⁻¹⁰, 1.3 times the relations a second, level with CADO-NFS's polynomial |
 | Root sieve in cached blocks, `j₀` to 2^20 from 125 digits | Same polynomials 11 times as fast at ±2^20; RSA-130 sieves 5–7% faster, RSA-140 level |
+| Size optimization redone in `BigInt` where 128 bits overflow | RSA-110 sieves 4–12% faster; RSA-130 and RSA-140 keep their polynomials; with a short search, Murphy's E 20–49% higher at 140–160 digits |
 
 The last two came from measuring against CADO-NFS (see [ways of
 measuring](#ways-of-measuring-that-paid-off)). On RSA-110:
@@ -267,6 +268,24 @@ relations a second:
 RSA-140's better E doesn't show in the sieve. Slices of 1,500
 special-q varied by ±6% between the two polynomials here; they hold too
 few special-q to measure gains under 10%.
+
+Size optimization translates `f` and reduces its rotation lattice in
+128-bit integers, and over half of these overflowed at RSA-110, over 80%
+from 130 digits, each one a candidate dropped. Redone in `BigInt`, and
+kept when the result fits in 128 bits again, they took the full search
+at RSA-110 to a polynomial with a lower Murphy's E (8.44 against
+9.05·10⁻⁹) that sieves better. One thread, 15,000 special-q:
+
+| RSA-110 | Relations | Relations a second |
+|---|---|---|
+| At 2M, before / after | 117,813 / 138,356 | 1,139 / 1,274 |
+| At 6M, before / after | 117,592 / 125,597 | 1,118 / 1,160 |
+
+RSA-130 and RSA-140 end on the same polynomials as before, sieving
+within 0.5%. A search of 1/640 the size gained more: Murphy's E rose
+from 4.80 to 6.18·10⁻¹⁰ at RSA-140, 1.61 to 1.94·10⁻¹⁰ at 150 digits
+and 2.45 to 3.64·10⁻¹¹ at 160. A full search at 150 and 160 digits, 8
+hours or more, hasn't been run. The search takes no longer.
 
 ### Sieving
 
