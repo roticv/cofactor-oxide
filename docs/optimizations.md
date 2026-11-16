@@ -353,6 +353,15 @@ Tried and dropped:
   on the adds.
 - **Eight lanes** in the batched root and step setup rather than four:
   5–7% slower.
+- **Fewer rows per special-q,** as `las` sieves: at RSA-120, one thread,
+  15,000 special-q, 1,024 rows rather than 2,048 found 28% fewer
+  relations 3–5% faster (at 4M, 636–651 → 666–672 a second; at 8M,
+  529–535 → 553–557), and 512 rows were slower. Making up the relations
+  takes special-q from 4M to about 9.4M rather than 7.9M, where they come
+  18% slower, so it's a wash. The top 1,024 rows still give about 600
+  relations a second at 4M, more than the special-q at the end of the
+  range; near 8M about 480, so choosing the rows per special-q might
+  save a percent or two at the top of the range.
 
 **Compared with CADO-NFS's `las`.** On the same RSA-110 polynomial and
 settings, one thread, special-q 6.5M to 6.503M: cofox found 7,654
@@ -525,6 +534,10 @@ Tried and dropped:
   limited by memory rather than arithmetic.
 - **Both primes at once in products of polynomials:** about 2% faster
   natively, but 2.3 GB in wasm.
+- **Nothing to fix at degree 5:** the degree-5 RSA-110 run's square root
+  took 24 s against degree 4's 13 s, but it tried two dependencies, the
+  first giving no factor, as about half do. Each took 11.8–12.0 s for
+  1.10M relations, against 13.3 s for 1.40M at degree 4.
 
 ### Memory
 
