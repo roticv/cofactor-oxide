@@ -205,6 +205,14 @@ The first line GNFS prints on stderr says where its special-q start, for
 this size of number; ranges from there up are the most productive, as
 smaller special-q give smaller values to factor.
 
+`--tune` with `--gnfs` and one number searches for the sieve parameters
+that would collect enough relations soonest on this machine. It times
+short slices of special-q for the table's row and its neighbors, moves
+one parameter at a time, and prints the best as a row of the parameter
+table; the large-prime and cofactor bounds stay the table's. At RSA-120
+it takes about 27 minutes on ten threads, and with `--poly` it tunes for
+that pair of polynomials.
+
 cofox chooses polynomials for numbers up to about 160 digits (530 bits),
 searching as CADO-NFS does: Kleinjung's method over many special-q, size
 optimization by LLL reduction, then a root sieve over prime powers that

@@ -120,17 +120,22 @@ Bernstein's product trees move it, is unmeasured.
 digits, with `mfb` up to 100 on the algebraic side and 30 ECM curves,
 against the best two-large-prime row.
 
-### Automated parameter search
+### Choosing the large-prime bits automatically
 
-Every tuning pass so far found 5 to 20% by hand, sieving fixed slices.
-A model fitting time-to-matrix as a function of factor-base bound,
-large-prime bits, `I` and `qmin`, searched automatically, would find
-those gains at every size and keep the table honest past 430 bits,
-where its rows are guesses.
+`cofox --gnfs --tune N` searches the factor-base bounds, `I`, the first
+special-q and the algebraic slack by timing slices of special-q, with a
+duplicate-aware count of the relations. At RSA-120 it keeps the table's
+row and predicts 1.45 h of sieving on ten threads, which the real run
+took. It leaves the large-prime and cofactor bounds alone: the relations
+a matrix needs are only roughly a fixed share of the large-prime ideals,
+and the share differs between bounds. Allowed to change them, it chose
+27 and 27 bits over 27 and 28 at RSA-120 and predicted 17% less
+sieving; the real run sieved 2% longer, needing 0.67 of the ideals
+rather than 0.55.
 
-*First experiment:* script the slice sieve and the duplicate-aware
-relation count, fit a response surface at RSA-120 where the answer is
-known, and check that it recovers the chosen row.
+*First experiment:* replay saved relations through the readiness check
+for runs with different bounds at one size, and see whether the share
+follows from a count of the ideals the relations actually touch.
 
 ## Worth trying: engineering
 

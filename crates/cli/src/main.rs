@@ -9,6 +9,8 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod tune;
+
 use cofox_core::arith::ParseUintError;
 use cofox_core::nfs::{
     Gnfs, Params, Poly, Relations, Spill, parse_poly, parse_relation, poly_text, relation_line,
@@ -19,7 +21,7 @@ use cofox_core::{Config, Factor, Progress, QS_MAX_BITS, QsMode, Uint, factor_str
 
 const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs]
              [--poly FILE] [--save-relations FILE] [--load-relations FILE]...
-             [--special-q START:END] <n>...
+             [--special-q START:END] [--tune] <n>...
 
   --ecm DIGITS  run ECM up to the level for primes of this many digits
                 (15 to 40, default 25); each level takes about four times
@@ -52,7 +54,12 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
                 with --gnfs and --save-relations, only sieve the special-q
                 from START to END and save the relations, as one machine's
                 share; a run with --load-relations on every share then
-                solves the matrix";
+                solves the matrix
+  --tune        with --gnfs, for one number, search for the sieve parameters
+                that would collect enough relations soonest on this machine,
+                by timing slices of special-q for each, and print them as a
+                row of the parameter table; the large-prime and cofactor
+                bounds stay the table's; with --poly, for that pair";
 
 /// The widest numbers the command line takes.
 type Wide = Uint<16>;
@@ -77,6 +84,7 @@ fn main() -> ExitCode {
     let mut threads = thread::available_parallelism().map_or(1, |n| n.get());
     let mut files = Files::default();
     let mut q_range = None;
+    let mut tune = false;
     let mut numbers = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -102,6 +110,7 @@ fn main() -> ExitCode {
             },
             "--no-qs" => qs = false,
             "--gnfs" => gnfs = true,
+            "--tune" => tune = true,
             "--save-relations" | "--load-relations" | "--poly" => {
                 let Some(path) = args.next().map(PathBuf::from) else {
                     eprintln!("cofox: {arg} needs a file\n\n{USAGE}");
@@ -151,6 +160,24 @@ fn main() -> ExitCode {
     }
 
     let show_status = std::io::stderr().is_terminal();
+    if tune {
+        if !gnfs || q_range.is_some() || numbers.len() != 1 {
+            eprintln!("cofox: --tune searches parameters for one number with --gnfs");
+            return ExitCode::FAILURE;
+        }
+        let n = match numbers[0].parse::<Wide>() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("cofox: invalid number {:?}: {e}", numbers[0]);
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut status = Status::new(1);
+        let (gnfs, _, _) = gnfs_start(&n, threads, &files, &mut status);
+        status.clear();
+        tune::tune(&gnfs, &n, threads);
+        return ExitCode::SUCCESS;
+    }
     if let Some(range) = q_range {
         if !gnfs || files.save.is_none() || numbers.len() != 1 {
             eprintln!(
