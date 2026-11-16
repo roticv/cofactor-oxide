@@ -337,12 +337,12 @@ Kleinjung's method.
 | Remainders by multiplying in the resieve, by Lemire, Kaser and Kurz's method | Each row's first hit and each candidate's test took a division per prime from 256 to `I`; now a multiply by `⌈2^64/p⌉`, and a compare for the test. Same relations; one thread: RSA-110 99.4 → 91.5 s a slice, RSA-140 269 → 256 s |
 | 8 more bits of algebraic slack from 130 digits | Candidates were allowed the primes below 30's average share, and values with more and a large cofactor fell short: CADO-NFS's `las` found 17% more relations at RSA-140 with the same polynomial and parameters. One thread, 15,000 special-q: RSA-140 14% more relations, 143 → 156 a second; RSA-130 16% more, 345 → 367. At RSA-110 it cost 17.5%, so it starts at 130 digits |
 | Only odd `x` on even rows | Where `i` and `j` are both even, so are `a` and `b`. RSA-110: 3.3% faster |
+| 4-byte bucket entries | An offset and the prime's place in a run of up to 2¹³ bucketed primes with one `log`, each run's start marked in every bucket, rather than the offset, `log` and prime in 8 bytes. Same relations; RSA-120, 150,000 special-q on ten threads: peak memory 610 → 470 MB, time even to 5% faster (181 → 172 s over four interleaved runs each, run order moving either by 10%); one thread even, where an earlier try had been 2–3% slower |
 
 Tried and dropped:
 
 - **Leaving even-even positions out of the buckets too:** slower, as the
   branch mispredicts.
-- **4-byte bucket entries:** 2–3% slower than 8-byte ones.
 - **The resieve finding primes from 30 rather than 256,** so that
   trial division tries only the 10 unsieved primes directly: under 1%
   faster (RSA-140 109.0 → 108.7 s a 6,000-wide slice, RSA-110 91.9 →

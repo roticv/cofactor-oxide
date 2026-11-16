@@ -38,6 +38,11 @@ use crate::qs::log2;
 /// The most positions sieved at a time.
 const SLAB_BITS: u32 = 19;
 
+/// A bucket entry's offset in its slab, below its prime's place in its
+/// slice.
+const OFFSET: u32 = (1 << SLAB_BITS) - 1;
+const HINT_BITS: u32 = 32 - SLAB_BITS;
+
 /// Primes below this aren't sieved, only tried on candidates.
 const SMALL_PRIMES: u32 = 30;
 
@@ -188,8 +193,14 @@ struct Side {
     /// `(offset, p)` of the walked primes' hits in the current slab.
     hits: Vec<(u32, u32)>,
     /// For each slab, the hits of the primes from a slab's size up, walked
-    /// once over the whole region: `(offset | log << 24, p)`.
-    buckets: Vec<Vec<(u32, u32)>>,
+    /// once over the whole region: `offset | k << SLAB_BITS`, for the `k`th
+    /// prime of its slice.
+    buckets: Vec<Vec<u32>>,
+    /// The bucketed primes in runs of fewer than `2^HINT_BITS` with one
+    /// `log`: the index of each run's first prime and the `log`.
+    slices: Vec<(u32, u8)>,
+    /// Where each slice starts in each bucket, slice by slice.
+    marks: Vec<u32>,
 }
 
 impl Side {
@@ -222,6 +233,8 @@ impl Side {
             block: vec![0; slab],
             hits: Vec::new(),
             buckets: Vec::new(),
+            slices: Vec::new(),
+            marks: Vec::new(),
         }
     }
 
@@ -235,13 +248,15 @@ impl Side {
         let slabs = (end >> slab_bits).max(1) as usize;
         self.buckets.resize_with(slabs, Vec::new);
         self.buckets.iter_mut().for_each(Vec::clear);
+        self.slices.clear();
+        self.marks.clear();
         self.small.clear();
         self.walks.clear();
         self.rows.clear();
         let first = self.primes.partition_point(|q| q.p < SMALL_PRIMES);
         // In groups, so that the divisions of the inverses and the walks'
         // steps overlap.
-        for group in self.primes[first..].chunks(LANES) {
+        for (g, group) in self.primes[first..].chunks(LANES).enumerate() {
             let mut x = [1u32; LANES];
             let mut ps = [1u32; LANES];
             let mut betas = [0u64; LANES];
@@ -286,12 +301,22 @@ impl Side {
                 } else if p < 1 << slab_bits {
                     self.walks.push(walk(q, steps[l], log_i));
                 } else {
+                    let index = (first + g * LANES + l) as u32;
+                    let base = match self.slices.last() {
+                        Some(&(base, log)) if index - base < 1 << HINT_BITS && log == q.log => base,
+                        _ => {
+                            self.slices.push((index, q.log));
+                            self.marks
+                                .extend(self.buckets.iter().map(|b| b.len() as u32));
+                            index
+                        }
+                    };
                     let mut w = walk(q, steps[l], log_i);
                     let mask = (1u64 << slab_bits) - 1;
-                    let tag = u32::from(q.log) << 24;
+                    let tag = (index - base) << SLAB_BITS;
                     while w.pos < end {
                         self.buckets[(w.pos >> slab_bits) as usize]
-                            .push(((w.pos & mask) as u32 | tag, q.p));
+                            .push((w.pos & mask) as u32 | tag);
                         w.step(log_i);
                     }
                 }
@@ -349,9 +374,11 @@ impl Side {
             }
         }
         let slab = (start >> self.block.len().trailing_zeros()) as usize;
-        for &(tagged, _) in &self.buckets[slab] {
-            let off = (tagged & 0xff_ffff) as usize;
-            self.block[off] = self.block[off].saturating_add((tagged >> 24) as u8);
+        for (k, &(_, log)) in self.slices.iter().enumerate() {
+            for &e in slice(&self.buckets, &self.marks, slab, k) {
+                let off = (e & OFFSET) as usize;
+                self.block[off] = self.block[off].saturating_add(log);
+            }
         }
     }
 
@@ -390,13 +417,26 @@ impl Side {
         }
         out.extend(self.hits.iter().filter(|h| is_marked(marked, h.0)));
         let slab = ((j0 << log_i) >> self.block.len().trailing_zeros()) as usize;
-        out.extend(
-            self.buckets[slab]
-                .iter()
-                .map(|&(tagged, p)| (tagged & 0xff_ffff, p))
-                .filter(|h| is_marked(marked, h.0)),
-        );
+        for (k, &(base, _)) in self.slices.iter().enumerate() {
+            for &e in slice(&self.buckets, &self.marks, slab, k) {
+                let off = e & OFFSET;
+                if is_marked(marked, off) {
+                    out.push((off, self.primes[(base + (e >> SLAB_BITS)) as usize].p));
+                }
+            }
+        }
     }
+}
+
+/// The `k`th slice's hits in bucket `slab`, given where each slice starts
+/// in each bucket.
+fn slice<'a>(buckets: &'a [Vec<u32>], marks: &[u32], slab: usize, k: usize) -> &'a [u32] {
+    let bucket = &buckets[slab];
+    let from = marks[k * buckets.len() + slab] as usize;
+    let to = marks
+        .get((k + 1) * buckets.len() + slab)
+        .map_or(bucket.len(), |&m| m as usize);
+    &bucket[from..to]
 }
 
 /// The steps `(a, ja, b, jb)` of the walks of primes `pₗ ≥ I` over the
