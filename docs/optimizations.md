@@ -86,14 +86,28 @@ Lanczos for the matrix.
 | Two large primes, from 280 bits | Cofactors split with a 64-bit rho, relations combined through cycles. 90 digits: 224 s → 151 s; RSA-100: 39.7 → 28 min |
 | Branch-free root updates and bucket fills | Roots in flat arrays, updated with NEON `umin`: 200 µs → 25 µs a polynomial at RSA-100; unconditional bucket writes: 326 µs → 180 µs. RSA-100: 28 → 19.7 min |
 
-RSA-100 now takes about 20 minutes on 10 threads.
+| Medium primes sieved two roots at a time into a fixed 64 KB array with wrapping adds; each large prime's hits pushed by a count fixed per prime, `⌈len/p⌉`, the last one into a spare bucket past the interval when it misses | No bounds checks, and no branch on whether the last hit lands, which was close to a coin flip. One thread, a 100-digit semiprime (331 bits): 605 → 493 µs a polynomial, same relations. Ten threads: 1,049–1,054 → 900–906 s, CPU 10,000 → 8,490–8,620 s, peak footprint unchanged at 1.3–1.4 GB |
+
+A 100-digit semiprime now takes about 15 minutes on 10 threads.
+
+Tried and not kept:
+
+- **Sieving the whole interval directly,** without blocks, as msiqs
+  does for large primes: 661–916 µs a polynomial against 523.
+- **Pushing every huge prime's roots unconditionally:** 545 µs against
+  523.
+- **Unrolling the medium-prime loop by two:** no gain.
+- **One flat bucket array** instead of a vector per block: 1.7% faster.
+- **Leaving primes below 400 out of the sieve,** as msiqs does: 9%
+  faster a polynomial but 26% fewer two-large-prime relations.
 
 **Compared with msiqs.** [msiqs](https://github.com/danaj/msiqs), a C
-SIQS, factors RSA-100 in 4 min 43 s on 8 M1 Pro threads, so this sieve
-has several times of headroom. Its notes point at sieving large primes
-directly with one-hit and two-hit loops, which it found faster than
-buckets; smaller factor bases with more polynomials; and an unrolled
-two-root loop. None is tried here yet.
+SIQS, factors the same 100-digit semiprime in 587 s on these 10 threads,
+437 MB, with 8.79M polynomials against our 7.30M, and about 230 µs a
+polynomial against our 493. Its factor base is smaller (67k primes,
+against 113k) and its two-large-prime bound is `LP·pmax`. At its
+parameters this sieve takes 407 µs a polynomial, so most of the gap is
+the sieve itself rather than the parameters.
 
 ## Number field sieve
 

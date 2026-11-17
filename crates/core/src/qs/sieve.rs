@@ -127,8 +127,13 @@ pub struct Sieve<const LIMBS: usize> {
     /// Scratch space for the huge primes' hits, as `pos << 16 | index`.
     hits: Vec<u64>,
     /// For each block, the hits of the large primes in it, as
-    /// `(index − first index of its run) << 16 | offset`, run by run.
+    /// `(index − first index of its run) << 16 | offset`, run by run, and
+    /// as many again past the end of the interval, which take the last
+    /// step of each large prime's root and are never read.
     buckets: Vec<Vec<u32>>,
+    /// For each large prime below the interval's length `len`, the hits
+    /// every root of it is sure of: `⌈len/p⌉ − 1`, as a root is below `p`.
+    sure: Vec<u8>,
     /// For each block, where each run's hits start in its bucket, and
     /// where the last one ends.
     run_starts: Vec<Vec<u32>>,
@@ -196,7 +201,8 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             runs: Vec::new(),
             first_huge: 0,
             hits: Vec::new(),
-            buckets: vec![Vec::new(); 2 * params.blocks],
+            buckets: vec![Vec::new(); 4 * params.blocks],
+            sure: Vec::new(),
             run_starts: vec![Vec::new(); 2 * params.blocks],
             block: vec![0; BLOCK_SIZE],
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
@@ -225,6 +231,10 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         sieve.first_sieved = fb.primes.partition_point(|p| p.p < SMALL_PRIMES);
         let interval = 2 * sieve.m as u64;
         sieve.first_huge = fb.primes.partition_point(|p| u64::from(p.p) < interval);
+        sieve.sure = fb.primes[sieve.first_large..sieve.first_huge]
+            .iter()
+            .map(|p| (interval.div_ceil(u64::from(p.p)) - 1) as u8)
+            .collect();
         let mut start = sieve.first_large;
         while start < fb.primes.len() {
             let log = fb.primes[start].log;
@@ -471,7 +481,7 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
         self.fill_buckets();
         let mut candidates = Vec::new();
         let mut large = Vec::new();
-        for block in 0..self.buckets.len() {
+        for block in 0..self.run_starts.len() {
             self.sieve_block(block);
             candidates.clear();
             // Most 64-byte chunks hold no candidate, and their maximum is a
@@ -518,8 +528,11 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
     /// Drops every hit of the large primes in `[−M, M)` into the bucket for
     /// its block.
     fn fill_buckets(&mut self) {
-        for (bucket, starts) in self.buckets.iter_mut().zip(&mut self.run_starts) {
+        // All of them, including those past the end of the interval.
+        for bucket in &mut self.buckets {
             bucket.clear();
+        }
+        for starts in &mut self.run_starts {
             starts.clear();
         }
         let len = 2 * self.m as u32;
@@ -553,16 +566,21 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
             let roots = self.roots[0][first..end]
                 .iter()
                 .zip(&self.roots[1][first..end]);
-            for (i, (prime, (&r1, &r2))) in primes.iter().zip(roots).enumerate() {
+            let sure = &self.sure[first - self.first_large..end - self.first_large];
+            for (i, ((prime, (&r1, &r2)), &sure)) in primes.iter().zip(roots).zip(sure).enumerate()
+            {
                 if r1 == UNSIEVED {
                     continue;
                 }
                 let tag = (i as u32) << 16;
                 for r in [r1, r2] {
-                    // Positions stay below 2^32: the interval and the
-                    // primes are both far smaller.
+                    // Whether the last step lands in the interval is close
+                    // to a coin flip, which a loop ending there would
+                    // mispredict. Instead it always goes into a bucket,
+                    // past the end if it misses: it stays below
+                    // ⌈len/p⌉·p < 2·len.
                     let mut pos = r;
-                    while pos < len {
+                    for _ in 0..=sure {
                         self.buckets[(pos >> BLOCK_BITS) as usize].push(tag | (pos & 0xffff));
                         pos += prime.p;
                     }
@@ -577,28 +595,39 @@ impl<const LIMBS: usize> Sieve<LIMBS> {
     /// Adds up the logs of the primes dividing `g(x)` over block `block`,
     /// which is the next one for the primes smaller than a block.
     fn sieve_block(&mut self, block: usize) {
-        self.block.fill(0);
+        let sums: &mut [u8; BLOCK_SIZE] = (&mut self.block[..]).try_into().unwrap();
+        sums.fill(0);
+        // A sum can't overflow: it is at most log₂ |g(x)| plus half a bit
+        // of rounding for each prime, which for the largest numbers the
+        // sieve takes, of 400 bits, is under 240.
         let range = self.first_sieved..self.first_large;
         let primes = &self.fb.primes[range.clone()];
         for (prime, next) in primes.iter().zip(&mut self.next[range]) {
             if next.0 == UNSIEVED {
                 continue;
             }
-            let p = prime.p as usize;
-            for r in [&mut next.0, &mut next.1] {
-                let mut j = *r as usize;
-                while j < BLOCK_SIZE {
-                    self.block[j] = self.block[j].saturating_add(prime.log);
-                    j += p;
-                }
-                *r = (j - BLOCK_SIZE) as u32;
+            let (p, log) = (prime.p as usize, prime.log);
+            // Both roots at once: they start less than p apart, so once
+            // the higher one leaves the block the lower has at most one
+            // hit left.
+            let (mut lo, mut hi) = (next.0.min(next.1) as usize, next.0.max(next.1) as usize);
+            while hi < BLOCK_SIZE {
+                sums[lo] = sums[lo].wrapping_add(log);
+                sums[hi] = sums[hi].wrapping_add(log);
+                lo += p;
+                hi += p;
             }
+            if lo < BLOCK_SIZE {
+                sums[lo] = sums[lo].wrapping_add(log);
+                lo += p;
+            }
+            *next = ((lo - BLOCK_SIZE) as u32, (hi - BLOCK_SIZE) as u32);
         }
         let (bucket, starts) = (&self.buckets[block], &self.run_starts[block]);
         for (r, &(_, _, log)) in self.runs.iter().enumerate() {
             for &hit in &bucket[starts[r] as usize..starts[r + 1] as usize] {
                 let j = (hit & 0xffff) as usize;
-                self.block[j] = self.block[j].saturating_add(log);
+                sums[j] = sums[j].wrapping_add(log);
             }
         }
     }
