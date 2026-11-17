@@ -192,10 +192,12 @@ With `--save-relations`, the matrix's rows also wait on disk, in
 sieving, memory holds only the pairs seen and a column number for each
 large prime, the checks for enough relations prune in passes over the
 file, and only the rows that survive pruning are read back to be solved.
-RSA-120 from its 11.6 million saved relations peaks at 3.8 GB resident rather
-than 5.0, in the square roots, and loading them takes 0.6 GB rather than
-2.0. The file is removed once the matrix is solved, and written again by
-a resumed run.
+The file is removed once the matrix is solved, and written again by a
+resumed run. With that, and an allocator that hands blocks of a megabyte
+or more back to the system rather than letting macOS's malloc keep them,
+RSA-120 from its 11.6 million saved relations peaks at 1.95 GB of
+memory footprint, against 3.65 with everything in memory and malloc's
+own allocator, in the same time.
 
 Sieving can also be split across machines. `--poly FILE` makes every
 machine use the same polynomials: the first run to find `FILE` missing

@@ -9,8 +9,12 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod memory;
 mod rows;
 mod tune;
+
+#[global_allocator]
+static ALLOCATOR: memory::Allocator = memory::Allocator;
 
 use cofox_core::arith::ParseUintError;
 use cofox_core::nfs::{

@@ -212,9 +212,10 @@ duplicate check, 8 bytes a pair (0.5 GB at RSA-140), which `dup1` and
 `dup2` replace by hashing `(a, b)` into files by range; the column of
 each large prime, 12 bytes a slot, which a renumbering table computed
 from the primes would replace; and clique removal and merging, still
-done on the pruned rows in memory. The square roots, which read the
-whole dependency's relations and multiply them out, are now the peak
-at RSA-120.
+done on the pruned rows in memory. The square roots' transforms, 1.3
+GB live at RSA-120 on ten threads, are the largest of what remains: one
+prime at a time in Barrett's reduction, as products already do, would
+halve their residues.
 
 *First experiment:* the peak of each stage at RSA-130, with the rows on
 disk, to see which of these comes first.
