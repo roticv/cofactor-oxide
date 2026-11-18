@@ -61,6 +61,9 @@ const CHUNK: usize = 32;
 /// Positions that share a threshold near where a norm changes sign.
 const PIECE: usize = 16;
 
+/// Primes the resieve tests a candidate against at once.
+const DIVISORS: usize = 16;
+
 /// Primes whose roots are transformed together in [`Side::start`].
 const LANES: usize = 4;
 
@@ -106,33 +109,11 @@ struct Small {
     rho: u32,
     next: u32,
     log: u8,
-    /// `⌈2^64/p⌉`, for remainders by `p` without dividing: see [`Small::rem`].
-    recip: u64,
 }
 
 impl Small {
     fn new(p: u32, rho: u32, next: u32, log: u8) -> Self {
-        Self {
-            p,
-            rho,
-            next,
-            log,
-            recip: u64::MAX / u64::from(p) + 1,
-        }
-    }
-
-    /// `x mod p`, by Lemire, Kaser and Kurz's method: the low 64 bits of
-    /// `x·⌈2^64/p⌉` are the fraction `x/p − ⌊x/p⌋` in fixed point, and
-    /// times `p` its top bits are the remainder.
-    fn rem(&self, x: u32) -> u32 {
-        let fraction = self.recip.wrapping_mul(u64::from(x));
-        ((u128::from(fraction) * u128::from(self.p)) >> 64) as u32
-    }
-
-    /// Whether `p` divides `x`: the fraction above is 0, which shows as
-    /// one below `⌈2^64/p⌉`.
-    fn divides(&self, x: u32) -> bool {
-        self.recip.wrapping_mul(u64::from(x)) < self.recip
+        Self { p, rho, next, log }
     }
 }
 
@@ -185,6 +166,16 @@ struct Side {
     skipped: f64,
     splitter: Splitter,
     small: Vec<Small>,
+    /// Where the primes of `small` from [`RESIEVE`] up start, and each
+    /// one's first hit in each row of the current slab, row by row, for
+    /// the resieve: it would take two remainders a prime to find again.
+    resieved: usize,
+    firsts: Vec<u16>,
+    /// Those primes, their inverses modulo 2^32 and `⌊(2^32 − 1)/p⌋`, apart
+    /// so that the resieve tests several at once: see [`Side::resieve`].
+    resieve_p: Vec<u32>,
+    resieve_inv: Vec<u32>,
+    resieve_max: Vec<u32>,
     /// Walked primes smaller than a slab, walked slab by slab.
     walks: Vec<Walk>,
     /// Primes that divide every point of rows `j ≡ 0 (mod p)`.
@@ -228,6 +219,11 @@ impl Side {
             skipped,
             splitter: Splitter::new(),
             small: Vec::new(),
+            resieved: 0,
+            firsts: Vec::new(),
+            resieve_p: Vec::new(),
+            resieve_inv: Vec::new(),
+            resieve_max: Vec::new(),
             walks: Vec::new(),
             rows: Vec::new(),
             block: vec![0; slab],
@@ -322,6 +318,20 @@ impl Side {
                 }
             }
         }
+        // In order of their primes, as the factor base is.
+        self.resieved = self.small.partition_point(|s| s.p < RESIEVE);
+        let rows = self.block.len() >> log_i;
+        self.firsts
+            .resize(rows * (self.small.len() - self.resieved), 0);
+        let resieved = &self.small[self.resieved..];
+        self.resieve_p.clear();
+        self.resieve_p.extend(resieved.iter().map(|s| s.p));
+        self.resieve_inv.clear();
+        self.resieve_inv
+            .extend(resieved.iter().map(|s| inverse_2_32(s.p)));
+        self.resieve_max.clear();
+        self.resieve_max
+            .extend(resieved.iter().map(|s| u32::MAX / s.p));
     }
 
     /// Sieves the rows `[j0, j0 + rows)` of a region `2^log_i` wide, the
@@ -329,6 +339,7 @@ impl Side {
     fn sieve(&mut self, j0: u64, rows: usize, log_i: u32) {
         let width = 1usize << log_i;
         self.block.fill(0);
+        let resieved = self.small.len() - self.resieved;
         for (r, row) in self.block[..rows * width]
             .chunks_exact_mut(width)
             .enumerate()
@@ -337,6 +348,11 @@ impl Side {
             // On even rows, where even x makes a and b both even, only odd
             // x are sieved.
             let even = j.is_multiple_of(2);
+            let firsts = &mut self.firsts[r * resieved..][..resieved];
+            for (s, first) in self.small[self.resieved..].iter().zip(firsts) {
+                // Below I, at most 2^16.
+                *first = s.next as u16;
+            }
             for s in &mut self.small {
                 let p = s.p as usize;
                 let mut x = s.next as usize;
@@ -385,6 +401,12 @@ impl Side {
     /// Records `(offset, p)` for each prime from [`RESIEVE`] up that hits
     /// one of the `candidates`, in order, of the slab at row `j0`, which
     /// are the offsets set in `marked`.
+    ///
+    /// A prime below `I` hits a candidate `x` in row `j` where `p` divides
+    /// `x − base + p − x0`, `x0` its first hit in the row, which is below
+    /// `I + p`. Each candidate tests the row's primes at once, by Granlund
+    /// and Montgomery's test: an odd `p` divides `n` when `n·p⁻¹` modulo
+    /// 2^32 is at most `⌊(2^32 − 1)/p⌋`, in 32-bit multiplies that vectorize.
     fn resieve(
         &self,
         j0: u64,
@@ -393,26 +415,38 @@ impl Side {
         marked: &[u64],
         out: &mut Vec<(u32, u32)>,
     ) {
-        let half = 1u32 << (log_i - 1);
+        let (ps, invs, maxes) = (&self.resieve_p, &self.resieve_inv, &self.resieve_max);
+        let mut shifts = vec![0u32; ps.len()];
         let mut rest = candidates;
         while let Some(&first) = rest.first() {
             let r = first >> log_i;
             let n = rest.partition_point(|&x| x >> log_i == r);
             let (row, next) = rest.split_at(n);
             rest = next;
-            let j = j0 + u64::from(r);
             let base = r << log_i;
-            for s in self.small.iter().filter(|s| s.p >= RESIEVE) {
-                // Below p² + I/2, so within 32 bits for p below I.
-                let x0 = s.rem(s.rho * s.rem(j as u32) + half);
-                // x − base ≡ x0 when p divides x − base + p − x0, which is
-                // positive and below I + p.
-                let shift = s.p.wrapping_sub(x0).wrapping_sub(base);
-                for &x in row {
-                    if s.divides(x.wrapping_add(shift)) {
-                        out.push((x, s.p));
+            let firsts = &self.firsts[r as usize * ps.len()..][..ps.len()];
+            for ((shift, &p), &x0) in shifts.iter_mut().zip(ps).zip(firsts) {
+                *shift = p.wrapping_sub(x0.into()).wrapping_sub(base);
+            }
+            for &x in row {
+                let hit = |i: usize| x.wrapping_add(shifts[i]).wrapping_mul(invs[i]) <= maxes[i];
+                let whole = ps.len() / DIVISORS * DIVISORS;
+                for k in (0..whole).step_by(DIVISORS) {
+                    let shift: &[u32; DIVISORS] =
+                        shifts[k..k + DIVISORS].try_into().expect("whole");
+                    let inv: &[u32; DIVISORS] = invs[k..k + DIVISORS].try_into().expect("whole");
+                    let max: &[u32; DIVISORS] = maxes[k..k + DIVISORS].try_into().expect("whole");
+                    // Few primes divide, and whether any of a chunk does is
+                    // a vectorizable reduction.
+                    let mut any = false;
+                    for i in 0..DIVISORS {
+                        any |= x.wrapping_add(shift[i]).wrapping_mul(inv[i]) <= max[i];
+                    }
+                    if any {
+                        out.extend((k..k + DIVISORS).filter(|&i| hit(i)).map(|i| (x, ps[i])));
                     }
                 }
+                out.extend((whole..ps.len()).filter(|&i| hit(i)).map(|i| (x, ps[i])));
             }
         }
         out.extend(self.hits.iter().filter(|h| is_marked(marked, h.0)));
@@ -911,6 +945,16 @@ fn reduce(q: u64, r: u64, skew: f64) -> ((i64, i64), (i64, i64)) {
     }
 }
 
+/// `p⁻¹ mod 2^32` for odd `p`, by Newton's iteration: `p` is its own
+/// inverse modulo 8, and each step doubles the bits that are right.
+fn inverse_2_32(p: u32) -> u32 {
+    let mut x = p;
+    for _ in 0..4 {
+        x = x.wrapping_mul(2u32.wrapping_sub(p.wrapping_mul(x)));
+    }
+    x
+}
+
 /// `x mod p` in `[0, p)`.
 fn reduce_mod(x: i64, p: u32) -> u64 {
     let r = x % i64::from(p);
@@ -1086,10 +1130,11 @@ fn is_marked(marked: &[u64], x: u32) -> bool {
 mod tests {
     use super::*;
 
-    /// The resieve's remainders by multiplying agree with `%` over the
-    /// ranges it uses them on: below `p² + I/2` for primes below `I`.
+    /// The resieve's divisibility test by multiplying agrees with `%` for
+    /// the primes it is used on, below `I` and at most 2^16, over all of
+    /// 32 bits, more than the `I + p` it needs.
     #[test]
-    fn remainders_match() {
+    fn divisibility_matches() {
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
             x ^= x << 13;
@@ -1097,16 +1142,15 @@ mod tests {
             x ^= x << 17;
             x
         };
-        for p in crate::primes::Primes::new(RESIEVE.into(), 1 << 15) {
-            let s = Small::new(p as u32, 0, 0, 0);
+        for p in crate::primes::Primes::new(RESIEVE.into(), 1 << 16) {
             let p = p as u32;
-            let top = p * p + (1 << 14);
-            for v in [0, 1, p - 1, p, p + 1, 2 * p, top - 1]
-                .into_iter()
-                .chain((0..64).map(|_| (next() % u64::from(top)) as u32))
-            {
-                assert_eq!(s.rem(v), v % p, "{v} mod {p}");
-                assert_eq!(s.divides(v), v % p == 0, "{p} | {v}");
+            let (inv, max) = (inverse_2_32(p), u32::MAX / p);
+            assert_eq!(p.wrapping_mul(inv), 1, "{p}⁻¹");
+            let mut values = vec![0, 1, p - 1, p, p + 1, 2 * p, u32::MAX / p * p, u32::MAX];
+            values.extend((0..64).map(|_| next() as u32));
+            values.extend((0..64).map(|_| (next() % 0x2_0000) as u32));
+            for v in values {
+                assert_eq!(v.wrapping_mul(inv) <= max, v % p == 0, "{p} | {v}");
             }
         }
     }
