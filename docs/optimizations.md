@@ -99,7 +99,18 @@ Tried and not kept:
 - **Unrolling the medium-prime loop by two:** no gain.
 - **One flat bucket array** instead of a vector per block: 1.7% faster.
 - **Leaving primes below 400 out of the sieve,** as msiqs does: 9%
-  faster a polynomial but 26% fewer two-large-prime relations.
+  faster a polynomial but 26% fewer two-large-prime relations. Cutoffs
+  of 200 to 400, each with 0 to 8 bits more slack, all lie on the same
+  curve of time against relations as 100 with more slack: near 485 µs a
+  polynomial every cutoff found 2,810–2,936 of them, and at 3,190 a
+  cutoff of 100 was fastest.
+- **Bucketing several polynomials at once,** each large prime's roots
+  stepped through 4 consecutive polynomials while loaded, an idea from
+  msieve: same relations, but 485 → 650 µs a polynomial, and 596 even
+  with one at a time. The update of every root, in a vectorized loop of
+  its own, costs only 6%, and done prime by prime among the pushes it
+  no longer vectorizes; more polynomials also mean more buckets to
+  write at once.
 
 **Compared with msiqs.** [msiqs](https://github.com/danaj/msiqs), a C
 SIQS, factors the same 100-digit semiprime in 587 s on these 10 threads,
