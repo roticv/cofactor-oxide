@@ -152,21 +152,6 @@ miss some whose norm is mostly a high power of 2 or 3.
 inaccuracy is costing time, and sieving prime powers would let the
 slack shrink.
 
-### Test-sieving the best polynomials
-
-Murphy's E misranked twice at RSA-110: the polynomial after the overflow
-fix had 7% lower E and sieved 4–12% faster, and degree 5 had 29% lower
-E than degree 4 and won a full run, 32 min against 39 min 43 s. E counts
-smooth values over a fixed area with Dickman's ρ, without the special-q
-dividing the algebraic norm, without large primes, and without the
-relations each polynomial needs. YAFU test-sieves its best few
-polynomials before choosing.
-
-*First experiment:* keep the top 3 to 5 by E at RSA-110, sieve each for
-10 to 20 s on all threads with the `--tune` slice code, and check that
-the fastest is the one that wins full runs; it should cost under a
-minute.
-
 ### ECM-friendly curves for cofactors
 
 The 64-bit ECM that splits two-large-prime cofactors uses Suyama's
@@ -291,6 +276,19 @@ Not RSA challenge numbers, at this point. But:
 - **ECM on the GPU for the pipeline's own levels** below 35 digits:
   tried, and the curve counts are too small to win. It is for record
   attempts and for cofactoring, not for the default pipeline.
+- **Test-sieving the best few polynomials.** Murphy's E had misranked
+  at RSA-110, but only between polynomials from different code versions
+  and degrees. Within one search it held: of the top 8 by E, sieved in
+  15,000-wide slices at 1.3M, 1.7M and 2.1M on 10 threads, the first was
+  also the fastest, 7% ahead of the next; E ordered the other seven
+  loosely. Choosing between degrees 4 and 5 by a 20-second test sieve
+  picked right at 105 digits and RSA-110, twice each, but where the
+  degrees are close it costs a second full polynomial search: RSA-110's
+  selection went from 24 s to 107 s, 4% of the run, the same share at
+  RSA-120, and both picks were the fixed switch's anyway. Placing the
+  switch by measurement is the cheaper fix. Comparing the top few of one
+  degree at 120 digits and up, where a test is a small share of the
+  run, is unmeasured.
 - **The factorization factory.** Coppersmith's shared-side NFS reaches
   `L(1/3, 1.639)` amortized over many numbers of one size. A genuine
   asymptotic win, and irrelevant unless there is a batch of moduli to
