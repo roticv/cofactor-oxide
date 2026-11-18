@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, IsTerminal, Read, Write};
 use std::ops::ControlFlow;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -919,6 +920,22 @@ impl Parallel for Threads {
     }
 
     fn map<T: Send>(&self, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        if self.0 == 1 {
+            return vec![f(0)];
+        }
+        // The pool runs one map at a time: a nested or concurrent one
+        // starts its own threads.
+        if let Ok(mut pool) = POOL.try_lock() {
+            let slots: Vec<Mutex<Option<T>>> = (0..self.0).map(|_| Mutex::new(None)).collect();
+            pool.run(self.0, &|i| {
+                let t = f(i);
+                *slots[i].lock().unwrap() = Some(t);
+            });
+            return slots
+                .into_iter()
+                .map(|s| s.into_inner().unwrap().expect("every piece ran"))
+                .collect();
+        }
         let f = &f;
         thread::scope(|scope| {
             let handles: Vec<_> = (1..self.0).map(|i| scope.spawn(move || f(i))).collect();
@@ -931,6 +948,111 @@ impl Parallel for Threads {
                 )
                 .collect()
         })
+    }
+}
+
+/// Worker threads kept between [`Threads::map`] calls: block Lanczos makes
+/// about seven a step, tens of thousands of steps in all.
+static POOL: Mutex<Pool> = Mutex::new(Pool {
+    workers: 0,
+    shared: None,
+});
+
+type Task = &'static (dyn Fn(usize) + Sync);
+
+struct Pool {
+    workers: usize,
+    shared: Option<Arc<Shared>>,
+}
+
+struct Shared {
+    job: Mutex<Job>,
+    start: Condvar,
+    done: Condvar,
+}
+
+struct Job {
+    round: u64,
+    task: Option<Task>,
+    pieces: usize,
+    left: usize,
+    panicked: bool,
+}
+
+impl Pool {
+    /// `task(i)` for each `i` in `0..pieces`, piece 0 on this thread.
+    fn run(&mut self, pieces: usize, task: &(dyn Fn(usize) + Sync)) {
+        let shared = self
+            .shared
+            .get_or_insert_with(|| {
+                Arc::new(Shared {
+                    job: Mutex::new(Job {
+                        round: 0,
+                        task: None,
+                        pieces: 0,
+                        left: 0,
+                        panicked: false,
+                    }),
+                    start: Condvar::new(),
+                    done: Condvar::new(),
+                })
+            })
+            .clone();
+        while self.workers + 1 < pieces {
+            self.workers += 1;
+            let (shared, i) = (shared.clone(), self.workers);
+            thread::spawn(move || shared.work(i));
+        }
+        // SAFETY: the task is only called until `left` reaches 0, which
+        // this waits for before returning, panic or not.
+        let task: Task = unsafe { std::mem::transmute(task) };
+        {
+            let mut job = shared.job.lock().unwrap();
+            job.round += 1;
+            job.task = Some(task);
+            job.pieces = pieces;
+            job.left = pieces - 1;
+            job.panicked = false;
+        }
+        shared.start.notify_all();
+        let mine = panic::catch_unwind(AssertUnwindSafe(|| task(0)));
+        let mut job = shared.job.lock().unwrap();
+        while job.left > 0 {
+            job = shared.done.wait(job).unwrap();
+        }
+        job.task = None;
+        let panicked = job.panicked;
+        drop(job);
+        if let Err(e) = mine {
+            panic::resume_unwind(e);
+        }
+        assert!(!panicked, "worker panicked");
+    }
+}
+
+impl Shared {
+    fn work(&self, i: usize) {
+        let mut seen = 0;
+        loop {
+            let task = {
+                let mut job = self.job.lock().unwrap();
+                while job.round == seen {
+                    job = self.start.wait(job).unwrap();
+                }
+                seen = job.round;
+                if i >= job.pieces {
+                    continue;
+                }
+                job.task.expect("a round has a task")
+            };
+            let ok = panic::catch_unwind(AssertUnwindSafe(|| task(i))).is_ok();
+            let mut job = self.job.lock().unwrap();
+            job.panicked |= !ok;
+            job.left -= 1;
+            if job.left == 0 {
+                self.done.notify_one();
+            }
+        }
     }
 }
 
