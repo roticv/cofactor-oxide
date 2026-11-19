@@ -140,6 +140,7 @@ number.
 | Kleinjung's collisions in 64-bit arithmetic and a hash table | Same candidates; RSA-140's search 2 h 23 min → 35 min, RSA-130's 20 → 6 min |
 | Kleinjung's special-q and `l = q·ℓ₁·ℓ₂` past 64 bits | RSA-140: Murphy's E 3.67 → 4.68·10⁻¹⁰, 1.3 times the relations a second, level with CADO-NFS's polynomial |
 | Root sieve in cached blocks, `j₀` to 2^20 from 125 digits | Same polynomials 11 times as fast at ±2^20; RSA-130 sieves 5–7% faster, RSA-140 level |
+| `j₀` doubling every 10 bits past RSA-140, to 2^23 at RSA-150 | RSA-150, an eighth of the search: 34.5 → 29.9 hours of predicted sieving; RSA-140 the same polynomial |
 | Degree 5 from 360 bits rather than 370 | RSA-110: 39 min 43 s → 32 min 04 s on 10 threads |
 | Size optimization redone in `BigInt` where 128 bits overflow | RSA-110 sieves 4–12% faster; RSA-130 and RSA-140 keep their polynomials; with a short search, Murphy's E 20–49% higher at 140–160 digits |
 
@@ -315,6 +316,33 @@ within 0.5%. A search of 1/640 the size gained more: Murphy's E rose
 from 4.80 to 6.18·10⁻¹⁰ at RSA-140, 1.61 to 1.94·10⁻¹⁰ at 150 digits
 and 2.45 to 3.64·10⁻¹¹ at 160. A full search at 150 and 160 digits, 8
 hours or more, hasn't been run. The search takes no longer.
+
+#### RSA-150 against CADO-NFS
+
+CADO-NFS's polynomial search with its c150 parameters (328 leading
+coefficients to 140,000, the best 72 by size root-optimized) took 21
+core-hours, half our full search's 41, and its polynomial sieved 19%
+faster than ours. Predicted sieving for RSA-150 on 10 threads, from
+about 10,000 special-q at each of 10M, 20M and 40M, with factor bases
+of 67.5M, 29/30-bit large primes and `I` = 2^14:
+
+| Polynomial | Murphy's E, by CADO-NFS | Hours |
+|---|---|---|
+| Ours, full search, `j₀` to 2^20 | 5.93·10⁻⁷ | 30.7 |
+| Ours, an eighth of the search, `j₀` to 2^20 | 5.64·10⁻⁷ | 34.5 |
+| Ours, an eighth of the search, `j₀` to 2^23 | 5.93·10⁻⁷ | 29.9 |
+| CADO-NFS's best | 6.35·10⁻⁷ | 24.9 |
+| Our root sieve on the same candidate, `j₀` to 2^20 / 2^23 | 5.83 / 6.32·10⁻⁷ | 29.2 / 25.9 |
+| CADO-NFS's second best | 6.29·10⁻⁷ | 31.1 |
+
+Root-optimizing CADO-NFS's 72 candidates with ours showed the gap was
+the width of the root sieve, not its scoring: CADO-NFS's best needed
+`j₀` of about −5.25 million in our frame, past 2^20. The last row
+shows Murphy's E failing to rank at this size: CADO-NFS's two best are
+within 1% by E and 25% apart in sieving. Which of the top few sieves
+fastest decided more than anything else here; see test-sieving in
+[the ideas](ideas.md). The search's leading coefficients
+stop at 48,000; 63 of CADO-NFS's 72 were above that.
 
 #### Degree 5 at RSA-110
 

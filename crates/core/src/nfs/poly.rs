@@ -84,6 +84,18 @@ const ROOT_FINALISTS: usize = 32;
 /// E rose by a tenth, to 5.16e-10 (what CADO-NFS's root sieve gets from the
 /// same polynomial), but it sieves no faster. At RSA-100 to 120 it found the
 /// same polynomials, and 2^23 nothing more.
+///
+/// Past RSA-140, `j₀` doubles every 10 bits from 466, to 2^23 at RSA-150's
+/// 496. The rotations are of the untranslated `f`, and a rotation by
+/// `j₁·x·g` moves the best translation `k`, which moves the matching `j₀`
+/// by `−j₁·k`: CADO-NFS's best RSA-150 polynomial was translated by
+/// 493,906 and rotated by `(13·x + 1,168,735)·g`, which is `j₀ ≈ −5.25`
+/// million here. Given CADO-NFS's 72 size-optimized candidates, our root
+/// sieve at 2^20 made that one a polynomial that sieved 17% slower than
+/// CADO-NFS's; at 2^23 it was 4% slower. Our own search, at an eighth of
+/// its special-q, went from 34.5 to 29.9 hours of predicted sieving, and
+/// the root sieve from 20 s to 146 s on 10 threads. RSA-140's 32
+/// finalists gave the same polynomial at 2^20 to 2^23.
 #[derive(Clone, Copy, Debug)]
 struct Effort {
     nq: usize,
@@ -109,7 +121,11 @@ impl Effort {
         Self {
             nq: ((roots / KJ_LEADS as f64) as usize).max(64),
             rot1: 4 << step.saturating_sub(2),
-            rot0: if wide == 0 { 1 << (12 + step) } else { 1 << 20 },
+            rot0: if wide == 0 {
+                1 << (12 + step)
+            } else {
+                1 << (20 + (bits.saturating_sub(466) / 10).min(3))
+            },
             lead_step: 60 << (wide / 16).min(3),
             prime_floor: if wide == 0 {
                 0

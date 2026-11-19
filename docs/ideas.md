@@ -286,9 +286,10 @@ Not RSA challenge numbers, at this point. But:
   degrees are close it costs a second full polynomial search: RSA-110's
   selection went from 24 s to 107 s, 4% of the run, the same share at
   RSA-120, and both picks were the fixed switch's anyway. Placing the
-  switch by measurement is the cheaper fix. Comparing the top few of one
-  degree at 120 digits and up, where a test is a small share of the
-  run, is unmeasured.
+  switch by measurement is the cheaper fix. At RSA-150 it may pay after
+  all: CADO-NFS's two best polynomials, within 1% by Murphy's E, sieved
+  in 24.9 and 31.1 predicted hours, and a test of about 10 minutes on 10
+  threads tells them apart. Untried in the search.
 - **The factorization factory.** Coppersmith's shared-side NFS reaches
   `L(1/3, 1.639)` amortized over many numbers of one size. A genuine
   asymptotic win, and irrelevant unless there is a batch of moduli to
