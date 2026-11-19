@@ -45,8 +45,19 @@
 /// million, 29/29 bits and special-q from 32 million came to about 174
 /// core-hours: 30 million tied, 10 million cost 31% more, CADO-NFS's c140
 /// parameters 40% more and three large primes 52% more, and starting at
-/// 16 million cost more in duplicates than it saved. The rows past 465
-/// bits are guesses.
+/// 16 million cost more in duplicates than it saved.
+///
+/// The RSA-150 (496 bits) row comes from `--tune` with our degree-5
+/// polynomial, on 10 threads, counting the relations needed as
+/// `0.55·(…)` for one more algebraic bit, as RSA-120 and RSA-130 needed
+/// with 27/28 and 28/29 bits, and `0.64·(…)` for equal bits, as RSA-140
+/// needed with 29/29. With factor bases of 30 million and `I` of 2^13,
+/// 29/30 bits came to about 39 hours of sieving; 29/29 bits 45, 30/30
+/// 48, 30/31 42, and three large primes on the algebraic side 54. `I` of
+/// 2^14 then tied, but with factor bases of 67.5 million it came to about
+/// 32 hours against 42 with 2^13; 45 and 101 million were slower, and
+/// starting special-q anywhere from 5.5 to 10 million was the same. Its
+/// sieving peaked at 6.4 GB. The rows past 496 bits are guesses.
 ///
 /// The algebraic side's candidates are allowed 8 more bits from 430 bits,
 /// for values with more than their share of the primes below 30, which
@@ -59,13 +70,13 @@
 /// RSA-130, 16% and 4.6% (4 bits: 10% and 5.2%); at RSA-110, 6.4% more
 /// relations but 17.5% fewer a second, and 4 bits 7% fewer.
 ///
-/// `I` stops at 2^13, where the buckets of the largest primes' hits take
-/// a few hundred megabytes for each thread. Past 600 bits the last row
+/// `I` stops at 2^14: its buckets of the largest primes' hits take about
+/// twice the few hundred megabytes for each thread of 2^13. Past 600 bits the last row
 /// holds, though numbers that large need larger large primes, two or three
 /// of them a side, to be practical. The siever takes large-prime bounds up
 /// to 2^40, below the quadratic characters' primes.
 #[allow(clippy::type_complexity)]
-const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64, u32); 11] = [
+const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64, u32); 12] = [
     (120, [5_000, 5_000], [18, 18], [18, 18], 9, 1_250, 0),
     (160, [60_000, 60_000], [21, 21], [21, 21], 10, 15_000, 0),
     (200, [500_000, 500_000], [23, 23], [23, 23], 11, 125_000, 0),
@@ -121,6 +132,15 @@ const TABLE: [(u32, [u32; 2], [u32; 2], [u32; 2], u32, u64, u32); 11] = [
         [58, 58],
         13,
         32_000_000,
+        8,
+    ),
+    (
+        496,
+        [67_500_000, 67_500_000],
+        [29, 30],
+        [58, 60],
+        14,
+        10_000_000,
         8,
     ),
     (

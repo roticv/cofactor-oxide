@@ -280,7 +280,7 @@ fn valid(p: &Params) -> bool {
     };
     side(p.rational_bound, p.rational_lpb, p.rational_mfb)
         && side(p.algebraic_bound, p.algebraic_lpb, p.algebraic_mfb)
-        && (9..=13).contains(&p.log_i)
+        && (9..=14).contains(&p.log_i)
         && p.algebraic_slack <= 16
 }
 
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn neighbors_are_valid() {
-        for bits in [300, 364, 397, 430, 465] {
+        for bits in [300, 364, 397, 430, 465, 496] {
             let p = Params::for_bits(bits);
             let near: Vec<Params> = neighbors(&p).collect();
             assert!(near.len() >= 4, "{bits}: {}", near.len());
