@@ -291,11 +291,13 @@ fn slice(gnfs: &Gnfs<16>, q: u64, width: u64, threads: usize, floor: u64) -> Sli
     let next = AtomicUsize::new(0);
     let barrier = Barrier::new(threads + 1);
     let found: Mutex<Vec<Relation>> = Mutex::new(Vec::new());
+    let gpu = crate::gpu_for(gnfs);
+    let gpu = gpu.as_ref();
     let seconds = thread::scope(|scope| {
         for _ in 0..threads {
             let (qs, next, barrier, found) = (&qs, &next, &barrier, &found);
             scope.spawn(move || {
-                let mut sieve = gnfs.sieve();
+                let mut sieve = crate::sieve_with(gnfs, gpu);
                 let mut mine = Vec::new();
                 barrier.wait();
                 while let Some(&(q, r)) = qs.get(next.fetch_add(1, Ordering::Relaxed)) {

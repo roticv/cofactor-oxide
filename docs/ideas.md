@@ -172,14 +172,16 @@ Known to pay; the question is only the order.
 
 ### A GPU siever
 
-What both September records did, and neither released. A Rust port on
-Metal or wgpu, with the CPU siever as the oracle for the relations found,
-is the single most valuable thing this project could produce. The place
-to start is the cofactorization kernel: it is embarrassingly parallel,
-the GPU ECM experiment in `experiments/gpu-ecm` already does stage 1 on
-the M4, and it lost to the CPU only below about 8,000 curves at once,
-which batching cofactors across many special-q supplies. The lattice
-walk and bucket fill come second.
+What both September records did, and neither released. The bucket fill
+is on the GPU now, on macOS: see [the optimizations](optimizations.md#sieving).
+Sampling the CPU siever at RSA-150 had it at 40% of the time, the
+sieving of small primes and applying the buckets at 38%, the resieve at
+12%, norms and thresholds at 5%, and cofactorization at only 3.6%, so
+cofactorization on the GPU, which had looked like the place to start,
+would save under 4%. What's left is the slab sieve and the resieve,
+whose scattered byte adds into a cache-sized block suit a GPU less; and
+the bucket fill overlapped with the CPU's sieving, rather than each
+thread waiting for its own, if the GPU's share grows.
 
 ### Wider types
 

@@ -10,6 +10,9 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg_attr(target_os = "macos", path = "gpu.rs")]
+#[cfg_attr(not(target_os = "macos"), path = "no_gpu.rs")]
+mod gpu;
 mod memory;
 mod rows;
 mod tune;
@@ -19,7 +22,7 @@ static ALLOCATOR: memory::Allocator = memory::Allocator;
 
 use cofox_core::arith::ParseUintError;
 use cofox_core::nfs::{
-    Gnfs, Params, Poly, Spill, parse_poly, parse_relation, poly_text, relation_line,
+    Gnfs, Params, Poly, Sieve, Spill, parse_poly, parse_relation, poly_text, relation_line,
 };
 use cofox_core::parallel::Parallel;
 use cofox_core::qs::{Checkpoint, QsJob, Start};
@@ -28,7 +31,7 @@ use rows::{Collection, RowFile};
 
 const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs]
              [--poly FILE] [--save-relations FILE] [--load-relations FILE]...
-             [--special-q START:END] [--tune] <n>...
+             [--special-q START:END] [--tune] [--no-gpu] <n>...
 
   --ecm DIGITS  run ECM up to the level for primes of this many digits
                 (15 to 40, default 25); each level takes about four times
@@ -68,7 +71,11 @@ const USAGE: &str = "usage: cofox [--ecm DIGITS] [--threads N] [--no-qs] [--gnfs
                 that would collect enough relations soonest on this machine,
                 by timing slices of special-q for each, and print them as a
                 row of the parameter table; the large-prime and cofactor
-                bounds stay the table's; with --poly, for that pair";
+                bounds stay the table's; with --poly, for that pair
+  --no-gpu      with --gnfs, sieve on the CPU alone; on macOS, the GPU
+                otherwise walks the factor base's larger primes for the
+                sieve, from about 80 digits, which finds the same relations
+                1.2 to 1.5 times as fast";
 
 /// The widest numbers the command line takes.
 type Wide = Uint<16>;
@@ -85,6 +92,35 @@ const SAVE_FLUSH: Duration = Duration::from_secs(10);
 
 /// How often the status line is redrawn.
 const REDRAW: Duration = Duration::from_millis(100);
+
+/// `--no-gpu`.
+static NO_GPU: AtomicBool = AtomicBool::new(false);
+
+/// Ideals walked into the buckets, of both sides, from which the GPU
+/// walks them: with fewer, its fixed costs a special-q outweigh it.
+const GPU_MIN_IDEALS: usize = 1 << 18;
+
+/// The GPU, to fill the buckets of `gnfs`'s sieves, unless `--no-gpu`,
+/// there's none, or the factor base is too small for it to pay.
+fn gpu_for(gnfs: &Gnfs<16>) -> Option<Arc<gpu::Gpu>> {
+    if NO_GPU.load(Ordering::Relaxed) {
+        return None;
+    }
+    let plans = gnfs.bucket_plans();
+    if plans.iter().map(|p| p.p.len()).sum::<usize>() < GPU_MIN_IDEALS {
+        return None;
+    }
+    gpu::Gpu::new(&plans)
+}
+
+/// A sieve for `gnfs`, its buckets filled by `gpu` if there is one.
+fn sieve_with(gnfs: &Gnfs<16>, gpu: Option<&Arc<gpu::Gpu>>) -> Sieve {
+    let mut sieve = gnfs.sieve();
+    if let Some(gpu) = gpu {
+        sieve.set_filler(gpu.filler());
+    }
+    sieve
+}
 
 fn main() -> ExitCode {
     let mut ecm_digits = 25;
@@ -118,6 +154,7 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             },
             "--no-qs" => qs = false,
+            "--no-gpu" => NO_GPU.store(true, Ordering::Relaxed),
             "--gnfs" => gnfs = true,
             "--tune" => tune = true,
             "--save-relations" | "--load-relations" | "--poly" => {
@@ -832,6 +869,14 @@ fn gnfs_sieve(
         }
     };
     let until_ready = matches!(range, Range::UntilReady);
+    let gpu = gpu_for(gnfs);
+    if let Some(gpu) = &gpu {
+        status.stage(&format!(
+            "GNFS: the GPU ({}) walks the large primes",
+            gpu.name()
+        ));
+    }
+    let gpu = gpu.as_ref();
     let (send, receive) = mpsc::channel();
     let (next_block, last_q) = (AtomicU64::new(0), AtomicU64::new(0));
     let done = AtomicBool::new(false);
@@ -843,7 +888,7 @@ fn gnfs_sieve(
             let (send, next_block, last_q, done, block) =
                 (send.clone(), &next_block, &last_q, &done, &block);
             scope.spawn(move || {
-                let mut sieve = gnfs.sieve();
+                let mut sieve = sieve_with(gnfs, gpu);
                 while !done.load(Ordering::Relaxed) {
                     let Some(qs) = block(next_block.fetch_add(1, Ordering::Relaxed)) else {
                         return;

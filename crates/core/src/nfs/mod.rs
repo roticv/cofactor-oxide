@@ -42,7 +42,7 @@ pub use disk::{DiskRelations, Rows};
 pub use format::{parse_poly, parse_relation, poly_text, relation_line};
 pub use params::{CHARACTERS, Params};
 pub use poly::{Poly, alpha, degree};
-pub use sieve::{Relation, Sieve, special_qs};
+pub use sieve::{BucketFill, BucketPlan, GROUP, Relation, Sieve, bucket_plans, special_qs};
 
 use crate::arith::Uint;
 use crate::parallel::{Parallel, Serial, split};
@@ -130,6 +130,12 @@ impl<const LIMBS: usize> Gnfs<LIMBS> {
     /// A sieve for this number.
     pub fn sieve(&self) -> Sieve {
         Sieve::new(&self.poly, &self.fb, &self.params)
+    }
+
+    /// The sides' buckets for a [`BucketFill`] to fill, as
+    /// [`Sieve::set_filler`] takes it.
+    pub fn bucket_plans(&self) -> [BucketPlan; 2] {
+        bucket_plans(&self.fb, &self.params)
     }
 
     /// The special-q of block `k`: the ideals `(q, r)` with `q` in the

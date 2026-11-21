@@ -93,6 +93,180 @@ pub struct Relation {
     pub algebraic: Vec<u64>,
 }
 
+/// The most ideals in a [`BucketPlan`] group.
+pub const GROUP: usize = 256;
+
+/// One side's primes from a slab up, whose hits go in buckets, laid out
+/// for a [`BucketFill`] to walk elsewhere, such as on a GPU.
+///
+/// For a special-q with reduced basis `u`, `v`, an ideal `(p, r)` has
+/// `α`, `β` the values of `a − r·b` at `u` and `v` modulo `p` (of `b`, for
+/// the root at infinity `r = p`). Where `α = 0` it has no hits. Otherwise
+/// `ρ = −β/α mod p`, and the basis `(p, 0), (ρ, 1)` reduces like a
+/// continued fraction, while both first coordinates are at least `I =
+/// 2^log_i`, to steps `(a, ja)`, `(b, jb)` with `0 < a, b < I` and
+/// `a + b ≥ I`; `ρ = 0` takes `a = I`, `b = 0`. Its walk starts at `pos =
+/// I/2` and steps to `(x − a, j + ja)` if `x ≥ a` or `x + b ≥ I`, and
+/// `(x + b, j + jb)` if `x < a`, both when both hold, for `pos = j·I + x`,
+/// `ja` and `jb` capped at `2^31 − 1`; each `pos` it reaches below
+/// `2^(log_i + log_j)` is a hit, in slab `pos >> slab_bits`, recorded as
+/// `pos mod 2^slab_bits | tag`.
+pub struct BucketPlan {
+    pub log_i: u32,
+    pub log_j: u32,
+    pub slab_bits: u32,
+    /// The ideals, in the factor base's order.
+    pub p: Vec<u32>,
+    pub r: Vec<u32>,
+    /// Each ideal's place in its slice, shifted above a slab's offsets.
+    pub tag: Vec<u32>,
+    /// Runs of at most [`GROUP`] consecutive ideals within one slice:
+    /// `[first, end, slice]`, indices into `p`.
+    pub groups: Vec<[u32; 3]>,
+    /// The number of slices, runs of ideals the siever gives one `log`.
+    pub slices: u32,
+}
+
+impl BucketPlan {
+    /// The slabs, each with a bucket.
+    pub fn slabs(&self) -> usize {
+        1 << (self.log_i + self.log_j).saturating_sub(self.slab_bits)
+    }
+}
+
+/// Fills the siever's buckets for primes from a slab up, as
+/// [`BucketPlan`] describes, in place of the siever itself.
+pub trait BucketFill: Send {
+    /// Fills the buckets of side `side`, 0 rational and 1 algebraic, as
+    /// [`bucket_plans`] numbers them, for the special-q basis `u`, `v`:
+    /// slab `k`'s hits in `data[starts[k]..starts[k + 1]]`, slice `s`'s
+    /// first among them, those of slice `s + 1` after, from `marks[s ·
+    /// slabs + k]` within the slab's, for `starts` of `slabs + 1` and
+    /// `marks` of `slices · slabs`. The hits of one slice may be in any
+    /// order. `data` starts on a 16 KiB boundary and its length is a
+    /// multiple of 16 KiB. Returns false, and the siever fills them
+    /// itself, if they don't fit in `data` or the fill failed.
+    fn fill(
+        &mut self,
+        side: usize,
+        u: (i64, i64),
+        v: (i64, i64),
+        data: &mut [u32],
+        starts: &mut [u32],
+        marks: &mut [u32],
+    ) -> bool;
+}
+
+/// `log₂` of the positions sieved at a time, for a region `2^log_i` wide.
+fn slab_bits(log_i: u32) -> u32 {
+    SLAB_BITS.min(log_i + log_i - 1).max(log_i)
+}
+
+/// The rational and algebraic sides' [`BucketPlan`]s for `fb` with
+/// `params`, the same for every special-q.
+pub fn bucket_plans(fb: &FactorBase, params: &Params) -> [BucketPlan; 2] {
+    let log_i = params.log_i;
+    let bits = slab_bits(log_i);
+    [&fb.rational, &fb.algebraic].map(|primes| {
+        let from = bucketed_from(primes, bits);
+        let slices = fixed_slices(primes, from);
+        let mut tag = Vec::with_capacity(primes.len() - from);
+        let mut groups = Vec::new();
+        for (s, &(base, _)) in slices.iter().enumerate() {
+            let end = slices.get(s + 1).map_or(primes.len(), |&(b, _)| b as usize);
+            tag.extend((base..end as u32).map(|i| (i - base) << SLAB_BITS));
+            let (first, end) = (base as usize - from, end - from);
+            groups.extend(
+                (first..end)
+                    .step_by(GROUP)
+                    .map(|g| [g as u32, (g + GROUP).min(end) as u32, s as u32]),
+            );
+        }
+        BucketPlan {
+            log_i,
+            log_j: log_i - 1,
+            slab_bits: bits,
+            p: primes[from..].iter().map(|q| q.p).collect(),
+            r: primes[from..].iter().map(|q| q.r).collect(),
+            tag,
+            groups,
+            slices: slices.len() as u32,
+        }
+    })
+}
+
+/// Where the primes of a slab of `2^slab_bits` and up start in `primes`.
+fn bucketed_from(primes: &[Prime], slab_bits: u32) -> usize {
+    primes.partition_point(|q| q.p < 1 << slab_bits)
+}
+
+/// The primes from `from`, in runs of fewer than `2^HINT_BITS` with one
+/// `log`: the index of each run's first prime and the `log`.
+fn fixed_slices(primes: &[Prime], from: usize) -> Vec<(u32, u8)> {
+    let mut slices: Vec<(u32, u8)> = Vec::new();
+    for (i, q) in primes.iter().enumerate().skip(from) {
+        let i = i as u32;
+        match slices.last() {
+            Some(&(base, log)) if i - base < 1 << HINT_BITS && log == q.log => {}
+            _ => slices.push((i, q.log)),
+        }
+    }
+    slices
+}
+
+/// Bytes a [`BucketFill`]'s `data` is aligned to, and a multiple of.
+const FILL_ALIGN: usize = 16384;
+
+/// A side's buckets as a [`BucketFill`] fills them: one array, each
+/// slab's hits in a run of it.
+struct Flat {
+    /// The side's number, for the filler.
+    side: usize,
+    /// Where the bucketed primes start.
+    from: usize,
+    /// Their slices, the same for every special-q.
+    slices: Vec<(u32, u8)>,
+    /// The hits, from `off`, `len` of them aligned to [`FILL_ALIGN`].
+    data: Vec<u32>,
+    off: usize,
+    len: usize,
+    /// Where each slab's hits start in `data[off..]`, and the end.
+    starts: Vec<u32>,
+    /// Whether the current special-q's buckets are these.
+    used: bool,
+}
+
+/// A special-q's buckets: a list for each slab as the siever fills them,
+/// or a [`Flat`] array.
+#[derive(Clone, Copy)]
+enum Buckets<'a> {
+    Lists(&'a [Vec<u32>]),
+    Flat(&'a [u32], &'a [u32]),
+}
+
+impl<'a> Buckets<'a> {
+    fn of(lists: &'a [Vec<u32>], flat: &'a Option<Flat>) -> Self {
+        match flat {
+            Some(f) if f.used => Buckets::Flat(&f.data[f.off..f.off + f.len], &f.starts),
+            _ => Buckets::Lists(lists),
+        }
+    }
+
+    fn len(self) -> usize {
+        match self {
+            Buckets::Lists(lists) => lists.len(),
+            Buckets::Flat(_, starts) => starts.len() - 1,
+        }
+    }
+
+    fn get(self, k: usize) -> &'a [u32] {
+        match self {
+            Buckets::Lists(lists) => &lists[k],
+            Buckets::Flat(data, starts) => &data[starts[k] as usize..starts[k + 1] as usize],
+        }
+    }
+}
+
 /// The special-q ideals `(q, r)` with `q` in `[lo, hi)`: each prime with
 /// each root of `f` modulo it.
 pub fn special_qs(poly: &Poly, lo: u64, hi: u64) -> Vec<(u64, u64)> {
@@ -192,6 +366,8 @@ struct Side {
     slices: Vec<(u32, u8)>,
     /// Where each slice starts in each bucket, slice by slice.
     marks: Vec<u32>,
+    /// The buckets as a [`BucketFill`] fills them, if one does.
+    flat: Option<Flat>,
 }
 
 impl Side {
@@ -231,13 +407,53 @@ impl Side {
             buckets: Vec::new(),
             slices: Vec::new(),
             marks: Vec::new(),
+            flat: None,
         }
+    }
+
+    /// Takes the buckets from a [`BucketFill`] from now on, as side
+    /// `side`, for a region `2^log_i` wide and `2^log_j` high.
+    fn flatten(&mut self, side: usize, log_i: u32, log_j: u32) {
+        let bits = self.block.len().trailing_zeros();
+        let from = bucketed_from(&self.primes, bits);
+        if from == self.primes.len() {
+            self.flat = None;
+            return;
+        }
+        // Each prime hits each row at most once, and the region about
+        // `2^(log_i + log_j)/p` times.
+        let rows = 1u64 << log_j;
+        let hits: u64 = self.primes[from..]
+            .iter()
+            .map(|q| ((1u64 << (log_i + log_j)) / u64::from(q.p) + 2).min(rows))
+            .sum();
+        let words = FILL_ALIGN / 4;
+        let len = (hits as usize).div_ceil(words) * words;
+        let data = vec![0u32; len + words];
+        let off = data.as_ptr().align_offset(FILL_ALIGN);
+        self.flat = Some(Flat {
+            side,
+            from,
+            slices: fixed_slices(&self.primes, from),
+            data,
+            off,
+            len,
+            starts: Vec::new(),
+            used: false,
+        });
     }
 
     /// Finds each prime's lattice in the `(i, j)` plane for the special-q
     /// basis `u`, `v`, in a region `2^log_i` wide and `2^log_j` high, and
-    /// fills the buckets.
-    fn start(&mut self, u: (i64, i64), v: (i64, i64), log_i: u32, log_j: u32) {
+    /// fills the buckets, or has `fill` fill them.
+    fn start(
+        &mut self,
+        u: (i64, i64),
+        v: (i64, i64),
+        log_i: u32,
+        log_j: u32,
+        fill: Option<&mut (dyn BucketFill + 'static)>,
+    ) {
         let width = 1u64 << log_i;
         let slab_bits = self.block.len().trailing_zeros();
         let end = 1u64 << (log_i + log_j);
@@ -249,10 +465,28 @@ impl Side {
         self.small.clear();
         self.walks.clear();
         self.rows.clear();
+        // The primes from a slab up are `fill`'s, unless it fails. Those
+        // with α = 0 only hit row 0, which has no candidates.
+        let mut last = self.primes.len();
+        if let Some(flat) = &mut self.flat {
+            flat.used = false;
+            if let Some(fill) = fill {
+                self.marks.resize(flat.slices.len() * slabs, 0);
+                flat.starts.resize(slabs + 1, 0);
+                let data = &mut flat.data[flat.off..flat.off + flat.len];
+                if fill.fill(flat.side, u, v, data, &mut flat.starts, &mut self.marks) {
+                    flat.used = true;
+                    last = flat.from;
+                    self.slices.extend_from_slice(&flat.slices);
+                } else {
+                    self.marks.clear();
+                }
+            }
+        }
         let first = self.primes.partition_point(|q| q.p < SMALL_PRIMES);
         // In groups, so that the divisions of the inverses and the walks'
         // steps overlap.
-        for (g, group) in self.primes[first..].chunks(LANES).enumerate() {
+        for (g, group) in self.primes[first..last].chunks(LANES).enumerate() {
             let mut x = [1u32; LANES];
             let mut ps = [1u32; LANES];
             let mut betas = [0u64; LANES];
@@ -390,8 +624,9 @@ impl Side {
             }
         }
         let slab = (start >> self.block.len().trailing_zeros()) as usize;
+        let buckets = Buckets::of(&self.buckets, &self.flat);
         for (k, &(_, log)) in self.slices.iter().enumerate() {
-            for &e in slice(&self.buckets, &self.marks, slab, k) {
+            for &e in slice(buckets, &self.marks, slab, k) {
                 let off = (e & OFFSET) as usize;
                 self.block[off] = self.block[off].saturating_add(log);
             }
@@ -451,8 +686,9 @@ impl Side {
         }
         out.extend(self.hits.iter().filter(|h| is_marked(marked, h.0)));
         let slab = ((j0 << log_i) >> self.block.len().trailing_zeros()) as usize;
+        let buckets = Buckets::of(&self.buckets, &self.flat);
         for (k, &(base, _)) in self.slices.iter().enumerate() {
-            for &e in slice(&self.buckets, &self.marks, slab, k) {
+            for &e in slice(buckets, &self.marks, slab, k) {
                 let off = e & OFFSET;
                 if is_marked(marked, off) {
                     out.push((off, self.primes[(base + (e >> SLAB_BITS)) as usize].p));
@@ -464,8 +700,8 @@ impl Side {
 
 /// The `k`th slice's hits in bucket `slab`, given where each slice starts
 /// in each bucket.
-fn slice<'a>(buckets: &'a [Vec<u32>], marks: &[u32], slab: usize, k: usize) -> &'a [u32] {
-    let bucket = &buckets[slab];
+fn slice<'a>(buckets: Buckets<'a>, marks: &[u32], slab: usize, k: usize) -> &'a [u32] {
+    let bucket = buckets.get(slab);
     let from = marks[k * buckets.len() + slab] as usize;
     let to = marks
         .get((k + 1) * buckets.len() + slab)
@@ -560,6 +796,8 @@ pub struct Sieve {
     marked: Vec<u64>,
     /// [`Params::algebraic_slack`].
     algebraic_slack: f64,
+    /// What fills the buckets, if not the sieve.
+    filler: Option<alloc::boxed::Box<dyn BucketFill>>,
 }
 
 const TOO_WIDE: &str = "polynomial coefficients too large";
@@ -571,7 +809,7 @@ impl Sieve {
     pub fn new(poly: &Poly, fb: &FactorBase, params: &Params) -> Self {
         let log_i = params.log_i;
         let log_j = log_i - 1;
-        let slab = 1usize << SLAB_BITS.min(log_i + log_j).max(log_i);
+        let slab = 1usize << slab_bits(log_i);
         Self {
             poly: poly.clone(),
             log_i,
@@ -598,7 +836,18 @@ impl Sieve {
                 .zip(i128::try_from(&poly.l).ok()),
             marked: vec![0; slab / 64],
             algebraic_slack: f64::from(params.algebraic_slack),
+            filler: None,
         }
+    }
+
+    /// Has `filler` fill the buckets from now on, as the [`bucket_plans`]
+    /// of this sieve's factor base and parameters describe. The relations
+    /// are the same.
+    pub fn set_filler(&mut self, filler: alloc::boxed::Box<dyn BucketFill>) {
+        let (log_i, log_j) = (self.log_i, self.log_j);
+        self.rational.flatten(0, log_i, log_j);
+        self.algebraic.flatten(1, log_i, log_j);
+        self.filler = Some(filler);
     }
 
     /// `log₂` of the width and height of the region sieved per special-q.
@@ -663,8 +912,10 @@ impl Sieve {
         let width = 1usize << log_i;
         let half = (width / 2) as i64;
         let (u, v) = reduce(q, r, self.poly.skew);
-        self.rational.start(u, v, log_i, log_j);
-        self.algebraic.start(u, v, log_i, log_j);
+        self.rational
+            .start(u, v, log_i, log_j, self.filler.as_deref_mut());
+        self.algebraic
+            .start(u, v, log_i, log_j, self.filler.as_deref_mut());
         let r_slack = self.rational.slack();
         let a_slack = self.algebraic.slack() + log2(q as f64) + self.algebraic_slack;
         let segment = SEGMENT.min(width);

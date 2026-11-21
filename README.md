@@ -125,7 +125,9 @@ they're a job for the native binary.
 GPUs were measured too: [`experiments/gpu-ecm`](experiments/gpu-ecm)
 benchmarks ECM stage 1 on an Apple M4's GPU through Metal. It runs about 3×
 faster than all ten CPU cores, but only with thousands of curves at once,
-more than the pipeline's ECM levels use below 35 digits.
+more than the pipeline's ECM levels use below 35 digits. The command-line
+tool's GNFS sieve does use the GPU, on macOS, for its bucket fill: see
+[the optimizations](docs/optimizations.md#sieving).
 
 ## Layout
 
@@ -164,7 +166,11 @@ splits it.
 `--ecm 30` (or 35, 40) searches for larger factors, at about four times the
 cost per level, `--threads N` sets the number of threads, `--no-qs` skips
 the quadratic sieve, and `--gnfs` uses the number field sieve in its place,
-for composites of 40 digits or more. A factor in parentheses is composite,
+for composites of 40 digits or more. On macOS, from about 80 digits, the
+GPU walks GNFS's larger factor-base primes into the sieve's buckets, which
+finds the same relations 1.2 to 1.5 times as fast; `--no-gpu` leaves it
+all to the CPU, as it is without a GPU, on other systems and in the
+browser. A factor in parentheses is composite,
 but the algorithms that ran couldn't split it. While ECM or the sieve runs,
 a status line on stderr shows how far it has got, and GNFS prints a line
 with the time at each stage.

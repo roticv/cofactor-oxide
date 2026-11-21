@@ -1,7 +1,7 @@
 use cofox_core::Uint;
 use cofox_core::nfs::{
-    CHARACTER_PRIMES, FactorBase, Gnfs, Params, Poly, Relation, Sieve, alpha, degree, modp,
-    parse_poly, special_qs,
+    BucketFill, BucketPlan, CHARACTER_PRIMES, FactorBase, GROUP, Gnfs, Params, Poly, Relation,
+    Sieve, alpha, bucket_plans, degree, modp, parse_poly, special_qs,
 };
 use cofox_core::prime::is_prime;
 use cofox_core::primes::Primes;
@@ -923,4 +923,169 @@ fn split_matrix_factors() {
         .find_map(|dep| relations.try_dependency(&dep))
         .unwrap();
     assert!(n.div_rem(&d).1 == Uint::ZERO && d != Uint::ONE && d != n);
+}
+
+fn pow_mod(mut b: u64, mut e: u64, p: u64) -> u64 {
+    let mut x = 1u64;
+    while e > 0 {
+        if e & 1 == 1 {
+            x = (u128::from(x) * u128::from(b) % u128::from(p)) as u64;
+        }
+        b = (u128::from(b) * u128::from(b) % u128::from(p)) as u64;
+        e >>= 1;
+    }
+    x
+}
+
+/// Fills buckets as [`BucketPlan`] describes them, from that description
+/// alone: optionally each slice's hits in reverse, or failing every time.
+struct PlanFill {
+    plans: [BucketPlan; 2],
+    reverse: bool,
+    fail: bool,
+    fills: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl BucketFill for PlanFill {
+    fn fill(
+        &mut self,
+        side: usize,
+        u: (i64, i64),
+        v: (i64, i64),
+        data: &mut [u32],
+        starts: &mut [u32],
+        marks: &mut [u32],
+    ) -> bool {
+        assert_eq!(data.as_ptr() as usize % 16384, 0);
+        assert_eq!(data.len() % 4096, 0);
+        if self.fail {
+            return false;
+        }
+        self.fills
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let plan = &self.plans[side];
+        let (slabs, slices) = (plan.slabs(), plan.slices as usize);
+        assert_eq!((starts.len(), marks.len()), (slabs + 1, slices * slabs));
+        let w = 1u64 << plan.log_i;
+        let end = 1u64 << (plan.log_i + plan.log_j);
+        let mask = (1u64 << plan.slab_bits) - 1;
+        let mut lists = vec![vec![Vec::new(); slabs]; slices];
+        for &[first, last, s] in &plan.groups {
+            assert!(last - first <= GROUP as u32);
+            for i in first as usize..last as usize {
+                let (p, r) = (u64::from(plan.p[i]), u64::from(plan.r[i]));
+                let m = |x: i64| x.rem_euclid(p as i64) as u64;
+                let at = |(a, b): (i64, i64)| {
+                    if r == p {
+                        m(b)
+                    } else {
+                        (m(a) + (p - m(b)) * r) % p
+                    }
+                };
+                let (alpha, beta) = (at(u), at(v));
+                if alpha == 0 {
+                    continue;
+                }
+                let inv = pow_mod(alpha, p - 2, p);
+                let rho = (p - beta) % p * inv % p;
+                let (mut a, mut ja, mut b, mut jb) = (p, 0u64, rho, 1u64);
+                if rho == 0 {
+                    a = w;
+                } else {
+                    while a >= w && b >= w {
+                        if a >= b {
+                            (ja, a) = (ja + a / b * jb, a % b);
+                        } else {
+                            (jb, b) = (jb + b / a * ja, b % a);
+                        }
+                    }
+                    if a < w {
+                        let k = (a + b - w) / a;
+                        (b, jb) = (b - k * a, jb + k * ja);
+                    } else {
+                        let k = (a + b - w) / b;
+                        (a, ja) = (a - k * b, ja + k * jb);
+                    }
+                    assert!(0 < a && a < w && 0 < b && b < w && a + b >= w);
+                }
+                let (ja, jb) = (ja.min((1 << 31) - 1), jb.min((1 << 31) - 1));
+                let step = |pos: u64| {
+                    let x = pos & (w - 1);
+                    let mut next = pos;
+                    if x >= a || x + b >= w {
+                        next = next.wrapping_add(ja << plan.log_i).wrapping_sub(a);
+                    }
+                    if x < a {
+                        next += (jb << plan.log_i) + b;
+                    }
+                    next
+                };
+                let mut pos = step(w / 2);
+                while pos < end {
+                    lists[s as usize][(pos >> plan.slab_bits) as usize]
+                        .push((pos & mask) as u32 | plan.tag[i]);
+                    pos = step(pos);
+                }
+            }
+        }
+        let mut n = 0;
+        for k in 0..slabs {
+            starts[k] = n as u32;
+            for s in 0..slices {
+                marks[s * slabs + k] = (n - starts[k] as usize) as u32;
+                let mut hits = lists[s][k].clone();
+                if self.reverse {
+                    hits.reverse();
+                }
+                if n + hits.len() > data.len() {
+                    return false;
+                }
+                data[n..n + hits.len()].copy_from_slice(&hits);
+                n += hits.len();
+            }
+        }
+        starts[slabs] = n as u32;
+        true
+    }
+}
+
+/// Buckets filled by a [`BucketFill`], in any order within a slice, give
+/// the sieve's own relations, and so does one that fails.
+#[test]
+fn bucket_fill_matches_sieve() {
+    let n = u("336824692466468372742240828730960315277872725533762205050251");
+    let poly = Poly::select(&n).unwrap();
+    // Slabs of 2^19 in a region of 2^21, and primes up to 1.5M past them.
+    let params = Params {
+        rational_bound: 1_500_000,
+        algebraic_bound: 1_500_000,
+        log_i: 11,
+        ..Params::for_bits(n.bits())
+    };
+    let fb = FactorBase::new(&poly, params.rational_bound, params.algebraic_bound, 0);
+    let qs: Vec<_> = special_qs(&poly, 2_000_000, 2_000_200)
+        .into_iter()
+        .take(4)
+        .collect();
+    let mut sieve = Sieve::new(&poly, &fb, &params);
+    let want: Vec<Vec<Relation>> = qs.iter().map(|&(q, r)| sieve.special_q(q, r)).collect();
+    assert!(want.iter().map(Vec::len).sum::<usize>() > 0);
+    for (reverse, fail) in [(false, false), (true, false), (false, true)] {
+        let plans = bucket_plans(&fb, &params);
+        assert_eq!(plans[0].slabs(), 4);
+        assert!(plans.iter().all(|p| p.p.len() > 10_000));
+        let fills = std::sync::Arc::default();
+        let mut sieve = Sieve::new(&poly, &fb, &params);
+        let filler = PlanFill {
+            plans,
+            reverse,
+            fail,
+            fills: std::sync::Arc::clone(&fills),
+        };
+        sieve.set_filler(Box::new(filler));
+        let got: Vec<Vec<Relation>> = qs.iter().map(|&(q, r)| sieve.special_q(q, r)).collect();
+        assert_eq!(got, want, "reverse {reverse} fail {fail}");
+        let filled = fills.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(filled, if fail { 0 } else { 2 * qs.len() });
+    }
 }
